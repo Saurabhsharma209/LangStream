@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  langstream:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: langstream:local
+    container_name: langstream
+    ports:
+      # Reserved for the future HTTP API (health checks, /metrics endpoint,
+      # session control plane). Not yet served by cmd/langstream in Week 1.
+      - "8080:8080"
+    environment:
+      # --- Week 2+ vendor API keys -----------------------------------
+      # Not read or used by anything yet (mock ASR/MT/TTS backends only
+      # in Week 1). Set these via a local .env file (gitignored) once the
+      # real vendor integrations land so no secrets are committed here.
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - SARVAM_API_KEY=${SARVAM_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - CARTESIA_API_KEY=${CARTESIA_API_KEY:-}
+    restart: unless-stopped

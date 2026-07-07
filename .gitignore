@@ -1,0 +1,19 @@
+# Build artifacts
+/bin/
+langstream
+*.exe
+
+# Go
+*.test
+*.out
+
+# Stray zero-byte temp files left behind by gofmt -w on some sandboxed/
+# bindfs-mounted filesystems (rename-based atomic write falls back to a
+# temp file the OS won't let us unlink there). Harmless - never matched by
+# the Go toolchain since they don't end in exactly ".go" - but keep them
+# out of git.
+*.go.[0-9]*
+
+# OS/editor cruft
+.DS_Store
+*.swp
