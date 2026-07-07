@@ -48,12 +48,14 @@ each package was individually correct; the composition wasn't.
   exists and works, which is the Week 1 goal)
 
 ### Blocked
-- No GitHub credentials configured in this environment yet — repo is
-  committed locally (`main` branch) but not yet pushed to
-  github.com/Saurabhsharma209/LangStream. Needs a PAT with `repo` scope
-  from Saurabh, or the repo pushed from a machine that already has access.
 - No real vendor API keys yet (Deepgram/Sarvam/OpenAI/Cartesia) — Week 2
   blocker, tracked in ROADMAP.md, not urgent today.
+
+### Ops note
+- Pushed to github.com/Saurabhsharma209/LangStream (main) using a PAT
+  from Saurabh. A recurring 9am daily scheduled task (`langstream-daily-build`)
+  now runs this same PE/Tech/SRE/QA loop automatically, compressing ~3
+  roadmap-days per run, and pushes at the end of each run.
 
 ### Tomorrow (Sprint 2, Roadmap Days 4-6)
 1. Push Sprint 1 to GitHub once credentials are available; wire CI to actually run
