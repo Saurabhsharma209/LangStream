@@ -1,5 +1,49 @@
 # LangStream Dev Log
 
+## 2026-07-07 — Week 1 verification + a second Day-1 bug
+
+Saurabh asked to confirm Week 1 was fully executed. Ran a fresh `git clone`
+of the pushed repo (not the working copy) to verify what actually landed on
+GitHub, since a clean clone is the only way to catch "works locally, broke
+on push" issues.
+
+**Bug found: `.gitignore` silently dropped two whole packages.** The
+original `.gitignore` had a bare `langstream` pattern intended to ignore the
+compiled binary (`go build ./cmd/langstream` drops a `langstream` binary in
+the repo root). Git's gitignore semantics match an unanchored pattern like
+that against *any* file or directory of that name at *any* depth - so it
+also matched, and silently excluded, `pkg/langstream/` and `cmd/langstream/`
+themselves. Net effect: the first two pushes (Sprint 1 + the DEVLOG-only
+follow-up commit) never contained the orchestrator package at all, and
+GitHub Actions CI failed on both runs as a result (`go build ./...` on a
+clean checkout correctly failed with "no required module provides package
+.../pkg/langstream").
+
+This is the same class of problem as the Session.Close() bug from Sprint 1:
+it was invisible locally (the working copy still had the files on disk;
+`git status --ignored` would have shown it, but nothing forced that check)
+and only surfaces when you verify from a clean external checkout instead of
+trusting the working directory.
+
+**Fix:** anchored the pattern to the repo root (`/langstream` instead of
+`langstream`), force-added the two packages, verified `go build ./... && go
+vet ./... && go test ./... -race && gofmt -l .` clean from a fresh clone,
+committed, and pushed. GitHub Actions CI should go green on this commit -
+worth a manual check on the Actions tab to confirm, since this is exactly
+the kind of thing that should be caught by CI but wasn't (CI itself was one
+of the things silently dropped).
+
+**Process fix for future sprints:** the daily scheduled task already clones
+fresh each run (rather than reusing a working copy), which would have
+caught this automatically going forward - this bug was specific to the
+first manual push in this session.
+
+**Week 1 (ROADMAP.md) is now confirmed complete and verified from a clean
+clone:** stable ASR/MT/TTS interfaces, deterministic mocks, the duplex
+session orchestrator with VAD and persona management, CI, latency
+instrumentation, and a cross-workstream integration test suite - all built,
+tested, and now actually present on `main`.
+
 ## 2026-07-07 — Sprint 1 (Roadmap Days 1-3, Week 1 foundations)
 
 **Agents run:** PM+EM (orchestrator), PE, Tech, SRE, QA

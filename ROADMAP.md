@@ -24,18 +24,25 @@ Start date: 2026-07-07.
 
 - [x] Repo scaffold, `go.mod`, workstream ownership map
 - [x] Stable interfaces: `asr.Recognizer`, `translate.Translator`, `tts.Synthesizer`
-- [ ] Mock backends for all three (deterministic, no API keys needed) so
+- [x] Mock backends for all three (deterministic, no API keys needed) so
       the orchestrator is testable end-to-end before any vendor is wired in
-- [ ] `pkg/langstream/session.go` — duplex orchestrator skeleton (caller
+- [x] `pkg/langstream/session.go` — duplex orchestrator skeleton (caller
       leg + agent leg, each running ASR→MT→TTS independently)
-- [ ] `pkg/langstream/vad.go` — chunk-boundary detection (reuse ClearStream's
+- [x] `pkg/langstream/vad.go` — chunk-boundary detection (reuse ClearStream's
       VAD approach)
-- [ ] CI: `go build` + `go test` on every push
-- [ ] Latency instrumentation stub (Prometheus counters per stage) —
+- [x] CI: `go build` + `go test` on every push
+- [x] Latency instrumentation stub (Prometheus-text-compatible export) —
       wired to mocks first so the measurement path exists before it matters
-- [ ] End-to-end mock test: fake caller audio in, fake translated audio out,
+- [x] End-to-end mock test: fake caller audio in, fake translated audio out,
       full session lifecycle, asserting latency budget is *measured*
       (not yet met — mocks don't reflect real vendor latency)
+
+**Week 1 status: complete** (2026-07-07, Sprint 1). All items shipped, tested
+(`go build`/`vet`/`test -race` clean, `gofmt` clean), and pushed. One real
+bug was found by QA's integration test and fixed same day — see DEVLOG.md.
+A second bug (a `.gitignore` pattern that silently excluded `pkg/langstream/`
+and `cmd/langstream/` from the first push, breaking CI) was caught via a
+fresh-clone verification and fixed the same day — see DEVLOG.md.
 
 ## Week 2 — Real Pipeline (Roadmap Days 6-10, target: ~Jul 9-10)
 

@@ -1,6 +1,12 @@
 # Build artifacts
+# NOTE: this must be anchored to the repo root (leading slash) - a bare
+# "langstream" pattern matches *any* file or directory named "langstream"
+# at any depth in Git's gitignore semantics, which silently swallowed the
+# entire pkg/langstream/ and cmd/langstream/ packages on the first push
+# (2026-07-07). Anchoring to root fixes that while still ignoring the
+# compiled binary `go build ./cmd/langstream` drops in the repo root.
 /bin/
-langstream
+/langstream
 *.exe
 
 # Go
