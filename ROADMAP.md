@@ -52,7 +52,11 @@ fresh-clone verification and fixed the same day — see DEVLOG.md.
 - [ ] Cartesia streaming TTS, both languages; basic persona config
 - [ ] Wire real backends behind the Week 1 interfaces (swap, don't rewrite)
 - [ ] Extend ClearStream's `pkg/rtp` session for bidirectional media —
-      this is the highest-risk item; budget extra time here
+      this is the highest-risk item; budget extra time here. **Coordination
+      checkpoint** (see `COMBINED_ROADMAP.md`): check ClearStream's latest
+      tag first; if `pkg/rtp` needs an actual code change to support
+      duplex use (not just importing it as-is), stop and report to
+      Saurabh rather than pushing to the ClearStream repo unilaterally
 - [ ] First real Hindi↔English round-trip on recorded test audio (not
       live calls yet), measure actual glass-to-glass latency
 

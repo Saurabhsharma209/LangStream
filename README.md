@@ -8,11 +8,15 @@
 > stage more accurate, so LangStream is designed to sit right after it in
 > the pipeline.
 
-**Status: Week 1 of a 1-month pilot build.** This is not a GA product. See
-[`ROADMAP.md`](ROADMAP.md) for the honest scope of what "done" means this
-month (one language pair, engineer-monitored pilot with 1-2 anchor
-customers) versus what real GA requires later (multi-language, multi-tenant,
-DPDP-compliant data residency, SLA — a separate, longer track).
+**Status: Week 1 of a 1-month pilot build, `v0.1.0-alpha`.** This is not a
+GA product. See [`ROADMAP.md`](ROADMAP.md) for the honest scope of what
+"done" means this month (one language pair, engineer-monitored pilot with
+1-2 anchor customers) versus what real GA requires later (multi-language,
+multi-tenant, DPDP-compliant data residency, SLA — a separate, longer
+track). See [`COMBINED_ROADMAP.md`](COMBINED_ROADMAP.md) for how this
+project's timeline relates to ClearStream's, and
+[`VERSIONING.md`](VERSIONING.md) for the SemVer policy and version
+compatibility matrix between the two repos.
 
 ---
 
