@@ -46,6 +46,19 @@ fresh-clone verification and fixed the same day — see DEVLOG.md.
 
 ## Week 2 — Real Pipeline (Roadmap Days 6-10, target: ~Jul 9-10)
 
+**Decision (2026-07-07):** no vendor API keys (Deepgram/Sarvam/OpenAI/
+Cartesia) exist yet, and Saurabh has chosen to proceed without waiting for
+them. This means: PE writes real, complete vendor client code (correct
+request/response shapes, streaming/chunking logic, error handling) behind
+the Week 1 interfaces, and QA tests it against fake/mock HTTP or WebSocket
+servers standing in for each vendor — not against the mock backends from
+Week 1 (those stay as-is for orchestrator-level tests), but not against a
+live vendor either. Live end-to-end testing with real keys is deferred
+until keys are available; when that happens, the fake-server tests should
+still pass unchanged (proving the client code itself was correct) and only
+a real-network smoke test needs to be added on top. Missing keys is not a
+blocker for this week's checklist items below — do not report it as one.
+
 - [ ] Deepgram streaming ASR (English) + Sarvam streaming ASR (Hindi,
       code-switching aware)
 - [ ] GPT-4o streaming translation, Hindi↔English
