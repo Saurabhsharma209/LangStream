@@ -106,3 +106,94 @@ each package was individually correct; the composition wasn't.
 2. Start Week 2: real Deepgram (English) + Sarvam (Hindi) streaming ASR behind `pkg/asr`
 3. Real GPT-4o streaming translation behind `pkg/translate`
 4. Begin the duplex RTP extension of ClearStream's `pkg/rtp.Session` (highest-risk item — start early)
+
+## 2026-07-08 — Sprint 2 (Roadmap Days 6-8, Week 2 real pipeline)
+
+**Agents run:** EM (orchestrator) + PE-ASR, PE-Translate, PE-TTS, Tech (parallel batch 1), then QA (batch 2, after PE/Tech landed)
+**Build:** ✅ passing (`go build ./...`, `go vet ./...`, `go test ./... -race -count=3`, `gofmt -l .` all clean)
+
+### Changes
+- `pkg/asr/deepgram.go`, `pkg/asr/sarvam.go`, `pkg/asr/backoff.go` — real streaming ASR
+  clients for Deepgram (English) and Sarvam (Hindi, code-switching aware via `mode=codemix`),
+  protocol verified against vendor docs via web search, `WithBaseURL` for testability,
+  exponential-backoff reconnect logic (PE-ASR)
+- `pkg/translate/gpt4o.go` — real GPT-4o streaming (SSE) translation client, Hindi↔English,
+  Hinglish-aware system prompt, `WithBaseURL`/`WithAPIKey`/`WithModel` options (PE-Translate)
+- `pkg/tts/cartesia.go`, `pkg/tts/cartesia_ws.go`, `pkg/tts/cartesia_voices.go` — real
+  Cartesia streaming TTS client (hand-rolled stdlib WebSocket client, since `go.mod` had zero
+  deps and adding one was outside this agent's file ownership), persona→voice mapping
+  compatible with `pkg/langstream/personas.go`'s `"default-"+lang` convention (PE-TTS)
+- `pkg/langstream/backends.go` — name-based backend registry (`RegisterASRBackend`,
+  `NewASRBackend("deepgram")`, etc.) so real/mock backends are selected by name without the
+  CLI needing to import vendor constructors directly; `cmd/langstream/main.go` got a
+  `--backend` flag + `LANGSTREAM_{ASR,MT,TTS}_BACKEND` env vars (Tech)
+- EM wired the four real vendor constructors into the registry post-hoc (`cmd/langstream/main.go`
+  `init()`) once their exact names were known, and verified `langstream demo --backend deepgram`
+  fails cleanly with a "DEEPGRAM_API_KEY not set" error (no panic) with no key present, and that
+  env-var-only leg overrides (`LANGSTREAM_MT_BACKEND=gpt4o langstream demo`) resolve correctly
+- `integration_vendor_test.go` — fake-server Hindi→English round-trip test wiring real
+  Sarvam/GPT-4o/Cartesia clients into a real `langstream.Session`, plus two adversarial tests
+  (ASR fatal error mid-stream, malformed TTS frame) proving the orchestrator degrades instead
+  of hanging or panicking (QA)
+- `tools/latency_benchmark` — additive `-vendor-fake` flag to measure round-trip latency
+  against fake-server-backed real clients instead of only Week 1 mocks (QA)
+- `go.mod`/`go.sum` — added `github.com/gorilla/websocket` (Deepgram/Sarvam client + test fakes)
+
+### Bug found and fixed (PE-ASR, same-day)
+Both `deepgram.go` and `sarvam.go` initially deadlocked on a fatal vendor error frame:
+`failAndClose` was called synchronously from inside the `readLoop` goroutine and then called
+`workerWG.Wait()`, which waited on that same goroutine's own `Done()` — never arriving. Fixed
+by moving the wait-and-close teardown into a separate goroutine. Caught by PE-ASR's own
+vendor-error-frame test under `-race`, confirmed with 10x re-runs.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...` clean
+- `go test ./... -race -count=3` — all packages pass, no flakes
+- `gofmt -l .` — clean
+- Manual CLI smoke test: `langstream demo --backend mock` (works end-to-end),
+  `langstream demo --backend deepgram` with no API key (fails with a clear, non-panicking
+  error), `LANGSTREAM_MT_BACKEND=gpt4o langstream demo` (per-leg env override resolves
+  correctly)
+- QA's fake-server Hindi→English round trip passes; adversarial ASR-error and malformed-TTS
+  tests both confirm bounded, non-hanging degradation
+
+### ClearStream coordination checkpoint (duplex RTP) — needs Saurabh's input
+Checked ClearStream's latest tag before starting (`git ls-remote --tags` → still `v0.1.0`, no
+new release since 2026-07-07) and read its `pkg/rtp/session.go` and `pkg/rtp/playback.go` in
+full. Finding: ClearStream's `rtp.Session` is a single-leg, network-to-network audio
+pass-through (UDP in → jitter buffer → noise-suppression pipeline → UDP out), not a
+PCM-in/PCM-out library call. It does export `InjectBotAudio(pcm16 []byte) bool` — a queue-based
+hook for injecting synthesized audio into the *outbound* RTP stream — which would actually cover
+LangStream's TTS→agent direction as-is, no ClearStream change needed there. But there is **no
+exported hook for the reverse direction**: the caller's decoded, noise-suppressed PCM is
+consumed entirely inside `handlePacket` and re-encoded straight back to RTP; nothing in the
+public API surfaces it for an external consumer like LangStream's ASR leg to read.
+
+**This means duplex RTP is not a clean `go.mod`-only import** — the ASR-in direction needs an
+actual (small, additive) ClearStream code change, e.g. an optional
+`Config.OnCleanAudio func([]int16, sampleRate int)` callback fired alongside the existing
+forward-to-UDP path. Per the standing cross-repo rule, that change was NOT attempted this run —
+no ClearStream files were touched, no ClearStream commit was made. This is flagged for Saurabh
+as a real decision point, not something the automation resolved unilaterally: does he want to
+(a) scope and review a ClearStream PR adding that callback, (b) have LangStream duplicate a
+lightweight RTP receive path of its own instead of extending ClearStream's, or (c) defer duplex
+RTP and pursue Week 3/4 items first with ClearStream feeding audio in some other way (e.g. a
+recording/webhook path) for the pilot's initial cut. `pkg/rtp/doc.go`'s Week 2 plan already
+anticipated needing to "compose two ClearStream-style single-leg Session instances" — that
+composition is fine for the TTS-out leg but not sufficient for the ASR-in leg without the above.
+
+### Blocked
+- Still no real vendor API keys (Deepgram/Sarvam/OpenAI/Cartesia) — expected per the Week 2
+  decision, not a new blocker. Fake-server tests prove the client code is correct; a real-key
+  smoke test is the only thing left once keys exist.
+- Duplex RTP (see coordination checkpoint above) — blocked on Saurabh's decision, not on agent
+  capacity.
+
+### Tomorrow (Sprint 3, Roadmap Days 9-10 pending Saurabh's RTP decision)
+1. Get a decision from Saurabh on the ClearStream `OnCleanAudio`-style callback (or the
+   alternative approaches above) so duplex RTP can be scoped
+2. If vendor API keys become available, add real-network smoke tests on top of the existing
+   fake-server tests (client code itself should not need to change)
+3. Start Week 3 hardening items that don't depend on the RTP decision: jitter buffer tuning
+   groundwork, fallback/degrade-gracefully behavior design, `docs/compliance.md` DPDP
+   assessment skeleton

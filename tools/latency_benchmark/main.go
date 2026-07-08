@@ -30,6 +30,16 @@
 //     and "session_close_ms" are unaffected by that bug and do report
 //     real (if mock-cheap) numbers today, which at least proves the
 //     LatencyRecorder/percentile machinery works end-to-end.
+//
+// -vendor-fake (added Week 2, additive - the default/mock path above is
+// unchanged): swaps the Week 1 mocks for the real Sarvam/GPT-4o/Cartesia
+// vendor client code (pkg/asr, pkg/translate, pkg/tts) pointed at
+// in-process fake servers (see vendor_fake.go), so the numbers this tool
+// prints become a fake-server round-trip latency proxy - real client-side
+// marshaling, WebSocket/HTTP framing, and goroutine plumbing, just no
+// actual network hop to a vendor - instead of a pure in-memory-mock
+// number. This is strictly additive: without the flag, behavior and
+// output are identical to before.
 package main
 
 import (
@@ -53,13 +63,52 @@ func main() {
 	callerLang := flag.String("caller-lang", "hi", "caller leg language (must be supported by both the ASR and translate mocks; hi/en is the pilot's only supported pair per ROADMAP.md)")
 	agentLang := flag.String("agent-lang", "en", "agent leg language")
 	verbose := flag.Bool("verbose", false, "print a line per iteration instead of just the final summary")
+	vendorFake := flag.Bool("vendor-fake", false, "measure against the real Sarvam/GPT-4o/Cartesia vendor client code pointed at in-process fake servers, instead of the default in-memory mocks (see vendor_fake.go); requires --caller-lang=hi --agent-lang=en (the only pair the fake servers below script a response for)")
 	flag.Parse()
 
 	rec := observability.NewLatencyRecorder()
 
+	var fakeServers *fakeVendorServers
+	var vendorASR asr.Recognizer
+	var vendorMT translate.Translator
+	var vendorTTS tts.Synthesizer
+	if *vendorFake {
+		if langstream.Language(*callerLang) != "hi" || langstream.Language(*agentLang) != "en" {
+			fmt.Fprintln(os.Stderr, "-vendor-fake requires --caller-lang=hi --agent-lang=en")
+			os.Exit(1)
+		}
+		setFakeVendorAPIKeys()
+		fakeServers = startFakeVendorServers()
+		defer fakeServers.Close()
+
+		var err error
+		vendorASR, err = asr.NewSarvamRecognizer(asr.WithSarvamBaseURL(fakeServers.SarvamWSURL))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "vendor-fake: building Sarvam recognizer:", err)
+			os.Exit(1)
+		}
+		vendorMT, err = translate.NewGPT4oTranslator(translate.WithBaseURL(fakeServers.GPT4oHTTPURL), translate.WithAPIKey("fake-benchmark-key"))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "vendor-fake: building GPT-4o translator:", err)
+			os.Exit(1)
+		}
+		vendorTTS, err = tts.NewCartesiaSynthesizer(tts.WithBaseURL(fakeServers.CartesiaWSURL))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "vendor-fake: building Cartesia synthesizer:", err)
+			os.Exit(1)
+		}
+		fmt.Println("latency_benchmark: -vendor-fake enabled - measuring real Sarvam/GPT-4o/Cartesia client code against in-process fake servers, not the Week 1 mocks")
+	}
+
 	var hits, misses, setupErrs int
 	for i := 0; i < *iterations; i++ {
-		outcome, err := runIteration(rec, langstream.Language(*callerLang), langstream.Language(*agentLang), *pcmBytes, *iterationTimeout)
+		var outcome bool
+		var err error
+		if *vendorFake {
+			outcome, err = runIterationWithBackends(rec, vendorASR, vendorMT, vendorTTS, langstream.Language(*callerLang), langstream.Language(*agentLang), *pcmBytes, *iterationTimeout)
+		} else {
+			outcome, err = runIteration(rec, langstream.Language(*callerLang), langstream.Language(*agentLang), *pcmBytes, *iterationTimeout)
+		}
 		switch {
 		case err != nil:
 			setupErrs++
@@ -80,6 +129,54 @@ func main() {
 	}
 
 	printReport(rec, *iterations, hits, misses, setupErrs)
+}
+
+// runIterationWithBackends mirrors runIteration exactly, except the
+// asr.Recognizer/translate.Translator/tts.Synthesizer are passed in
+// (shared across iterations) rather than constructed fresh from PE's
+// mocks each time - used by -vendor-fake mode, where each backend already
+// exists (pointed at a long-lived fake server) and a real Recognizer's
+// StartStream is what opens a fresh connection per iteration, not the
+// Recognizer construction itself.
+func runIterationWithBackends(rec *observability.LatencyRecorder, asrBackend asr.Recognizer, mt translate.Translator, synth tts.Synthesizer, callerLang, agentLang langstream.Language, pcmBytes int, timeout time.Duration) (hit bool, err error) {
+	ctx := context.Background()
+
+	cfg := langstream.SessionConfig{
+		CallerLanguage: callerLang,
+		AgentLanguage:  agentLang,
+		ASR:            asrBackend,
+		Translator:     mt,
+		TTS:            synth,
+	}
+
+	setupStart := time.Now()
+	sess, err := langstream.NewSession(ctx, cfg)
+	rec.Record("session_setup_ms", msSince(setupStart))
+	if err != nil {
+		return false, fmt.Errorf("NewSession: %w", err)
+	}
+	defer func() {
+		closeStart := time.Now()
+		_ = sess.Close()
+		rec.Record("session_close_ms", msSince(closeStart))
+	}()
+
+	frame := asr.AudioFrame{PCM: make([]byte, pcmBytes), SampleRate: 16000}
+	pushStart := time.Now()
+	if err := sess.PushCallerAudio(frame); err != nil {
+		return false, fmt.Errorf("PushCallerAudio: %w", err)
+	}
+
+	select {
+	case _, ok := <-sess.AgentHearsAudio():
+		if !ok {
+			return false, nil
+		}
+		rec.Record("glass_to_glass_ms", msSince(pushStart))
+		return true, nil
+	case <-time.After(timeout):
+		return false, nil
+	}
 }
 
 // runIteration simulates one short call: build a Session, push one

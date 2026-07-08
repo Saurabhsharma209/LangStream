@@ -59,19 +59,41 @@ still pass unchanged (proving the client code itself was correct) and only
 a real-network smoke test needs to be added on top. Missing keys is not a
 blocker for this week's checklist items below — do not report it as one.
 
-- [ ] Deepgram streaming ASR (English) + Sarvam streaming ASR (Hindi,
+- [x] Deepgram streaming ASR (English) + Sarvam streaming ASR (Hindi,
       code-switching aware)
-- [ ] GPT-4o streaming translation, Hindi↔English
-- [ ] Cartesia streaming TTS, both languages; basic persona config
-- [ ] Wire real backends behind the Week 1 interfaces (swap, don't rewrite)
+- [x] GPT-4o streaming translation, Hindi↔English
+- [x] Cartesia streaming TTS, both languages; basic persona config
+- [x] Wire real backends behind the Week 1 interfaces (swap, don't rewrite)
 - [ ] Extend ClearStream's `pkg/rtp` session for bidirectional media —
       this is the highest-risk item; budget extra time here. **Coordination
       checkpoint** (see `COMBINED_ROADMAP.md`): check ClearStream's latest
       tag first; if `pkg/rtp` needs an actual code change to support
       duplex use (not just importing it as-is), stop and report to
-      Saurabh rather than pushing to the ClearStream repo unilaterally
-- [ ] First real Hindi↔English round-trip on recorded test audio (not
-      live calls yet), measure actual glass-to-glass latency
+      Saurabh rather than pushing to the ClearStream repo unilaterally.
+      **Status (2026-07-08): checked, blocked, needs Saurabh's input — see
+      DEVLOG.md.** ClearStream is still at `v0.1.0` (no new tag). Its
+      `pkg/rtp.Session` is a single-leg, network-to-network design (UDP in
+      → denoise → UDP out) with an exported `InjectBotAudio([]byte) bool`
+      hook that *would* cover LangStream's TTS-out direction as-is, but
+      there is no exported hook to read the decoded/cleaned PCM for the
+      caller→ASR direction — that audio never leaves `handlePacket`
+      today. A real (small, additive) ClearStream code change — e.g. an
+      optional `Config.OnCleanAudio func([]int16)` callback — is needed
+      for the ASR-in direction. Not attempted this run per the standing
+      cross-repo rule; not started until Saurabh decides how to proceed.
+- [x] First real Hindi↔English round-trip on recorded test audio (not
+      live calls yet), measure actual glass-to-glass latency — done
+      against fake local vendor servers (Deepgram/Sarvam/GPT-4o/Cartesia
+      protocol-accurate fakes), per the Week 2 decision above; live-key
+      version deferred until real vendor keys exist.
+
+**Week 2 status (2026-07-08, Sprint 2): 5 of 6 items complete.** Real,
+protocol-accurate vendor client code for ASR/MT/TTS is written, tested
+against fake vendor servers, and wired behind the Week 1 interfaces via a
+name-based backend registry (`pkg/langstream/backends.go`,
+`langstream demo --backend deepgram|sarvam|gpt4o|cartesia|mock`). The one
+remaining item (duplex RTP) is a genuine decision point for Saurabh, not a
+scheduling slip — see DEVLOG.md 2026-07-08 for the full writeup.
 
 ## Week 3 — Pilot Hardening (Roadmap Days 11-15, target: ~Jul 11-13)
 

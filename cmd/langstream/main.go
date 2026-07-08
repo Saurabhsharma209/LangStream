@@ -1,20 +1,27 @@
 // Command langstream is LangStream's CLI entrypoint.
 //
-// Week 1 scope is intentionally small: a version subcommand, and a demo
-// subcommand that exercises the duplex Session orchestrator end-to-end
-// against minimal, local, in-process implementations of the asr.Recognizer,
-// translate.Translator, and tts.Synthesizer interfaces. The demo does not
-// depend on pkg/asr/mock.go, pkg/translate/mock.go, or pkg/tts/mock.go
-// (owned by the PE workstream) so this command builds and runs regardless
-// of the state of those files.
+// Week 1 shipped a version subcommand and a demo subcommand that exercised
+// the duplex Session orchestrator end-to-end against local, in-process stub
+// implementations of the asr.Recognizer, translate.Translator, and
+// tts.Synthesizer interfaces (so the demo didn't depend on the PE
+// workstream's pkg/asr/mock.go, pkg/translate/mock.go, pkg/tts/mock.go
+// while those were still under active development).
+//
+// Week 2: those mock backends are stable, and the demo now selects its
+// ASR/MT/TTS backends by name through pkg/langstream's backend registry
+// (see pkg/langstream/backends.go) via the --backend flag or the
+// LANGSTREAM_ASR_BACKEND / LANGSTREAM_MT_BACKEND / LANGSTREAM_TTS_BACKEND
+// environment variables, defaulting to "mock" for all three. This is the
+// seam real vendor backends (Deepgram/Sarvam, GPT-4o, Cartesia) will be
+// selected through once they're registered - no code changes needed here,
+// just `langstream demo --backend deepgram` (once that name is registered).
 package main
 
 import (
 	"context"
-	"encoding/binary"
+	"flag"
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/exotel/langstream/pkg/asr"
@@ -24,6 +31,45 @@ import (
 )
 
 const version = "langstream v0.1.0 (pilot)"
+
+// Environment variable names used to select a backend for one pipeline leg
+// independently. The --backend flag to `langstream demo` sets all three at
+// once (the common case: run entirely on mocks, or entirely on real
+// vendors); these env vars let a leg be overridden individually (e.g. a
+// real ASR backend paired with still-mock MT/TTS) without a --backend
+// value for every permutation. Precedence is flag > env var > "mock",
+// resolved per leg by resolveBackend.
+const (
+	envASRBackend = "LANGSTREAM_ASR_BACKEND"
+	envMTBackend  = "LANGSTREAM_MT_BACKEND"
+	envTTSBackend = "LANGSTREAM_TTS_BACKEND"
+)
+
+// init registers the real vendor backends (Deepgram/Sarvam for ASR, GPT-4o
+// for MT, Cartesia for TTS) alongside the always-available "mock" backend
+// registered by pkg/langstream itself. Registration is unconditional -- it
+// does not check whether the corresponding API key env var is set -- so
+// `--backend deepgram` always appears in `langstream help`'s available-backends
+// list; the constructor itself returns a clear "DEEPGRAM_API_KEY is not set"
+// error at selection time if the key is missing, which is a better failure
+// mode than silently hiding the option. No live vendor API keys exist in
+// this environment yet (see ROADMAP.md Week 2 decision, 2026-07-07), so
+// these paths are exercised in CI only via fake local servers (see each
+// vendor package's _test.go), not against the real vendor endpoints.
+func init() {
+	langstream.RegisterASRBackend("deepgram", func() (asr.Recognizer, error) {
+		return asr.NewDeepgramRecognizer()
+	})
+	langstream.RegisterASRBackend("sarvam", func() (asr.Recognizer, error) {
+		return asr.NewSarvamRecognizer()
+	})
+	langstream.RegisterTranslatorBackend("gpt4o", func() (translate.Translator, error) {
+		return translate.NewGPT4oTranslator()
+	})
+	langstream.RegisterTTSBackend("cartesia", func() (tts.Synthesizer, error) {
+		return tts.NewCartesiaSynthesizer()
+	})
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -35,7 +81,7 @@ func main() {
 	case "version":
 		fmt.Println(version)
 	case "demo":
-		if err := runDemo(); err != nil {
+		if err := runDemo(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "demo failed:", err)
 			os.Exit(1)
 		}
@@ -50,39 +96,103 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: langstream <version|demo|help>")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "demo [--backend NAME]")
+	fmt.Fprintln(os.Stderr, "    Run a one-shot duplex-session demo against the named backend for")
+	fmt.Fprintln(os.Stderr, "    ASR, MT, and TTS alike (default \"mock\"). Override per leg with the")
+	fmt.Fprintf(os.Stderr, "    %s / %s / %s env vars.\n", envASRBackend, envMTBackend, envTTSBackend)
+	fmt.Fprintf(os.Stderr, "    available backends: asr=%v mt=%v tts=%v\n",
+		langstream.AvailableASRBackends(),
+		langstream.AvailableTranslatorBackends(),
+		langstream.AvailableTTSBackends())
 }
 
-// runDemo wires a langstream.Session up with local stub ASR/Translator/TTS
-// implementations, pushes one frame of "caller audio", and prints the
-// synthesized audio the agent leg produces in response - a minimal,
-// dependency-free proof that the duplex orchestrator wiring works.
-func runDemo() error {
+// resolveBackend resolves the backend name for one pipeline leg.
+// Precedence: flagValue (if non-empty, i.e. --backend was passed) > the
+// named environment variable (if set) > langstream.BackendMock.
+func resolveBackend(flagValue, envVar string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if v := os.Getenv(envVar); v != "" {
+		return v
+	}
+	return langstream.BackendMock
+}
+
+// runDemo wires a langstream.Session up with backends selected by name via
+// the --backend flag / LANGSTREAM_*_BACKEND env vars (see resolveBackend),
+// looked up in pkg/langstream's backend registry, pushes one frame of
+// "caller audio", and prints the synthesized audio the agent leg produces
+// in response - a minimal, dependency-free proof that both the duplex
+// orchestrator wiring and the backend-selection registry work end to end.
+//
+// The pushed frame is deliberately small enough that the mock ASR backend
+// only buffers it rather than emitting a transcript immediately (see
+// asr.MockRecognizer); Close() is what flushes it as a final transcript
+// (exactly the "caller hangs up mid-utterance" path Session.Close is
+// documented against), so the demo closes the session before reading the
+// resulting synthesized audio off the now-closed-but-still-buffered
+// channel.
+func runDemo(args []string) error {
+	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
+	backend := fs.String("backend", "", `backend name for ASR, MT, and TTS alike (default "mock")`)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	asrName := resolveBackend(*backend, envASRBackend)
+	mtName := resolveBackend(*backend, envMTBackend)
+	ttsName := resolveBackend(*backend, envTTSBackend)
+
+	fmt.Printf("langstream demo: backends asr=%s mt=%s tts=%s\n", asrName, mtName, ttsName)
+
+	rec, err := langstream.NewASRBackend(asrName)
+	if err != nil {
+		return fmt.Errorf("selecting ASR backend: %w", err)
+	}
+	tr, err := langstream.NewTranslatorBackend(mtName)
+	if err != nil {
+		return fmt.Errorf("selecting MT backend: %w", err)
+	}
+	syn, err := langstream.NewTTSBackend(ttsName)
+	if err != nil {
+		return fmt.Errorf("selecting TTS backend: %w", err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	cfg := langstream.SessionConfig{
 		CallerLanguage: "hi",
 		AgentLanguage:  "en",
-		ASR:            newStubRecognizer(),
-		Translator:     newStubTranslator(),
-		TTS:            newStubSynthesizer(),
+		ASR:            rec,
+		Translator:     tr,
+		TTS:            syn,
 	}
 
 	sess, err := langstream.NewSession(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("creating session: %w", err)
 	}
-	defer sess.Close()
 
-	// One frame is enough: stubRecognizer emits a final transcript on
-	// every PushAudio call.
 	frame := asr.AudioFrame{
 		PCM:         make([]byte, 320), // 20ms @ 8kHz, 16-bit mono, silence-shaped
 		SampleRate:  8000,
 		TimestampMS: 0,
 	}
 	if err := sess.PushCallerAudio(frame); err != nil {
+		_ = sess.Close()
 		return fmt.Errorf("pushing caller audio: %w", err)
+	}
+
+	// Close flushes the buffered frame as a final transcript and blocks
+	// until the caller leg has translated and synthesized it (bounded by
+	// Session's own internal flush timeout), so the resulting chunk is
+	// guaranteed to already be sitting in the buffered AgentHearsAudio
+	// channel by the time Close returns.
+	if err := sess.Close(); err != nil {
+		return fmt.Errorf("closing session: %w", err)
 	}
 
 	select {
@@ -92,139 +202,9 @@ func runDemo() error {
 		}
 		fmt.Printf("agent hears %d bytes of synthesized audio @ %dHz (final=%v)\n",
 			len(chunk.PCM), chunk.SampleRate, chunk.IsFinal)
-	case <-ctx.Done():
-		return fmt.Errorf("timed out waiting for translated audio: %w", ctx.Err())
-	}
-
-	return nil
-}
-
-// --- Minimal local stub implementations, demo-only. ---
-//
-// These exist solely so `langstream demo` has something concrete to wire
-// up without depending on pkg/asr/mock.go, pkg/translate/mock.go, or
-// pkg/tts/mock.go (owned by the PE workstream, which may still be under
-// active development). They are intentionally tiny: one canned phrase in,
-// one bracketed "translation" out, one tone-shaped audio chunk synthesized.
-// Real mock backends belong in pkg/asr, pkg/translate, and pkg/tts, not
-// here.
-
-type stubRecognizer struct{}
-
-func newStubRecognizer() *stubRecognizer { return &stubRecognizer{} }
-
-func (s *stubRecognizer) Name() string { return "cli-stub" }
-
-func (s *stubRecognizer) SupportedLanguages() []asr.Language {
-	return []asr.Language{"en", "hi"}
-}
-
-func (s *stubRecognizer) StartStream(ctx context.Context, languageHint asr.Language) (asr.StreamSession, error) {
-	lang := languageHint
-	if lang == "" {
-		lang = "en"
-	}
-	return &stubStream{lang: lang, out: make(chan asr.Transcript, 4)}, nil
-}
-
-// stubStream implements asr.StreamSession. Every PushAudio call
-// synchronously emits one final transcript, so the demo doesn't need to
-// wait for a flush threshold.
-type stubStream struct {
-	mu     sync.Mutex
-	lang   asr.Language
-	out    chan asr.Transcript
-	closed bool
-	seq    int64
-}
-
-func (s *stubStream) PushAudio(ctx context.Context, frame asr.AudioFrame) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return fmt.Errorf("cli-stub: stream closed")
-	}
-	s.seq++
-	text := "hello, this is a test call"
-	if s.lang == "hi" {
-		text = "नमस्ते, यह एक परीक्षण कॉल है"
-	}
-	select {
-	case s.out <- asr.Transcript{
-		Text:       text,
-		Language:   s.lang,
-		IsFinal:    true,
-		Confidence: 0.95,
-		StartMS:    (s.seq - 1) * 20,
-		EndMS:      s.seq * 20,
-	}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	return nil
-}
-
-func (s *stubStream) Transcripts() <-chan asr.Transcript { return s.out }
-
-func (s *stubStream) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil
-	}
-	s.closed = true
-	close(s.out)
-	return nil
-}
-
-type stubTranslator struct{}
-
-func newStubTranslator() *stubTranslator { return &stubTranslator{} }
-
-func (t *stubTranslator) Name() string { return "cli-stub" }
-
-func (t *stubTranslator) SupportedPairs() [][2]translate.Language {
-	return [][2]translate.Language{{"hi", "en"}, {"en", "hi"}}
-}
-
-func (t *stubTranslator) Translate(ctx context.Context, text string, source, target translate.Language, isFinal bool) (translate.Chunk, error) {
-	select {
-	case <-ctx.Done():
-		return translate.Chunk{}, ctx.Err()
 	default:
+		return fmt.Errorf("no synthesized audio was produced")
 	}
-	return translate.Chunk{
-		Text:       fmt.Sprintf("[%s] %s", target, text),
-		SourceLang: source,
-		TargetLang: target,
-		IsFinal:    isFinal,
-	}, nil
-}
 
-type stubSynthesizer struct{}
-
-func newStubSynthesizer() *stubSynthesizer { return &stubSynthesizer{} }
-
-func (s *stubSynthesizer) Name() string { return "cli-stub" }
-
-func (s *stubSynthesizer) SupportedLanguages() []tts.Language {
-	return []tts.Language{"en", "hi"}
-}
-
-func (s *stubSynthesizer) SynthesizeStream(ctx context.Context, text string, persona tts.Persona) (<-chan tts.AudioChunk, error) {
-	out := make(chan tts.AudioChunk, 1)
-	// One deterministic chunk, sized off the text so different input
-	// produces observably different output; this is not real audio.
-	pcm := make([]byte, len(text)*2)
-	for i := range text {
-		binary.LittleEndian.PutUint16(pcm[i*2:i*2+2], uint16(text[i])*137)
-	}
-	select {
-	case out <- tts.AudioChunk{PCM: pcm, SampleRate: 8000, IsFinal: true}:
-	case <-ctx.Done():
-		close(out)
-		return out, ctx.Err()
-	}
-	close(out)
-	return out, nil
+	return nil
 }
