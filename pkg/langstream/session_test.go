@@ -169,6 +169,43 @@ func (f *fakeSynthesizer) callCount() int {
 	return f.calls
 }
 
+// slowTranslator ignores the text entirely and blocks until either ctx is
+// done or delay elapses, so tests can exercise FallbackConfig.TranslateTimeout
+// deterministically without a real network dependency.
+type slowTranslator struct {
+	delay time.Duration
+}
+
+func (t *slowTranslator) Name() string                            { return "slow" }
+func (t *slowTranslator) SupportedPairs() [][2]translate.Language { return nil }
+
+func (t *slowTranslator) Translate(ctx context.Context, text string, source, target translate.Language, isFinal bool) (translate.Chunk, error) {
+	select {
+	case <-time.After(t.delay):
+		return translate.Chunk{Text: "T:" + text, SourceLang: source, TargetLang: target, IsFinal: isFinal}, nil
+	case <-ctx.Done():
+		return translate.Chunk{}, ctx.Err()
+	}
+}
+
+// stallingSynthesizer returns a channel that never delivers a chunk (until
+// its context is cancelled), so tests can exercise
+// FallbackConfig.SynthesizeTimeout's "backend never starts responding"
+// path deterministically.
+type stallingSynthesizer struct{}
+
+func (s *stallingSynthesizer) Name() string                       { return "stalling" }
+func (s *stallingSynthesizer) SupportedLanguages() []tts.Language { return []tts.Language{"en", "hi"} }
+
+func (s *stallingSynthesizer) SynthesizeStream(ctx context.Context, text string, persona tts.Persona) (<-chan tts.AudioChunk, error) {
+	out := make(chan tts.AudioChunk)
+	go func() {
+		<-ctx.Done()
+		close(out)
+	}()
+	return out, nil
+}
+
 func validConfig() SessionConfig {
 	return SessionConfig{
 		CallerLanguage: "hi",
@@ -332,7 +369,13 @@ func TestSessionDuplexFlowSkipsPartialsAndTranslatesFinals(t *testing.T) {
 	}
 }
 
-func TestSessionTranslationErrorDropsUtteranceWithoutHanging(t *testing.T) {
+// TestSessionTranslationErrorFallsBackToPassthrough replaces Week 1's
+// "drop the utterance on translation error" behavior (see session.go's
+// runLeg doc comment history) with Week 3's graceful degradation: instead
+// of silently dropping the caller's audio, the agent must still hear
+// *something* -- the original, untranslated audio -- rather than nothing
+// and rather than a mistranslation.
+func TestSessionTranslationErrorFallsBackToPassthrough(t *testing.T) {
 	rec := &fakeRecognizer{
 		scripts: [][]asr.Transcript{
 			{{Text: "will fail", Language: "hi", IsFinal: true}},
@@ -351,19 +394,255 @@ func TestSessionTranslationErrorDropsUtteranceWithoutHanging(t *testing.T) {
 	}
 	defer sess.Close()
 
-	if err := sess.PushCallerAudio(asr.AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}); err != nil {
+	frame := asr.AudioFrame{PCM: []byte{1, 2, 3, 4}, SampleRate: 8000}
+	if err := sess.PushCallerAudio(frame); err != nil {
 		t.Fatalf("PushCallerAudio: %v", err)
 	}
 
-	select {
-	case chunk, ok := <-sess.AgentHearsAudio():
-		t.Fatalf("expected no audio after translation error, got chunk=%v ok=%v", chunk, ok)
-	case <-time.After(200 * time.Millisecond):
-		// expected: nothing arrives
+	var gotOriginal bool
+	deadline := time.After(2 * time.Second)
+	for !gotOriginal {
+		select {
+		case chunk, ok := <-sess.AgentHearsAudio():
+			if !ok {
+				t.Fatalf("AgentHearsAudio closed unexpectedly before original audio arrived")
+			}
+			if string(chunk.PCM) == string(frame.PCM) {
+				gotOriginal = true
+			}
+			if chunk.IsFinal && !gotOriginal {
+				t.Fatalf("saw final passthrough chunk without the original audio anywhere in the stream")
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for passthrough audio after translation error")
+		}
+	}
+
+	if got := translator.callCount(); got != 1 {
+		t.Fatalf("translator called %d times, want 1", got)
+	}
+	if sess.CallerLegDegraded() {
+		t.Fatal("a single translate error must not permanently degrade the leg (default MaxConsecutiveFailures is 3)")
 	}
 
 	if err := sess.Close(); err != nil {
 		t.Fatalf("Close returned error: %v", err)
+	}
+}
+
+// TestSessionLowConfidenceFallsBackToPassthrough exercises the
+// ConfidenceThreshold trigger: a final transcript with confidence below
+// the threshold must never reach the Translator at all, and the listening
+// party must still hear the original audio.
+func TestSessionLowConfidenceFallsBackToPassthrough(t *testing.T) {
+	rec := &fakeRecognizer{
+		scripts: [][]asr.Transcript{
+			{{Text: "mumble mumble", Language: "hi", IsFinal: true, Confidence: 0.1}},
+			{},
+		},
+	}
+	translator := &fakeTranslator{}
+
+	cfg := validConfig()
+	cfg.ASR = rec
+	cfg.Translator = translator
+
+	sess, err := NewSession(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer sess.Close()
+
+	frame := asr.AudioFrame{PCM: []byte{9, 9, 9, 9}, SampleRate: 8000}
+	if err := sess.PushCallerAudio(frame); err != nil {
+		t.Fatalf("PushCallerAudio: %v", err)
+	}
+
+	var sawOriginal bool
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case chunk, ok := <-sess.AgentHearsAudio():
+			if !ok {
+				t.Fatalf("AgentHearsAudio closed unexpectedly")
+			}
+			if string(chunk.PCM) == string(frame.PCM) {
+				sawOriginal = true
+			}
+			if chunk.IsFinal {
+				goto done
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for low-confidence passthrough audio")
+		}
+	}
+done:
+	if !sawOriginal {
+		t.Fatal("expected the original audio to be forwarded on low confidence")
+	}
+	if got := translator.callCount(); got != 0 {
+		t.Fatalf("translator called %d times, want 0 (low-confidence transcripts must never reach Translate)", got)
+	}
+}
+
+// TestSessionLegDegradesAfterConsecutiveFailuresAndStaysDegraded exercises
+// ROADMAP.md's "a leg drops ... backend returns a fatal, non-retryable
+// error" case: repeated MT failures must permanently degrade the leg
+// (stop even attempting translation) rather than retrying forever or
+// hanging, and every subsequent utterance on that leg must still produce
+// passthrough audio, not silence.
+func TestSessionLegDegradesAfterConsecutiveFailuresAndStaysDegraded(t *testing.T) {
+	const attempts = 5 // > default MaxConsecutiveFailures (3)
+	scripts := make([]asr.Transcript, attempts)
+	for i := range scripts {
+		scripts[i] = asr.Transcript{Text: "will fail", Language: "hi", IsFinal: true}
+	}
+	rec := &fakeRecognizer{scripts: [][]asr.Transcript{scripts, {}}}
+	translator := &fakeTranslator{err: errors.New("permanent boom")}
+
+	cfg := validConfig()
+	cfg.ASR = rec
+	cfg.Translator = translator
+
+	sess, err := NewSession(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer sess.Close()
+
+	for i := 0; i < attempts; i++ {
+		frame := asr.AudioFrame{PCM: []byte{byte(i), byte(i), byte(i)}, SampleRate: 8000}
+		if err := sess.PushCallerAudio(frame); err != nil {
+			t.Fatalf("PushCallerAudio #%d: %v", i, err)
+		}
+
+		var sawFinal bool
+		deadline := time.After(2 * time.Second)
+		for !sawFinal {
+			select {
+			case chunk, ok := <-sess.AgentHearsAudio():
+				if !ok {
+					t.Fatalf("AgentHearsAudio closed unexpectedly on attempt %d", i)
+				}
+				sawFinal = chunk.IsFinal
+			case <-deadline:
+				t.Fatalf("timed out waiting for passthrough audio on attempt %d", i)
+			}
+		}
+	}
+
+	if !sess.CallerLegDegraded() {
+		t.Fatal("expected caller leg to be permanently degraded after repeated translate failures")
+	}
+	// The default MaxConsecutiveFailures is 3, so calls 1-3 reach the
+	// translator; once degraded, later attempts must be short-circuited
+	// straight to passthrough without calling Translate again.
+	if got := translator.callCount(); got != 3 {
+		t.Fatalf("translator called %d times, want exactly 3 (degrade after the 3rd failure, no further calls)", got)
+	}
+}
+
+// TestSessionTranslateTimeoutFallsBackToPassthrough exercises
+// ROADMAP.md's "translation lags ... exceeds a bounded timeout" trigger
+// for the MT leg: a Translator that never returns within
+// FallbackConfig.TranslateTimeout must not hang the session -- it must
+// degrade to passthrough, same as an outright Translate error.
+func TestSessionTranslateTimeoutFallsBackToPassthrough(t *testing.T) {
+	rec := &fakeRecognizer{
+		scripts: [][]asr.Transcript{
+			{{Text: "slow", Language: "hi", IsFinal: true}},
+			{},
+		},
+	}
+
+	cfg := validConfig()
+	cfg.ASR = rec
+	cfg.Translator = &slowTranslator{delay: 500 * time.Millisecond}
+	cfg.Fallback = FallbackConfig{TranslateTimeout: 50 * time.Millisecond}
+
+	sess, err := NewSession(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer sess.Close()
+
+	frame := asr.AudioFrame{PCM: []byte{7, 7, 7}, SampleRate: 8000}
+	if err := sess.PushCallerAudio(frame); err != nil {
+		t.Fatalf("PushCallerAudio: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	var sawOriginal bool
+	for {
+		select {
+		case chunk, ok := <-sess.AgentHearsAudio():
+			if !ok {
+				t.Fatal("AgentHearsAudio closed unexpectedly")
+			}
+			if string(chunk.PCM) == string(frame.PCM) {
+				sawOriginal = true
+			}
+			if chunk.IsFinal {
+				if !sawOriginal {
+					t.Fatal("expected original audio somewhere in the passthrough stream")
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for passthrough after a translate timeout (session may be hanging)")
+		}
+	}
+}
+
+// TestSessionTTSStallFallsBackToPassthrough exercises the TTS-side
+// counterpart: a Synthesizer that never produces a first chunk within
+// FallbackConfig.SynthesizeTimeout must degrade to passthrough instead of
+// hanging the leg forever.
+func TestSessionTTSStallFallsBackToPassthrough(t *testing.T) {
+	rec := &fakeRecognizer{
+		scripts: [][]asr.Transcript{
+			{{Text: "will stall", Language: "hi", IsFinal: true}},
+			{},
+		},
+	}
+
+	cfg := validConfig()
+	cfg.ASR = rec
+	cfg.Translator = &fakeTranslator{}
+	cfg.TTS = &stallingSynthesizer{}
+	cfg.Fallback = FallbackConfig{SynthesizeTimeout: 50 * time.Millisecond}
+
+	sess, err := NewSession(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer sess.Close()
+
+	frame := asr.AudioFrame{PCM: []byte{8, 8, 8}, SampleRate: 8000}
+	if err := sess.PushCallerAudio(frame); err != nil {
+		t.Fatalf("PushCallerAudio: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	var sawOriginal bool
+	for {
+		select {
+		case chunk, ok := <-sess.AgentHearsAudio():
+			if !ok {
+				t.Fatal("AgentHearsAudio closed unexpectedly")
+			}
+			if string(chunk.PCM) == string(frame.PCM) {
+				sawOriginal = true
+			}
+			if chunk.IsFinal {
+				if !sawOriginal {
+					t.Fatal("expected original audio somewhere in the passthrough stream")
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for passthrough after a TTS stall (session may be hanging)")
+		}
 	}
 }
 

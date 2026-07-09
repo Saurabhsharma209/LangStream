@@ -99,16 +99,46 @@ scheduling slip — see DEVLOG.md 2026-07-08 for the full writeup.
 
 - [ ] Jitter buffer tuning against real PSTN conditions (lab latency
       always looks better than field latency — this is where that gap
-      gets found and closed, or doesn't)
-- [ ] Fallback behavior: what happens when translation lags, a leg drops,
+      gets found and closed, or doesn't). **Status (2026-07-09): groundwork
+      done, real-condition tuning still pending.** `pkg/rtp/jitter.go` is a
+      real, tested, transport-agnostic jitter buffer (reordering,
+      duplicate/late-packet handling, loss policy, simulated PSTN-like
+      conditions in tests) — but it has no live transport behind it yet,
+      so it's an algorithm proven in simulation, not tuned against real
+      PSTN traces. Depends on the same duplex-RTP decision below.
+- [x] Fallback behavior: what happens when translation lags, a leg drops,
       or confidence is low (never silently mistranslate — degrade
-      gracefully, e.g. pass through original audio with a warning tone)
+      gracefully, e.g. pass through original audio with a warning tone).
+      **Done (2026-07-09):** low-confidence ASR, MT/TTS errors, and
+      timeouts all fall back to original-audio passthrough with an
+      optional warning tone; repeated failures or a fatal backend error
+      permanently degrade a leg without crashing or hanging. See
+      `pkg/langstream/fallback.go`, integration-tested end to end.
 - [ ] Exotel vSIP integration example wired end-to-end
-- [ ] Observability dashboard (latency percentiles, error rates, per-vendor cost)
-- [ ] `docs/compliance.md`: DPDP data-residency assessment — can pilot
+- [x] Observability dashboard (latency percentiles, error rates, per-vendor cost).
+      **Done (2026-07-09):** `pkg/observability` now tracks error rates and
+      per-vendor cost alongside the existing latency percentiles, and
+      serves them via a real, tested HTTP dashboard
+      (`observability.NewDashboardServer`, `/`, `/dashboard.json`,
+      `/metrics`). Not yet started inside `cmd/langstream`'s actual
+      binary — that wiring (pointing the CLI's recorder at the dashboard
+      server on startup) is a small next-sprint task, not a new blocker.
+- [x] `docs/compliance.md`: DPDP data-residency assessment — can pilot
       traffic legally go through US-hosted GPT-4o, or does the anchor
-      customer's data need to stay in-region from day one
-- [ ] Consent/disclosure language for calls routed through AI translation
+      customer's data need to stay in-region from day one.
+      **Drafted (2026-07-09), pending legal sign-off** — see
+      `docs/compliance.md`. Preliminary finding: DPDP itself is
+      permissive on cross-border transfer by default, but RBI's
+      data-localization rules for financial/payments data are the more
+      likely binding constraint for a BFSI anchor customer, and the two
+      should not be conflated. Recommends confirming vendor DPAs and
+      getting legal sign-off before routing a BFSI customer's calls
+      through any US-hosted vendor (GPT-4o today).
+- [x] Consent/disclosure language for calls routed through AI translation.
+      **Drafted (2026-07-09), pending legal sign-off** — see
+      `docs/compliance.md` §4 for short (IVR prompt) and long (written
+      consent) variants, with open items flagged for legal (opt-in vs.
+      opt-out, retention period, per-vendor training-data claims).
 
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 

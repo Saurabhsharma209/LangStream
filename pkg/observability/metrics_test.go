@@ -187,3 +187,198 @@ func TestWriteTextEmptyRecorder(t *testing.T) {
 		t.Errorf("expected HELP header even with no samples, got:\n%s", buf.String())
 	}
 }
+
+func TestRecordEventAndErrorRate(t *testing.T) {
+	r := NewLatencyRecorder()
+
+	r.RecordEvent("asr_first_chunk", "deepgram")
+	r.RecordEvent("asr_first_chunk", "deepgram")
+	r.RecordEvent("asr_first_chunk", "deepgram")
+	r.RecordError("asr_first_chunk", "deepgram")
+
+	if got, want := r.EventCount("asr_first_chunk", "deepgram"), int64(4); got != want {
+		t.Fatalf("EventCount = %d, want %d", got, want)
+	}
+	if got, want := r.ErrorCount("asr_first_chunk", "deepgram"), int64(1); got != want {
+		t.Fatalf("ErrorCount = %d, want %d", got, want)
+	}
+	if got, want := r.ErrorRate("asr_first_chunk", "deepgram"), 0.25; !almostEqual(got, want, 1e-9) {
+		t.Errorf("ErrorRate = %v, want %v", got, want)
+	}
+
+	// A different vendor on the same stage is tracked independently.
+	r.RecordEvent("asr_first_chunk", "google-stt")
+	if got, want := r.ErrorRate("asr_first_chunk", "google-stt"), 0.0; got != want {
+		t.Errorf("ErrorRate for untouched vendor = %v, want %v", got, want)
+	}
+}
+
+func TestErrorRateNoEvents(t *testing.T) {
+	r := NewLatencyRecorder()
+	if got := r.ErrorRate("nonexistent", "nobody"); got != 0 {
+		t.Errorf("ErrorRate with no events = %v, want 0", got)
+	}
+	if got := r.ErrorCount("nonexistent", "nobody"); got != 0 {
+		t.Errorf("ErrorCount with no events = %v, want 0", got)
+	}
+	if got := r.EventCount("nonexistent", "nobody"); got != 0 {
+		t.Errorf("EventCount with no events = %v, want 0", got)
+	}
+}
+
+func TestErrorSnapshotSortedAndIsolated(t *testing.T) {
+	r := NewLatencyRecorder()
+	r.RecordEvent("tts", "elevenlabs")
+	r.RecordError("asr_first_chunk", "deepgram")
+	r.RecordEvent("asr_first_chunk", "azure")
+
+	snap := r.ErrorSnapshot()
+	if len(snap) != 3 {
+		t.Fatalf("ErrorSnapshot len = %d, want 3", len(snap))
+	}
+	// Sorted by stage then vendor: asr_first_chunk/azure, asr_first_chunk/deepgram, tts/elevenlabs
+	if snap[0].Stage != "asr_first_chunk" || snap[0].Vendor != "azure" {
+		t.Errorf("snap[0] = %+v, want stage=asr_first_chunk vendor=azure", snap[0])
+	}
+	if snap[1].Stage != "asr_first_chunk" || snap[1].Vendor != "deepgram" {
+		t.Errorf("snap[1] = %+v, want stage=asr_first_chunk vendor=deepgram", snap[1])
+	}
+	if snap[2].Stage != "tts" || snap[2].Vendor != "elevenlabs" {
+		t.Errorf("snap[2] = %+v, want stage=tts vendor=elevenlabs", snap[2])
+	}
+}
+
+func TestRecordCostAndTotals(t *testing.T) {
+	r := NewLatencyRecorder()
+
+	r.RecordCost("deepgram", 0.05)
+	r.RecordCost("deepgram", 0.025)
+	r.RecordCost("openai-tts", 1.20)
+
+	if got, want := r.CostTotal("deepgram"), 0.075; !almostEqual(got, want, 1e-9) {
+		t.Errorf("CostTotal(deepgram) = %v, want %v", got, want)
+	}
+	if got, want := r.CostEventCount("deepgram"), int64(2); got != want {
+		t.Errorf("CostEventCount(deepgram) = %d, want %d", got, want)
+	}
+	if got, want := r.CostTotal("openai-tts"), 1.20; !almostEqual(got, want, 1e-9) {
+		t.Errorf("CostTotal(openai-tts) = %v, want %v", got, want)
+	}
+	if got := r.CostTotal("nonexistent-vendor"); got != 0 {
+		t.Errorf("CostTotal(nonexistent-vendor) = %v, want 0", got)
+	}
+}
+
+func TestCostPerMinute(t *testing.T) {
+	r := NewLatencyRecorder()
+	r.RecordCost("deepgram", 0.05)
+	r.RecordCost("deepgram", 0.05)
+
+	// $0.10 total over a 30s call -> $0.20/minute.
+	if got, want := r.CostPerMinute("deepgram", 30), 0.20; !almostEqual(got, want, 1e-9) {
+		t.Errorf("CostPerMinute(deepgram, 30s) = %v, want %v", got, want)
+	}
+
+	// Zero or negative duration is undefined -> 0, not a divide-by-zero panic.
+	if got := r.CostPerMinute("deepgram", 0); got != 0 {
+		t.Errorf("CostPerMinute with 0 duration = %v, want 0", got)
+	}
+	if got := r.CostPerMinute("deepgram", -5); got != 0 {
+		t.Errorf("CostPerMinute with negative duration = %v, want 0", got)
+	}
+}
+
+func TestCostSnapshotSorted(t *testing.T) {
+	r := NewLatencyRecorder()
+	r.RecordCost("openai-tts", 1.0)
+	r.RecordCost("deepgram", 0.5)
+
+	snap := r.CostSnapshot()
+	if len(snap) != 2 {
+		t.Fatalf("CostSnapshot len = %d, want 2", len(snap))
+	}
+	if snap[0].Vendor != "deepgram" || snap[1].Vendor != "openai-tts" {
+		t.Fatalf("CostSnapshot not sorted by vendor: %+v", snap)
+	}
+}
+
+func TestWriteTextIncludesErrorAndCostMetrics(t *testing.T) {
+	r := NewLatencyRecorder()
+	r.RecordEvent("asr_first_chunk", "deepgram")
+	r.RecordError("asr_first_chunk", "deepgram")
+	r.RecordCost("deepgram", 0.42)
+
+	var buf bytes.Buffer
+	if err := r.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText returned error: %v", err)
+	}
+	out := buf.String()
+
+	for _, sub := range []string{
+		`langstream_stage_errors_total{stage="asr_first_chunk",vendor="deepgram"} 1`,
+		`langstream_stage_events_total{stage="asr_first_chunk",vendor="deepgram"} 2`,
+		`langstream_stage_error_rate{stage="asr_first_chunk",vendor="deepgram"} 0.5`,
+		`langstream_vendor_cost_usd_total{vendor="deepgram"} 0.42`,
+		`langstream_vendor_cost_events_total{vendor="deepgram"} 1`,
+	} {
+		if !strings.Contains(out, sub) {
+			t.Errorf("WriteText output missing expected substring %q\nfull output:\n%s", sub, out)
+		}
+	}
+
+	// Every non-comment line must still parse as `name{labels} value`,
+	// matching the pre-existing latency lines' conventions.
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			t.Fatalf("malformed metric line %q: expected 2 whitespace-separated fields, got %d", line, len(fields))
+		}
+		if _, err := strconv.ParseFloat(fields[1], 64); err != nil {
+			t.Fatalf("malformed metric value in line %q: %v", line, err)
+		}
+	}
+}
+
+func TestConcurrentErrorAndCostRecording(t *testing.T) {
+	r := NewLatencyRecorder()
+	var wg sync.WaitGroup
+
+	const goroutines = 50
+	const perGoroutine = 20
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < perGoroutine; j++ {
+				if j%5 == 0 {
+					r.RecordError("asr_first_chunk", "deepgram")
+				} else {
+					r.RecordEvent("asr_first_chunk", "deepgram")
+				}
+				r.RecordCost("deepgram", 0.01)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	wantEvents := int64(goroutines * perGoroutine)
+	wantErrors := int64(goroutines * (perGoroutine / 5))
+
+	if got := r.EventCount("asr_first_chunk", "deepgram"); got != wantEvents {
+		t.Fatalf("EventCount after concurrent writes = %d, want %d", got, wantEvents)
+	}
+	if got := r.ErrorCount("asr_first_chunk", "deepgram"); got != wantErrors {
+		t.Fatalf("ErrorCount after concurrent writes = %d, want %d", got, wantErrors)
+	}
+	if got, want := r.CostEventCount("deepgram"), int64(goroutines*perGoroutine); got != want {
+		t.Fatalf("CostEventCount after concurrent writes = %d, want %d", got, want)
+	}
+	wantCost := float64(goroutines*perGoroutine) * 0.01
+	if got := r.CostTotal("deepgram"); !almostEqual(got, wantCost, 1e-6) {
+		t.Fatalf("CostTotal after concurrent writes = %v, want %v", got, wantCost)
+	}
+}

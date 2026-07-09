@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/exotel/langstream/pkg/asr"
+	"github.com/exotel/langstream/pkg/observability"
 	"github.com/exotel/langstream/pkg/translate"
 	"github.com/exotel/langstream/pkg/tts"
 )
@@ -66,6 +67,17 @@ type SessionConfig struct {
 	// see asr.Recognizer.StartStream doc). It has no effect on backends
 	// that ignore the hint.
 	CodeSwitching bool
+
+	// Fallback configures graceful-degradation behavior (ROADMAP.md Week
+	// 3: low ASR confidence, MT/TTS timeouts or errors, and permanent
+	// leg failure all fall back to passing through the original,
+	// untranslated audio instead of silently dropping or mistranslating
+	// it — see fallback.go). The zero value is filled in entirely with
+	// DefaultFallbackConfig's defaults by NewSession, so existing callers
+	// that never set this field get the new behavior for free. See
+	// FallbackConfig's doc comment if you do want to set individual
+	// fields explicitly.
+	Fallback FallbackConfig
 }
 
 // validate checks that cfg is complete enough to build a Session.
@@ -104,6 +116,11 @@ const outboundBuffer = 32
 // concurrent use by multiple goroutines (e.g. one pushing caller audio,
 // one pushing agent audio, one reading each outbound channel, one calling
 // Close).
+//
+// Each leg also degrades gracefully instead of silently dropping or
+// mistranslating audio: see fallback.go and the Fallback field of
+// SessionConfig for the low-confidence / MT-or-TTS-timeout-or-error /
+// permanent-leg-failure behavior.
 type Session struct {
 	cfg SessionConfig
 
@@ -121,6 +138,20 @@ type Session struct {
 	callerOut chan tts.AudioChunk
 
 	personas *PersonaManager
+
+	// callerLeg/agentLeg hold per-leg fallback bookkeeping: the raw-audio
+	// ring buffer used for passthrough and the permanent-degradation
+	// state. callerLeg corresponds to the caller->agent pipeline (fed by
+	// PushCallerAudio), agentLeg to the agent->caller pipeline (fed by
+	// PushAgentAudio). See fallback.go.
+	callerLeg *legState
+	agentLeg  *legState
+
+	fallback FallbackConfig
+	// metrics records fallback events via pkg/observability's existing
+	// exported RecordEvent/RecordError API (see fallback.go). Never nil
+	// after NewSession returns.
+	metrics *observability.LatencyRecorder
 
 	wg sync.WaitGroup
 
@@ -163,6 +194,22 @@ func NewSession(ctx context.Context, cfg SessionConfig) (*Session, error) {
 		return nil, fmt.Errorf("langstream: starting agent ASR stream: %w", err)
 	}
 
+	// A completely untouched SessionConfig.Fallback (the common case
+	// today) gets full defaults, including DegradeToneEnabled=true. If
+	// the caller set any field explicitly, only the numeric fields are
+	// defaulted (see FallbackConfig.withDefaults's doc comment for why).
+	fallback := cfg.Fallback
+	if fallback == (FallbackConfig{}) {
+		fallback = DefaultFallbackConfig()
+	} else {
+		fallback = fallback.withDefaults()
+	}
+
+	metrics := fallback.Metrics
+	if metrics == nil {
+		metrics = observability.NewLatencyRecorder()
+	}
+
 	s := &Session{
 		cfg:       cfg,
 		ctx:       sessCtx,
@@ -172,11 +219,15 @@ func NewSession(ctx context.Context, cfg SessionConfig) (*Session, error) {
 		agentOut:  make(chan tts.AudioChunk, outboundBuffer),
 		callerOut: make(chan tts.AudioChunk, outboundBuffer),
 		personas:  personas,
+		callerLeg: newLegState("caller", audioBufferFrames),
+		agentLeg:  newLegState("agent", audioBufferFrames),
+		fallback:  fallback,
+		metrics:   metrics,
 	}
 
 	s.wg.Add(2)
-	go s.runLeg(callerASR, cfg.CallerLanguage, cfg.AgentLanguage, s.agentOut)
-	go s.runLeg(agentASR, cfg.AgentLanguage, cfg.CallerLanguage, s.callerOut)
+	go s.runLeg(s.callerLeg, callerASR, cfg.CallerLanguage, cfg.AgentLanguage, s.agentOut)
+	go s.runLeg(s.agentLeg, agentASR, cfg.AgentLanguage, cfg.CallerLanguage, s.callerOut)
 
 	return s, nil
 }
@@ -188,17 +239,52 @@ func (s *Session) Personas() *PersonaManager {
 	return s.personas
 }
 
+// Metrics returns the *observability.LatencyRecorder this Session records
+// fallback events into (see FallbackConfig.Metrics's doc comment). If
+// SessionConfig.Fallback.Metrics was left nil, this is a private recorder
+// Session created for itself; pass a shared recorder in via
+// SessionConfig.Fallback.Metrics instead if you want fallback events from
+// multiple sessions aggregated in one place (e.g. for a future
+// observability dashboard).
+func (s *Session) Metrics() *observability.LatencyRecorder {
+	return s.metrics
+}
+
+// CallerLegDegraded reports whether the caller leg (caller audio -> ASR ->
+// Translator -> TTS -> agent hears it) has been marked permanently
+// degraded (see FallbackConfig.MaxConsecutiveFailures and FatalError).
+// Once true it stays true for the rest of the Session's life: raw caller
+// audio is passed through to the agent instead of being translated.
+func (s *Session) CallerLegDegraded() bool {
+	return s.callerLeg.isDegraded()
+}
+
+// AgentLegDegraded is CallerLegDegraded's counterpart for the agent leg
+// (agent audio -> ASR -> Translator -> TTS -> caller hears it).
+func (s *Session) AgentLegDegraded() bool {
+	return s.agentLeg.isDegraded()
+}
+
 // PushCallerAudio feeds one frame of caller audio into the caller-leg ASR
 // stream. It returns an error if the session's ASR backend rejects the
 // frame or the session has been closed.
+//
+// The frame is also retained in the caller leg's raw-audio buffer (see
+// fallback.go) so that if this utterance ends up falling back to
+// passthrough (low confidence, MT/TTS failure, or a permanently degraded
+// leg), the *original* audio is available to forward instead of silently
+// dropping or mistranslating it.
 func (s *Session) PushCallerAudio(frame asr.AudioFrame) error {
+	s.callerLeg.audio.push(frame.PCM, frame.SampleRate)
 	return s.callerASR.PushAudio(s.ctx, frame)
 }
 
 // PushAgentAudio feeds one frame of agent audio into the agent-leg ASR
 // stream. It returns an error if the session's ASR backend rejects the
-// frame or the session has been closed.
+// frame or the session has been closed. See PushCallerAudio's doc comment
+// for the raw-audio buffering this also performs.
 func (s *Session) PushAgentAudio(frame asr.AudioFrame) error {
+	s.agentLeg.audio.push(frame.PCM, frame.SampleRate)
 	return s.agentASR.PushAudio(s.ctx, frame)
 }
 
@@ -289,7 +375,16 @@ func (s *Session) Close() error {
 // until the Session's context is cancelled or stream's Transcripts channel
 // closes, and never blocks forever on a stalled consumer or backend
 // because every blocking operation is guarded by a select on s.ctx.Done().
-func (s *Session) runLeg(stream asr.StreamSession, srcLang, dstLang Language, out chan<- tts.AudioChunk) {
+//
+// Graceful degradation (ROADMAP.md Week 3, see fallback.go): rather than
+// silently dropping or mistranslating a final transcript, runLeg falls
+// back to forwarding the utterance's original, untranslated audio
+// (buffered in leg.audio by Push{Caller,Agent}Audio) whenever the leg is
+// already permanently degraded, the transcript's confidence is below
+// FallbackConfig.ConfidenceThreshold, the Translator errors or times out,
+// or the Synthesizer errors or stalls. Repeated MT/TTS failures (or a
+// single FatalError) permanently degrade the leg via leg.recordFailure.
+func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLang Language, out chan<- tts.AudioChunk) {
 	defer s.wg.Done()
 
 	transcripts := stream.Transcripts()
@@ -311,29 +406,145 @@ func (s *Session) runLeg(stream asr.StreamSession, srcLang, dstLang Language, ou
 				continue
 			}
 
-			chunk, err := s.cfg.Translator.Translate(s.ctx, tr.Text, translate.Language(srcLang), translate.Language(dstLang), tr.IsFinal)
-			if err != nil {
-				// Week 1 scope: drop the utterance on translation
-				// failure rather than propagating an error out of a
-				// long-lived goroutine. Week 3 adds graceful
-				// degradation (e.g. passing through original audio
-				// with a warning tone) per ROADMAP.md.
+			// Drain this utterance's buffered raw audio unconditionally:
+			// it's either about to be forwarded as passthrough (see
+			// below) or discarded because translation succeeded. Either
+			// way the buffer must not carry stale audio into the next
+			// utterance.
+			frames := leg.audio.drain()
+
+			if leg.isDegraded() {
+				recordFallback(s.metrics, stageLegDegraded, leg.name)
+				if !s.emitPassthrough(frames, out) {
+					return
+				}
 				continue
 			}
+
+			if tr.Confidence > 0 && tr.Confidence < s.fallback.ConfidenceThreshold {
+				recordFallback(s.metrics, stageASRConfidence, s.cfg.ASR.Name())
+				if !s.emitPassthrough(frames, out) {
+					return
+				}
+				continue
+			}
+			recordSuccessMetric(s.metrics, stageASRConfidence, s.cfg.ASR.Name())
+
+			mtCtx, mtCancel := context.WithTimeout(s.ctx, s.fallback.TranslateTimeout)
+			chunk, err := s.cfg.Translator.Translate(mtCtx, tr.Text, translate.Language(srcLang), translate.Language(dstLang), tr.IsFinal)
+			mtCancel()
+			if err != nil {
+				recordFallback(s.metrics, stageTranslate, s.cfg.Translator.Name())
+				if leg.recordFailure(isFatal(err), s.fallback.MaxConsecutiveFailures) {
+					recordFallback(s.metrics, stageLegDegraded, leg.name)
+				}
+				if !s.emitPassthrough(frames, out) {
+					return
+				}
+				continue
+			}
+			leg.recordSuccess()
+			recordSuccessMetric(s.metrics, stageTranslate, s.cfg.Translator.Name())
+
 			if chunk.Text == "" {
 				continue
 			}
 
 			persona := s.personas.Get(dstLang)
-			audio, err := s.cfg.TTS.SynthesizeStream(s.ctx, chunk.Text, persona)
+			ttsCtx, ttsCancel := context.WithCancel(s.ctx)
+			audio, err := s.cfg.TTS.SynthesizeStream(ttsCtx, chunk.Text, persona)
 			if err != nil {
+				ttsCancel()
+				recordFallback(s.metrics, stageTTS, s.cfg.TTS.Name())
+				if leg.recordFailure(isFatal(err), s.fallback.MaxConsecutiveFailures) {
+					recordFallback(s.metrics, stageLegDegraded, leg.name)
+				}
+				if !s.emitPassthrough(frames, out) {
+					return
+				}
 				continue
 			}
-			if !s.forwardAudio(audio, out) {
+
+			completed, stalled, shuttingDown := s.forwardTTSWithStallGuard(audio, out, ttsCancel)
+			if shuttingDown {
 				return
+			}
+			if stalled {
+				recordFallback(s.metrics, stageTTS, s.cfg.TTS.Name())
+				if leg.recordFailure(false, s.fallback.MaxConsecutiveFailures) {
+					recordFallback(s.metrics, stageLegDegraded, leg.name)
+				}
+				if !s.emitPassthrough(frames, out) {
+					return
+				}
+				continue
+			}
+			if completed {
+				leg.recordSuccess()
+				recordSuccessMetric(s.metrics, stageTTS, s.cfg.TTS.Name())
 			}
 		}
 	}
+}
+
+// emitPassthrough builds (see buildPassthroughChunks) and forwards the
+// passthrough audio for one degraded utterance: the raw source audio in
+// frames, optionally preceded by a warning tone per
+// FallbackConfig.DegradeToneEnabled. It returns false if the session is
+// shutting down mid-send (mirroring forwardAudio's contract, and callers
+// should stop processing further transcripts in that case), true
+// otherwise.
+func (s *Session) emitPassthrough(frames []bufferedFrame, out chan<- tts.AudioChunk) bool {
+	chunks := buildPassthroughChunks(frames, s.fallback.DegradeToneEnabled)
+	return s.forwardAudio(chunksChannel(chunks), out)
+}
+
+// forwardTTSWithStallGuard waits up to FallbackConfig.SynthesizeTimeout for
+// the first chunk on in (the channel returned by Synthesizer.SynthesizeStream).
+// If the first chunk arrives within budget, it is forwarded and the rest of
+// the stream is handed off to the normal, unbounded forwardAudio — a
+// synthesis that has started producing audio is not cut off just because
+// its *total* duration exceeds SynthesizeTimeout, only a backend that never
+// starts responding is treated as stalled/failed. cancel is always called
+// exactly once before this returns, releasing ttsCtx's resources whether
+// the stream is left to finish naturally, abandoned as stalled, or the
+// session is shutting down.
+//
+// Return values: completed is true if the stream was forwarded to a
+// normal close (with or without any chunks). stalled is true if no chunk
+// arrived within SynthesizeTimeout. shuttingDown is true if s.ctx was
+// cancelled while waiting/forwarding, in which case the caller's leg
+// goroutine should return immediately, matching forwardAudio's contract.
+// At most one of completed/stalled/shuttingDown is true.
+func (s *Session) forwardTTSWithStallGuard(in <-chan tts.AudioChunk, out chan<- tts.AudioChunk, cancel context.CancelFunc) (completed, stalled, shuttingDown bool) {
+	defer cancel()
+
+	timer := time.NewTimer(s.fallback.SynthesizeTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-s.ctx.Done():
+		return false, false, true
+	case chunk, ok := <-in:
+		if !ok {
+			return true, false, false
+		}
+		select {
+		case out <- chunk:
+		case <-s.ctx.Done():
+			return false, false, true
+		}
+		if chunk.IsFinal {
+			return true, false, false
+		}
+	case <-timer.C:
+		return false, true, false
+	}
+
+	if !s.forwardAudio(in, out) {
+		return false, false, true
+	}
+	return true, false, false
 }
 
 // forwardAudio drains in and forwards every chunk to out until in closes

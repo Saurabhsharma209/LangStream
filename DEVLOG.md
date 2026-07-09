@@ -197,3 +197,84 @@ composition is fine for the TTS-out leg but not sufficient for the ASR-in leg wi
 3. Start Week 3 hardening items that don't depend on the RTP decision: jitter buffer tuning
    groundwork, fallback/degrade-gracefully behavior design, `docs/compliance.md` DPDP
    assessment skeleton
+
+## 2026-07-09 — Sprint 3 (Roadmap Days 9-11, Week 3 hardening start)
+
+**Agents run:** PM+EM (orchestrator) + Tech, SRE (parallel batch 1), then QA (batch 2, after Tech/SRE landed)
+**Build:** ✅ passing (`go build ./...`, `go vet ./...`, `go test ./... -race -count=3`, `gofmt -l .` all clean)
+
+### ClearStream coordination — still blocked, no change
+Checked ClearStream's latest tag before doing anything else (`git ls-remote
+--tags` → still `v0.1.0`, no new release since 2026-07-07/08). The
+2026-07-08 finding stands: duplex RTP needs an actual (small, additive)
+ClearStream code change (an `OnCleanAudio`-style callback for the
+caller→ASR direction) that hasn't been authorized. Not attempted again
+this run, per the standing cross-repo rule. **Still needs Saurabh's
+decision** — see DEVLOG.md 2026-07-08 for the three options. Today's sprint
+moved to Week 3 items that don't depend on that decision instead of
+blocking on it.
+
+### Changes
+- `pkg/langstream/fallback.go`, edits to `pkg/langstream/session.go` —
+  real graceful-degradation behavior: low ASR confidence, MT/TTS errors,
+  and bounded timeouts now fall back to original-audio passthrough
+  (optional synthesized warning tone) instead of dropping the utterance;
+  repeated failures (`MaxConsecutiveFailures`, default 3) or a `FatalError`
+  permanently degrade a leg (`CallerLegDegraded()`/`AgentLegDegraded()`)
+  without crashing or hanging on subsequent audio (Tech)
+- `pkg/rtp/jitter.go` — transport-agnostic jitter buffer (sequence
+  wraparound, reordering, duplicate/late-packet handling, loss policy,
+  capacity-bounded eviction), tested against a seeded simulated
+  PSTN-like condition (jitter + reordering + 3% loss). Explicitly
+  groundwork — no real transport behind it yet, not claimed as "tuned
+  against real PSTN conditions" (Tech)
+- `pkg/observability/metrics.go` extended + new `pkg/observability/dashboard.go`
+  — error-rate and per-vendor cost tracking added to the existing
+  `LatencyRecorder`, exported via Prometheus text and a real HTTP
+  dashboard (`NewDashboardServer`: `/`, `/dashboard.json`, `/metrics`),
+  fully tested via `httptest` including concurrent-use race tests (SRE)
+- `fallback_integration_test.go`, `observability_dashboard_integration_test.go`
+  — cross-workstream integration tests wiring Tech's fallback logic
+  through a real `Session` + real mock backends, and SRE's dashboard
+  through a real HTTP server fed by a real recorder driven by session
+  activity; verifies the pieces actually compose, not just that each
+  compiles alone (QA)
+- `docs/compliance.md` — new. Preliminary DPDP data-residency assessment
+  (finding: RBI localization rules, not DPDP itself, are the likely
+  binding constraint for a BFSI anchor customer) and consent/disclosure
+  language draft for AI-translated calls, both explicitly flagged as
+  pending legal sign-off, not a compliance clearance (PM)
+- `ROADMAP.md` — checked off Fallback behavior, Observability dashboard,
+  DPDP assessment, and consent language; left jitter buffer and vSIP
+  example unchecked with accurate status notes (PM)
+
+### Bugs found/fixed
+None. QA's integration tests (low-confidence passthrough, fatal-error
+immediate degrade, repeated-failure threshold degrade, dashboard
+end-to-end reflecting real session activity over real HTTP) all passed
+against Tech's and SRE's code as written, first try. Re-ran QA's new
+tests at `-count=10 -race` with no flakes.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...` clean
+- `go test ./... -race -count=3` — all packages pass, no flakes
+- `gofmt -l .` — clean
+- QA's new integration tests specifically re-run at `-count=10 -race`
+
+### Blocked
+- Duplex RTP (and therefore full jitter-buffer PSTN tuning) — still
+  blocked on Saurabh's ClearStream decision, unchanged since 2026-07-08.
+- Vendor API keys still not available — not a blocker for this week's
+  remaining items, same as prior sprints.
+
+### Tomorrow (Sprint 4, Roadmap Days 12-13)
+1. Get Saurabh's decision on the ClearStream `OnCleanAudio`-style callback
+   (or the alternative approaches from 2026-07-08) — this is now blocking
+   two roadmap items (duplex RTP itself, and real jitter-buffer tuning)
+2. Wire `observability.NewDashboardServer` into `cmd/langstream`'s actual
+   binary (small, Tech-owned integration task, not new work)
+3. Exotel vSIP integration example (last unchecked non-RTP-dependent
+   Week 3 item — confirm it doesn't actually need duplex RTP before
+   starting; if it does, it's also blocked on the same decision)
+4. Legal review pass on `docs/compliance.md` (outside engineering's
+   ability to close — flag to Saurabh as a non-engineering dependency)
