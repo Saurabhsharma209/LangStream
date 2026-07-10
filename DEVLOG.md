@@ -278,3 +278,121 @@ tests at `-count=10 -race` with no flakes.
    starting; if it does, it's also blocked on the same decision)
 4. Legal review pass on `docs/compliance.md` (outside engineering's
    ability to close — flag to Saurabh as a non-engineering dependency)
+
+## 2026-07-10 — Sprint 4 (Roadmap Days 12-13, Week 3 continued)
+
+**Agents run:** PM+EM (orchestrator) + Tech, SRE (parallel batch 1), then QA (batch 2, after Tech/SRE landed)
+**Build:** ✅ passing (`go build ./...`, `go vet ./...`, `go test ./... -race -count=3`, `gofmt -l .` all clean)
+
+### ClearStream coordination — still blocked, no change
+Checked ClearStream's latest tag before doing anything else (`git ls-remote
+--tags` → still `v0.1.0`, no new release since 2026-07-07/08/09). The
+2026-07-08 finding stands unchanged: duplex RTP needs an actual, small,
+additive ClearStream code change (an `OnCleanAudio`-style callback for the
+caller→ASR direction) that hasn't been authorized. Not attempted this run,
+per the standing cross-repo rule. No ClearStream files touched, no
+ClearStream commit made. **Still needs Saurabh's decision** — see
+DEVLOG.md 2026-07-08 for the three options; nothing new to add today.
+Because this blocks both real jitter-buffer tuning and true end-to-end
+vSIP wiring, today's sprint intentionally scoped around it rather than
+waiting on it.
+
+### Changes
+- `cmd/langstream/main.go` — new `serve` subcommand (`--addr`, default
+  `:8080`) that builds a real `langstream.Session` via a shared `newSession`
+  helper (also refactored `runDemo` onto it) and mounts
+  `observability.NewDashboardServer` on it, with graceful SIGINT/SIGTERM
+  shutdown via a testable `serveDashboard(ctx, srv) error` helper. This is
+  the CLI wiring flagged as a next-sprint task in the 2026-07-09 entry
+  (Tech)
+- `examples/vsip_example/` (new) — `VSIPCallAdapter` contract/shape example
+  showing how Exotel vSIP audio would push into / read out of a real
+  `langstream.Session`. Explicitly documented as NOT including real SIP/RTP
+  socket plumbing or ClearStream duplex-RTP integration — those remain
+  blocked on the 2026-07-08 decision. Deliberately not claimed as
+  "end-to-end" (Tech)
+- `Dockerfile`, `docker-compose.yml` — port 8080 comment updated from
+  "reserved for the future" to documenting the live dashboard; compose now
+  runs `command: ["serve", "--addr", ":8080"]` instead of falling into
+  `main()`'s no-args usage-and-exit path (which would have crash-looped
+  under `restart: unless-stopped`); stale "Week 1 mock backends only" env
+  comment corrected. `HEALTHCHECK NONE` added with a documented reason
+  (distroless nonroot base has no shell/curl/wget for an in-image
+  healthcheck; real health checking belongs at the k8s/compose
+  orchestrator level, or would need a new `langstream healthcheck`
+  subcommand as future Tech work) (SRE)
+- `.github/workflows/ci.yml` — new parallel, non-blocking (`continue-on-error:
+  true`) `docker-build` job actually building the Dockerfile in CI, so a
+  broken image doesn't silently rot; existing build-test job untouched (SRE)
+- `Makefile` — `make serve`, `make docker-run` targets (SRE)
+- `pkg/qa/` (new package) — `WordErrorRate` (edit-distance-based WER,
+  unit-tested against known-answer cases) + a small fixed English test
+  corpus, plus a root-level `wer_measurement_test.go` wiring WER
+  measurement against the existing fake-Sarvam-ASR test infrastructure.
+  This is the first piece of the WER/accuracy regression suite the QA
+  charter has called for since real ASR backends landed in Sprint 2 —
+  explicitly flagged in comments as groundwork against fakes, not the
+  live-traffic measurement Week 4 ultimately needs (QA)
+- `cmd/langstream/serve_integration_test.go` — real end-to-end test:
+  pushes genuine audio through a `Session`, confirms `/dashboard.json`
+  and `/metrics` reflect real recorded activity (not a hand-populated
+  recorder), plus a real-binary subprocess test that starts `serve`,
+  hits it over real HTTP, sends real SIGTERM, and asserts bounded-time
+  graceful exit (QA)
+- `examples/vsip_example/adapter_content_test.go` — extends Tech's own
+  adapter test (which already checked "≥1 chunk, last one final") with
+  exact chunk-count and exact-PCM-content assertions against the
+  deterministic mock backends, so a leg-swap or corrupted-frame bug in
+  the adapter's plumbing would actually fail a test (QA)
+
+### Bugs found/fixed
+None. QA's integration tests (dashboard-over-real-HTTP, real-binary
+SIGTERM shutdown, vSIP adapter content correctness, WER wiring against
+fake ASR) all passed against Tech's and SRE's code as written, first try.
+Re-ran all new/changed tests at `-race -count=10` with no flakes. One
+non-bug observation worth carrying forward: `Session` only ever calls
+`RecordEvent`/`RecordError` on the metrics recorder, never `Record`/
+`RecordStage` — so session activity currently shows up under the
+dashboard's error/event tracking, not its latency-percentile view. Not
+wrong, but worth knowing before anyone builds a "real session traffic ⇒
+latency percentiles move" expectation into a demo or pilot review.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...` clean
+- `go test ./... -race -count=3` — all packages pass, no flakes, including
+  the two new packages (`cmd/langstream`, `examples/vsip_example`) and
+  the new `pkg/qa` package
+- `gofmt -l .` — clean
+- `git status --porcelain` / `git add -A -n` checked by QA specifically to
+  rule out a repeat of the Sprint 1 `.gitignore` bug — all new files
+  (`pkg/qa/`, `examples/vsip_example/`, new test files) are correctly
+  trackable, not excluded
+- Docker itself is not available in this sandbox — SRE verified
+  Dockerfile/compose/CI YAML by inspection and YAML-parsed both files,
+  but could not run `docker build` directly; flagged for someone with
+  Docker access to sanity-check once before this reaches production
+
+### Blocked
+- Duplex RTP, real jitter-buffer PSTN tuning, and true end-to-end vSIP
+  wiring — all still blocked on Saurabh's ClearStream decision, unchanged
+  since 2026-07-08.
+- Vendor API keys still not available — not a blocker for this week's
+  remaining items, same as prior sprints.
+- Docker-build verification needs a human (or a sandbox with Docker) to
+  actually run `docker build` once; CI's new job is non-blocking until
+  proven stable.
+- Legal review of `docs/compliance.md` — outside engineering's ability to
+  close, unchanged since 2026-07-09.
+
+### Tomorrow (Sprint 5, Roadmap Days 14-15)
+1. Get Saurabh's decision on the ClearStream `OnCleanAudio`-style callback
+   (or the alternative approaches from 2026-07-08) — this is now the
+   single blocker on three remaining Week 3 items (duplex RTP itself,
+   real jitter-buffer tuning, true end-to-end vSIP wiring)
+2. Have someone with Docker access run `docker build -t langstream:ci .`
+   once against today's Dockerfile/compose changes, then flip the CI
+   `docker-build` job from informational to blocking
+3. Expand `pkg/qa`'s WER corpus and add a Hindi/code-switching case (Sarvam
+   fake server already supports it) now that the harness exists
+4. Legal review pass on `docs/compliance.md` — still a non-engineering
+   dependency, still open

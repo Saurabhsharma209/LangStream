@@ -15,17 +15,33 @@
 // seam real vendor backends (Deepgram/Sarvam, GPT-4o, Cartesia) will be
 // selected through once they're registered - no code changes needed here,
 // just `langstream demo --backend deepgram` (once that name is registered).
+//
+// Week 3 (Sprint 4): a `serve` subcommand starts a long-running Session
+// (same backend-selection path as `demo`, see newSession) with
+// pkg/observability's dashboard HTTP server (SRE-owned, see
+// pkg/observability/dashboard.go) mounted in front of that Session's
+// metrics recorder. It does not attach any real telephony transport -
+// there is no RTP/SIP socket behind it yet, see
+// examples/vsip_example for the integration contract a future transport
+// (Exotel vSIP) would fill in, and DEVLOG.md's 2026-07-08/09 entries for
+// why duplex RTP itself is still blocked on a ClearStream decision. `serve`
+// exists so the dashboard endpoints are reachable against a live (if idle)
+// Session today, ahead of that transport being wired in.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/exotel/langstream/pkg/asr"
 	"github.com/exotel/langstream/pkg/langstream"
+	"github.com/exotel/langstream/pkg/observability"
 	"github.com/exotel/langstream/pkg/translate"
 	"github.com/exotel/langstream/pkg/tts"
 )
@@ -33,17 +49,22 @@ import (
 const version = "langstream v0.1.0 (pilot)"
 
 // Environment variable names used to select a backend for one pipeline leg
-// independently. The --backend flag to `langstream demo` sets all three at
-// once (the common case: run entirely on mocks, or entirely on real
-// vendors); these env vars let a leg be overridden individually (e.g. a
-// real ASR backend paired with still-mock MT/TTS) without a --backend
-// value for every permutation. Precedence is flag > env var > "mock",
-// resolved per leg by resolveBackend.
+// independently. The --backend flag to `langstream demo` (and `serve`) sets
+// all three at once (the common case: run entirely on mocks, or entirely
+// on real vendors); these env vars let a leg be overridden individually
+// (e.g. a real ASR backend paired with still-mock MT/TTS) without a
+// --backend value for every permutation. Precedence is flag > env var >
+// "mock", resolved per leg by resolveBackend.
 const (
 	envASRBackend = "LANGSTREAM_ASR_BACKEND"
 	envMTBackend  = "LANGSTREAM_MT_BACKEND"
 	envTTSBackend = "LANGSTREAM_TTS_BACKEND"
 )
+
+// defaultDashboardAddr is the default listen address for `langstream
+// serve`'s observability dashboard. It matches the port already reserved
+// for it in the Dockerfile and docker-compose.yml.
+const defaultDashboardAddr = ":8080"
 
 // init registers the real vendor backends (Deepgram/Sarvam for ASR, GPT-4o
 // for MT, Cartesia for TTS) alongside the always-available "mock" backend
@@ -85,6 +106,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "demo failed:", err)
 			os.Exit(1)
 		}
+	case "serve":
+		if err := runServe(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "serve failed:", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -95,12 +121,19 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: langstream <version|demo|help>")
+	fmt.Fprintln(os.Stderr, "usage: langstream <version|demo|serve|help>")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "demo [--backend NAME]")
 	fmt.Fprintln(os.Stderr, "    Run a one-shot duplex-session demo against the named backend for")
 	fmt.Fprintln(os.Stderr, "    ASR, MT, and TTS alike (default \"mock\"). Override per leg with the")
 	fmt.Fprintf(os.Stderr, "    %s / %s / %s env vars.\n", envASRBackend, envMTBackend, envTTSBackend)
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "serve [--backend NAME] [--addr ADDR]")
+	fmt.Fprintln(os.Stderr, "    Start a long-running duplex Session (same backend selection as demo)")
+	fmt.Fprintf(os.Stderr, "    with the observability dashboard (%s, %s, %s) served on ADDR\n", "/", "/dashboard.json", "/metrics")
+	fmt.Fprintf(os.Stderr, "    (default %q), until SIGINT/SIGTERM. No real telephony transport is\n", defaultDashboardAddr)
+	fmt.Fprintln(os.Stderr, "    attached; see examples/vsip_example for the integration contract a")
+	fmt.Fprintln(os.Stderr, "    future transport would fill in.")
 	fmt.Fprintf(os.Stderr, "    available backends: asr=%v mt=%v tts=%v\n",
 		langstream.AvailableASRBackends(),
 		langstream.AvailableTranslatorBackends(),
@@ -120,12 +153,49 @@ func resolveBackend(flagValue, envVar string) string {
 	return langstream.BackendMock
 }
 
+// newSession resolves the named ASR/MT/TTS backends through pkg/langstream's
+// backend registry and constructs a langstream.Session configured for
+// callerLang/agentLang. It is the shared backend-resolution +
+// session-construction path used by both runDemo (a one-shot smoke test)
+// and runServe (a long-running Session with the observability dashboard
+// mounted in front of it), so the two subcommands don't duplicate the
+// registry lookups or SessionConfig wiring.
+func newSession(ctx context.Context, asrName, mtName, ttsName string, callerLang, agentLang langstream.Language) (*langstream.Session, error) {
+	rec, err := langstream.NewASRBackend(asrName)
+	if err != nil {
+		return nil, fmt.Errorf("selecting ASR backend: %w", err)
+	}
+	tr, err := langstream.NewTranslatorBackend(mtName)
+	if err != nil {
+		return nil, fmt.Errorf("selecting MT backend: %w", err)
+	}
+	syn, err := langstream.NewTTSBackend(ttsName)
+	if err != nil {
+		return nil, fmt.Errorf("selecting TTS backend: %w", err)
+	}
+
+	cfg := langstream.SessionConfig{
+		CallerLanguage: callerLang,
+		AgentLanguage:  agentLang,
+		ASR:            rec,
+		Translator:     tr,
+		TTS:            syn,
+	}
+
+	sess, err := langstream.NewSession(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("creating session: %w", err)
+	}
+	return sess, nil
+}
+
 // runDemo wires a langstream.Session up with backends selected by name via
-// the --backend flag / LANGSTREAM_*_BACKEND env vars (see resolveBackend),
-// looked up in pkg/langstream's backend registry, pushes one frame of
-// "caller audio", and prints the synthesized audio the agent leg produces
-// in response - a minimal, dependency-free proof that both the duplex
-// orchestrator wiring and the backend-selection registry work end to end.
+// the --backend flag / LANGSTREAM_*_BACKEND env vars (see resolveBackend
+// and newSession), looked up in pkg/langstream's backend registry, pushes
+// one frame of "caller audio", and prints the synthesized audio the agent
+// leg produces in response - a minimal, dependency-free proof that both
+// the duplex orchestrator wiring and the backend-selection registry work
+// end to end.
 //
 // The pushed frame is deliberately small enough that the mock ASR backend
 // only buffers it rather than emitting a transcript immediately (see
@@ -147,33 +217,12 @@ func runDemo(args []string) error {
 
 	fmt.Printf("langstream demo: backends asr=%s mt=%s tts=%s\n", asrName, mtName, ttsName)
 
-	rec, err := langstream.NewASRBackend(asrName)
-	if err != nil {
-		return fmt.Errorf("selecting ASR backend: %w", err)
-	}
-	tr, err := langstream.NewTranslatorBackend(mtName)
-	if err != nil {
-		return fmt.Errorf("selecting MT backend: %w", err)
-	}
-	syn, err := langstream.NewTTSBackend(ttsName)
-	if err != nil {
-		return fmt.Errorf("selecting TTS backend: %w", err)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cfg := langstream.SessionConfig{
-		CallerLanguage: "hi",
-		AgentLanguage:  "en",
-		ASR:            rec,
-		Translator:     tr,
-		TTS:            syn,
-	}
-
-	sess, err := langstream.NewSession(ctx, cfg)
+	sess, err := newSession(ctx, asrName, mtName, ttsName, "hi", "en")
 	if err != nil {
-		return fmt.Errorf("creating session: %w", err)
+		return err
 	}
 
 	frame := asr.AudioFrame{
@@ -207,4 +256,94 @@ func runDemo(args []string) error {
 	}
 
 	return nil
+}
+
+// runServe starts a long-running langstream.Session (backends selected the
+// same way runDemo does, see newSession) and mounts
+// observability.NewDashboardServer in front of that Session's metrics
+// recorder (Session.Metrics), listening on --addr (default
+// defaultDashboardAddr) until SIGINT/SIGTERM, then shuts both the HTTP
+// server and the Session down gracefully.
+//
+// No real telephony transport is attached to the Session here: nothing
+// calls PushCallerAudio/PushAgentAudio, so the dashboard will report an
+// idle Session until a real transport (or a test/demo harness) pushes
+// audio into it. See examples/vsip_example for the shape a future Exotel
+// vSIP integration would use to do that, and DEVLOG.md's 2026-07-08/09
+// entries for why that transport itself is still blocked on a ClearStream
+// decision, unrelated to this subcommand.
+func runServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	backend := fs.String("backend", "", `backend name for ASR, MT, and TTS alike (default "mock")`)
+	addr := fs.String("addr", defaultDashboardAddr, "address for the observability dashboard HTTP server to listen on")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	asrName := resolveBackend(*backend, envASRBackend)
+	mtName := resolveBackend(*backend, envMTBackend)
+	ttsName := resolveBackend(*backend, envTTSBackend)
+
+	// signal.NotifyContext gives us a context that's cancelled the moment
+	// SIGINT/SIGTERM arrives; the Session's own context is derived from
+	// this one (see newSession -> langstream.NewSession), so both the
+	// Session's internal goroutines and serveDashboard's shutdown path
+	// react to the same signal.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	sess, err := newSession(ctx, asrName, mtName, ttsName, "hi", "en")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := sess.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "closing session:", err)
+		}
+	}()
+
+	srv := observability.NewDashboardServer(*addr, sess.Metrics())
+
+	fmt.Printf("langstream serve: backends asr=%s mt=%s tts=%s\n", asrName, mtName, ttsName)
+	fmt.Printf("langstream serve: dashboard listening on %s (/, /dashboard.json, /metrics)\n", *addr)
+	fmt.Println("langstream serve: press Ctrl+C to stop")
+
+	return serveDashboard(ctx, srv)
+}
+
+// serveDashboard runs srv (via ListenAndServe) until ctx is cancelled, then
+// shuts it down gracefully (bounded by a fixed 5-second grace period) and
+// returns. It returns a non-nil error only if ListenAndServe failed to
+// start listening at all (e.g. the address is already in use) or if
+// Shutdown itself failed to complete within its grace period; a normal
+// shutdown triggered by ctx cancellation returns nil.
+//
+// Split out from runServe so it can be exercised directly in tests without
+// going through flag parsing, backend resolution, or OS signal delivery.
+func serveDashboard(ctx context.Context, srv *http.Server) error {
+	serveErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serveErr <- err
+			return
+		}
+		serveErr <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Fall through to the graceful-shutdown path below.
+	case err := <-serveErr:
+		// The server stopped on its own (most likely a listen error)
+		// before ctx was ever cancelled.
+		return err
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutting down dashboard server: %w", err)
+	}
+
+	return <-serveErr
 }

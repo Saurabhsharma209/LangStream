@@ -7,17 +7,48 @@ services:
       dockerfile: Dockerfile
     image: langstream:local
     container_name: langstream
+    # The image's ENTRYPOINT is just ["/app/langstream"] with no
+    # subcommand baked in (see Dockerfile) — running the container with no
+    # `command:` override falls through to main()'s no-args branch, which
+    # prints usage to stderr and os.Exit(1)s immediately. Under
+    # `restart: unless-stopped` that's a crash-loop, not a running service.
+    # Override it explicitly so the container's job is the dashboard
+    # server: `langstream serve` (cmd/langstream, Tech workstream) wires
+    # up pkg/observability's NewDashboardServer on the given address,
+    # exposing `/` (HTML dashboard), `/dashboard.json`, and `/metrics`.
+    command: ["serve", "--addr", ":8080"]
     ports:
-      # Reserved for the future HTTP API (health checks, /metrics endpoint,
-      # session control plane). Not yet served by cmd/langstream in Week 1.
+      # No longer reserved for a "future" API — `langstream serve` (see
+      # `command:` above) actually listens here now and serves the
+      # observability dashboard: `/`, `/dashboard.json`, `/metrics`.
       - "8080:8080"
     environment:
-      # --- Week 2+ vendor API keys -----------------------------------
-      # Not read or used by anything yet (mock ASR/MT/TTS backends only
-      # in Week 1). Set these via a local .env file (gitignored) once the
-      # real vendor integrations land so no secrets are committed here.
+      # --- Vendor API keys ---------------------------------------------
+      # Real vendor backends (Deepgram/Sarvam for ASR, GPT-4o for MT,
+      # Cartesia for TTS) shipped in Week 2 and are selected via
+      # --backend/LANGSTREAM_*_BACKEND (see cmd/langstream/main.go);
+      # mock backends remain the default when no key is set. These are
+      # only consumed by `langstream demo`, not by `serve` (the dashboard
+      # server has no vendor backend of its own — it just aggregates
+      # metrics recorded by whatever process feeds its LatencyRecorder).
+      # Set real values via a local .env file (gitignored) — never commit
+      # secrets here.
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
       - SARVAM_API_KEY=${SARVAM_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - CARTESIA_API_KEY=${CARTESIA_API_KEY:-}
     restart: unless-stopped
+    # --- healthcheck ------------------------------------------------------
+    # Not adding a `healthcheck:` block: Compose (like Docker's own
+    # HEALTHCHECK) execs the check *inside* the container, and this image
+    # is distroless — no shell, no curl, no wget available to run such a
+    # command with (see the longer explanation in Dockerfile next to
+    # HEALTHCHECK NONE). Faking one with `docker compose exec ... /app/langstream`
+    # doesn't help either since the binary has no self-check subcommand
+    # yet. For local dev, verify the container came up with:
+    #   curl http://localhost:8080/dashboard.json
+    # run from the host (outside the container, so the missing curl
+    # inside the image is irrelevant). In the meantime `restart:
+    # unless-stopped` above still recovers from process-level crashes;
+    # it just can't detect an app that's up but wedged. Revisit once a
+    # `langstream healthcheck` subcommand exists (see Dockerfile comment).

@@ -114,7 +114,7 @@ scheduling slip — see DEVLOG.md 2026-07-08 for the full writeup.
       optional warning tone; repeated failures or a fatal backend error
       permanently degrade a leg without crashing or hanging. See
       `pkg/langstream/fallback.go`, integration-tested end to end.
-- [ ] Exotel vSIP integration example wired end-to-end
+- [ ] Exotel vSIP integration example wired end-to-end. **Status (2026-07-10): contract/shape example added, not end-to-end.** `examples/vsip_example/` now shows the intended integration shape (`VSIPCallAdapter` pushing/pulling PCM through a real `langstream.Session`), integration-tested against a real Session with mock backends. Real SIP/RTP socket plumbing and the ClearStream duplex-RTP piece are still not implemented — both depend on the same 2026-07-08 ClearStream decision. Left unchecked deliberately; do not mark this done until real transport is wired.
 - [x] Observability dashboard (latency percentiles, error rates, per-vendor cost).
       **Done (2026-07-09):** `pkg/observability` now tracks error rates and
       per-vendor cost alongside the existing latency percentiles, and
@@ -123,6 +123,7 @@ scheduling slip — see DEVLOG.md 2026-07-08 for the full writeup.
       `/metrics`). Not yet started inside `cmd/langstream`'s actual
       binary — that wiring (pointing the CLI's recorder at the dashboard
       server on startup) is a small next-sprint task, not a new blocker.
+      **CLI wiring done (2026-07-10):** `langstream serve --addr :8080` now starts a live Session and mounts the dashboard on it; `docker-compose.yml` runs this by default. Integration-tested (real HTTP hits against a running binary, real session activity reflected in `/dashboard.json`).
 - [x] `docs/compliance.md`: DPDP data-residency assessment — can pilot
       traffic legally go through US-hosted GPT-4o, or does the anchor
       customer's data need to stay in-region from day one.
