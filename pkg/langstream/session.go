@@ -406,6 +406,13 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 				continue
 			}
 
+			// utteranceStart is the time the first audio frame of this
+			// utterance was pushed (see audioRingBuffer.utteranceStart's
+			// doc comment). It must be read *before* draining (drain
+			// clears it) and backs the "asr_first_chunk"/"total" latency
+			// samples recorded below.
+			utteranceStart := leg.audio.utteranceStart()
+
 			// Drain this utterance's buffered raw audio unconditionally:
 			// it's either about to be forwarded as passthrough (see
 			// below) or discarded because translation succeeded. Either
@@ -415,7 +422,7 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 
 			if leg.isDegraded() {
 				recordFallback(s.metrics, stageLegDegraded, leg.name)
-				if !s.emitPassthrough(frames, out) {
+				if !s.emitPassthroughTimed(frames, out, utteranceStart) {
 					return
 				}
 				continue
@@ -423,22 +430,35 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 
 			if tr.Confidence > 0 && tr.Confidence < s.fallback.ConfidenceThreshold {
 				recordFallback(s.metrics, stageASRConfidence, s.cfg.ASR.Name())
-				if !s.emitPassthrough(frames, out) {
+				if !s.emitPassthroughTimed(frames, out, utteranceStart) {
 					return
 				}
 				continue
 			}
 			recordSuccessMetric(s.metrics, stageASRConfidence, s.cfg.ASR.Name())
 
+			// ASR latency: from the utterance's first pushed audio frame
+			// to this final transcript arriving. Recorded here (not
+			// earlier) so a degraded-leg or low-confidence utterance --
+			// which never reaches this point -- correctly never gets an
+			// asr_first_chunk sample either, matching "mt"/"tts_first_chunk"
+			// only being recorded for utterances that actually attempt
+			// translation.
+			if !utteranceStart.IsZero() {
+				recordLatency(s.metrics, stageASRFirstChunk, msSince(utteranceStart))
+			}
+
+			mtStart := time.Now()
 			mtCtx, mtCancel := context.WithTimeout(s.ctx, s.fallback.TranslateTimeout)
 			chunk, err := s.cfg.Translator.Translate(mtCtx, tr.Text, translate.Language(srcLang), translate.Language(dstLang), tr.IsFinal)
 			mtCancel()
+			recordLatency(s.metrics, stageMT, msSince(mtStart))
 			if err != nil {
 				recordFallback(s.metrics, stageTranslate, s.cfg.Translator.Name())
 				if leg.recordFailure(isFatal(err), s.fallback.MaxConsecutiveFailures) {
 					recordFallback(s.metrics, stageLegDegraded, leg.name)
 				}
-				if !s.emitPassthrough(frames, out) {
+				if !s.emitPassthroughTimed(frames, out, utteranceStart) {
 					return
 				}
 				continue
@@ -459,7 +479,7 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 				if leg.recordFailure(isFatal(err), s.fallback.MaxConsecutiveFailures) {
 					recordFallback(s.metrics, stageLegDegraded, leg.name)
 				}
-				if !s.emitPassthrough(frames, out) {
+				if !s.emitPassthroughTimed(frames, out, utteranceStart) {
 					return
 				}
 				continue
@@ -474,7 +494,7 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 				if leg.recordFailure(false, s.fallback.MaxConsecutiveFailures) {
 					recordFallback(s.metrics, stageLegDegraded, leg.name)
 				}
-				if !s.emitPassthrough(frames, out) {
+				if !s.emitPassthroughTimed(frames, out, utteranceStart) {
 					return
 				}
 				continue
@@ -482,6 +502,7 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 			if completed {
 				leg.recordSuccess()
 				recordSuccessMetric(s.metrics, stageTTS, s.cfg.TTS.Name())
+				recordTotalIfStarted(s.metrics, utteranceStart)
 			}
 		}
 	}
@@ -497,6 +518,24 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 func (s *Session) emitPassthrough(frames []bufferedFrame, out chan<- tts.AudioChunk) bool {
 	chunks := buildPassthroughChunks(frames, s.fallback.DegradeToneEnabled)
 	return s.forwardAudio(chunksChannel(chunks), out)
+}
+
+// emitPassthroughTimed is emitPassthrough plus a "total" (glass-to-glass)
+// latency sample: fallback/passthrough utterances skip MT/TTS but still
+// matter for degraded-call latency (see this package's Task 1 charter),
+// so every passthrough path records "total" the same way a fully
+// successful translate+synthesize round trip does (see runLeg's
+// `if completed` branch). The sample is only recorded if the forward
+// completed normally (ok == true); a shutdown mid-send aborts the
+// utterance, so no latency sample is recorded for it (mirroring
+// forwardAudio/forwardTTSWithStallGuard's existing shuttingDown
+// contract).
+func (s *Session) emitPassthroughTimed(frames []bufferedFrame, out chan<- tts.AudioChunk, utteranceStart time.Time) bool {
+	ok := s.emitPassthrough(frames, out)
+	if ok {
+		recordTotalIfStarted(s.metrics, utteranceStart)
+	}
+	return ok
 }
 
 // forwardTTSWithStallGuard waits up to FallbackConfig.SynthesizeTimeout for
@@ -519,6 +558,7 @@ func (s *Session) emitPassthrough(frames []bufferedFrame, out chan<- tts.AudioCh
 func (s *Session) forwardTTSWithStallGuard(in <-chan tts.AudioChunk, out chan<- tts.AudioChunk, cancel context.CancelFunc) (completed, stalled, shuttingDown bool) {
 	defer cancel()
 
+	synthesizeStart := time.Now()
 	timer := time.NewTimer(s.fallback.SynthesizeTimeout)
 	defer timer.Stop()
 
@@ -529,6 +569,13 @@ func (s *Session) forwardTTSWithStallGuard(in <-chan tts.AudioChunk, out chan<- 
 		if !ok {
 			return true, false, false
 		}
+		// tts_first_chunk: time from starting SynthesizeStream to this,
+		// its first chunk, actually arriving. Recorded only once we know
+		// a real chunk arrived (ok == true) -- a closed-with-no-chunks
+		// stream (!ok, handled above) or an outright stall (timer.C,
+		// handled below) never gets a sample, matching "only measure the
+		// stage that actually happened".
+		recordLatency(s.metrics, stageTTSFirstChunk, msSince(synthesizeStart))
 		select {
 		case out <- chunk:
 		case <-s.ctx.Done():

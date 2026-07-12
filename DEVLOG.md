@@ -396,3 +396,119 @@ latency percentiles move" expectation into a demo or pilot review.
    fake server already supports it) now that the harness exists
 4. Legal review pass on `docs/compliance.md` — still a non-engineering
    dependency, still open
+
+## 2026-07-12 — Sprint 5 (Roadmap Days 14-15+ groundwork, Week 3 continued)
+
+**Agents run:** PM+EM (orchestrator) + Tech (batch 1), then QA (batch 2, after Tech landed)
+**Build:** ✅ passing (`go build ./...`, `go vet ./...`, `go test ./... -race -count=3`, `gofmt -l .` all clean)
+
+### ClearStream coordination — still blocked, no change
+Checked ClearStream's latest tag first (`git ls-remote --tags` → still
+`v0.1.0`, no new release since 2026-07-07/08/09/10). The 2026-07-08 finding
+stands unchanged: duplex RTP needs an actual, small, additive ClearStream
+code change (an `OnCleanAudio`-style callback for the caller→ASR direction)
+that hasn't been authorized. Not attempted this run, per the standing
+cross-repo rule. No ClearStream files touched, no ClearStream commit made.
+**Still needs Saurabh's decision** — unchanged since 2026-07-08, now the
+single blocker on real jitter-buffer PSTN tuning and true end-to-end vSIP
+wiring (both still unchecked in Week 3). Because both remaining Week 3
+checklist items are gated on this, today's sprint scoped around
+unblocked groundwork instead: closing a real observability gap, hardening
+jitter-buffer test coverage, and expanding the WER corpus. Only Tech and
+QA were spawned — PE had no vendor-facing work queued and SRE's one open
+item (a human/CI environment with Docker running `docker build` once) is
+still not actionable from this sandbox (confirmed again: no `docker`
+binary available here, same as 2026-07-10).
+
+### Changes
+- `pkg/langstream/fallback.go`, `pkg/langstream/session.go` — real
+  per-stage latency instrumentation wired into `Session`: `"mt"` (real
+  `Translator.Translate` duration), `"tts_first_chunk"` (time to first
+  synthesized chunk), `"asr_first_chunk"` (utterance-start-to-final-
+  transcript), and `"total"` (full utterance glass-to-glass, recorded for
+  both successful and passthrough/degraded utterances) now all flow into
+  `session.Metrics()` via the existing `Record`/`RecordStage` API that
+  previously went unused (flagged as a "worth knowing" gap in the
+  2026-07-10 entry: the dashboard's latency-percentile view only ever
+  reflected hand-populated test data, never real session traffic). New
+  `pkg/langstream/latency_test.go` unit-tests the wiring directly,
+  including that a passthrough utterance correctly skips the
+  never-attempted stages while still recording `"total"` (Tech)
+- `pkg/rtp/jitter_test.go` — three new stress-test scenarios beyond the
+  existing single seeded condition: ~13% packet loss (vs. the prior 3%
+  baseline), bursty multi-position reordering (packets shuffled up to 7
+  positions within 8-packet windows, not just adjacent swaps), and a
+  sudden mid-stream jitter spike (~300ms hiccup the fixed `TargetDelay`
+  can't absorb) — all asserting no panic, bounded memory
+  (`MaxPacketsBuffered`), and monotonic, duplicate-free playout. Still
+  simulation-only groundwork; no new production config fields added (Tech)
+- `dashboard_latency_integration_test.go` (new, root) — cross-workstream
+  integration test independently verifying the latency-wiring gap above
+  is actually closed *from the dashboard's perspective*, not just the
+  recorder's: builds a real `Session` with a deliberately-delayed mock
+  translator, drives one utterance round trip, hits a real
+  `NewDashboardServer` over real HTTP, and confirms `/dashboard.json`
+  shows non-zero counts for all four stages (and only `"total"` for a
+  forced passthrough utterance) — matching Tech's own unit-level
+  contract at the next layer up (QA)
+- `pkg/qa/corpus.go`, `pkg/qa/corpus_test.go`, `wer_measurement_test.go` —
+  3 new Hindi/English code-switching (Hinglish) WER corpus entries
+  (explicitly flagged as the next-sprint QA priority in the 2026-07-10
+  entry), wired into both the hand-computed corpus tests and the
+  real-fake-Sarvam-backed measurement test. Measured WER: 0.0 (identical),
+  0.1667 (1-word substitution), 0.1429 (1-word deletion) — in the same
+  plausible range as the existing English single-error cases, and
+  confirms `WordErrorRate`'s tokenization handles a Devanagari/English
+  script boundary correctly rather than mis-splitting multi-byte runes
+  (QA)
+
+### Bugs found/fixed
+None. QA's independent dashboard-level integration test passed against
+Tech's latency-wiring code first try, closing the 2026-07-10 observation
+cleanly. QA also reviewed (did not modify) Tech's 3 new jitter stress
+tests: found them sound (each asserts a real invariant, not just
+"doesn't panic") but flagged one non-blocking gap for a future sprint —
+none of the three assert a full `played + lost ≈ n` packet-accounting
+invariant, so a regression that silently dropped packets without
+incrementing `stats.Lost` wouldn't be caught directly today (it's
+partially covered indirectly by existing lower-bound checks). Worth
+tightening in a future sprint, not urgent.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...` clean
+- `go test ./... -race -count=3` — all 10 packages pass, no flakes
+- `gofmt -l .` — clean
+- `git add -A -n` checked before committing — all 8 changed/new files
+  (`pkg/langstream/fallback.go`, `pkg/langstream/session.go`,
+  `pkg/langstream/latency_test.go`, `pkg/rtp/jitter_test.go`,
+  `pkg/qa/corpus.go`, `pkg/qa/corpus_test.go`, `wer_measurement_test.go`,
+  `dashboard_latency_integration_test.go`) correctly trackable, not
+  excluded by `.gitignore` — same class of check that caught the Sprint 1
+  bug, repeated deliberately every run
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- Duplex RTP, real jitter-buffer PSTN tuning, and true end-to-end vSIP
+  wiring — all still blocked on Saurabh's ClearStream decision, unchanged
+  since 2026-07-08. This is now 4+ sprints without a decision; flagging
+  prominently again in today's report.
+- Vendor API keys still not available — not a blocker for this week's
+  remaining items, same as prior sprints.
+- Docker-build verification still needs a human (or a sandbox with
+  Docker) to run `docker build` once — confirmed again this sandbox has
+  no `docker` binary, unchanged since 2026-07-10.
+- Legal review of `docs/compliance.md` — outside engineering's ability to
+  close, unchanged since 2026-07-09.
+
+### Tomorrow (Sprint 6)
+1. Get Saurabh's decision on the ClearStream `OnCleanAudio`-style callback
+   (or the alternative approaches from 2026-07-08) — this is the single
+   blocker on the last two Week 3 items and, transitively, all of Week 4
+2. If a decision arrives: scope and execute the ClearStream-side PR (as
+   its own separately-reviewed change, per COMBINED_ROADMAP.md's standing
+   agreement) and/or the LangStream-side duplex RTP session work
+3. If no decision yet: tighten the jitter-buffer stress tests' packet-
+   accounting invariant (`played + lost ≈ n`) per QA's note above, and/or
+   continue expanding the Hinglish WER corpus with harder cases
+4. Docker-build verification still needs a human with Docker access; flip
+   CI's `docker-build` job from informational to blocking once done

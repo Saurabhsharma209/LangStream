@@ -15,6 +15,19 @@
 // accuracy. That requires live vendor traffic, which is explicitly out of
 // scope until API keys exist (see ROADMAP.md's Week 2 decision, restated
 // in integration_vendor_test.go's package doc comment).
+//
+// Sprint 2026-07-12 (QA) wires in pkg/qa's three new Hindi/English
+// code-switching ("Hinglish") corpus entries alongside the original three
+// English ones, per DEVLOG.md's 2026-07-10 entry flagging corpus expansion
+// + a Hindi/code-switching case as the next-sprint QA priority "now that
+// the harness exists". The fake Sarvam server (newFakeSarvamASRServer) is
+// a dumb echo: it replies with whatever transcriptText string it was
+// started with regardless of audio content or script, so it already
+// "supports" code-switched text the same way it supports any other
+// string - the point of these new cases is exercising the
+// asr.SarvamRecognizer client's transcript parsing and WordErrorRate's
+// whitespace tokenization against real Devanagari+English mixed text, not
+// exercising anything special in the fake server itself.
 package langstream_test
 
 import (
@@ -37,28 +50,32 @@ import (
 // arithmetic against itself.
 func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 	entries := qa.FixedCorpus()
-	if len(entries) < 3 {
-		t.Fatalf("qa.FixedCorpus() returned %d entries, want at least 3", len(entries))
+	if len(entries) < 6 {
+		t.Fatalf("qa.FixedCorpus() returned %d entries, want at least 6", len(entries))
 	}
 
-	// Precomputed expected WER for the first 3 entries, matching
-	// pkg/qa/corpus.go's FixedCorpus doc comment. Measured against this
-	// test's own fake-ASR-backed transcript below (not directly against
-	// the corpus's Hypothesis string) so a regression in the Sarvam
-	// client's transcript parsing (e.g. truncating or mangling the text)
-	// would show up as a WER mismatch here even though the corpus data
-	// itself is untouched.
+	// Precomputed expected WER for the entries this test wires up,
+	// matching pkg/qa/corpus.go's FixedCorpus doc comment. Measured
+	// against this test's own fake-ASR-backed transcript below (not
+	// directly against the corpus's Hypothesis string) so a regression in
+	// the Sarvam client's transcript parsing (e.g. truncating or mangling
+	// the text, or mishandling non-ASCII/Devanagari bytes) would show up
+	// as a WER mismatch here even though the corpus data itself is
+	// untouched.
 	wantWER := map[string]float64{
-		"identical_greeting":    0.0,
-		"one_word_substitution": 1.0 / 5.0,
-		"one_word_deletion":     1.0 / 7.0,
+		"identical_greeting":              0.0,
+		"one_word_substitution":           1.0 / 5.0,
+		"one_word_deletion":               1.0 / 7.0,
+		"hinglish_identical_order_status": 0.0,
+		"hinglish_one_word_substitution":  1.0 / 6.0,
+		"hinglish_one_word_deletion":      1.0 / 7.0,
 	}
 
 	tested := 0
 	for _, entry := range entries {
 		want, ok := wantWER[entry.Name]
 		if !ok {
-			continue // only wiring the first 3 known entries, per this test's doc comment
+			continue // only wiring the known entries above, per this test's doc comment
 		}
 		tested++
 
@@ -111,7 +128,7 @@ func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 		})
 	}
 
-	if tested != 3 {
-		t.Fatalf("wired up %d corpus entries against the fake-ASR pipeline, want exactly 3 (identical_greeting, one_word_substitution, one_word_deletion) - update wantWER alongside pkg/qa.FixedCorpus if entries changed", tested)
+	if tested != 6 {
+		t.Fatalf("wired up %d corpus entries against the fake-ASR pipeline, want exactly 6 (identical_greeting, one_word_substitution, one_word_deletion, hinglish_identical_order_status, hinglish_one_word_substitution, hinglish_one_word_deletion) - update wantWER alongside pkg/qa.FixedCorpus if entries changed", tested)
 	}
 }

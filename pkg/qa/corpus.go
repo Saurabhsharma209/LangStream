@@ -51,7 +51,7 @@ func placeholderPCM() []byte {
 	return make([]byte, 320)
 }
 
-// FixedCorpus returns a small, fixed set of English reference/hypothesis
+// FixedCorpus returns a small, fixed set of reference/hypothesis
 // transcript pairs for wiring WordErrorRate up against a fake-ASR-backed
 // pipeline (see wer_measurement_test.go at the repo root). The set
 // deliberately includes one identical (WER 0.0) entry and two entries with
@@ -62,6 +62,21 @@ func placeholderPCM() []byte {
 //   - identical_greeting:      WER 0.0    (0 errors / 6 words)
 //   - one_word_substitution:   WER 0.2    (1 substitution / 5 words)
 //   - one_word_deletion:       WER 1/7    (1 deletion / 7 words)
+//
+// Sprint 2026-07-12 (QA) adds three Hindi/English code-switching
+// ("Hinglish") entries, per DEVLOG.md's 2026-07-10 entry flagging this as
+// the next-sprint QA priority now that the WER harness exists. These use
+// Language "hi" (the same code-switching-capable hint
+// integration_vendor_test.go uses with the real Sarvam client/fake
+// server — Sarvam's whole purpose, per that file's package doc comment,
+// is Hindi-English code-switching), and mix Devanagari-script Hindi words
+// with untransliterated English words within the same sentence, which is
+// the realistic shape of Hinglish speech (not a fully Romanized
+// transliteration of Hindi, and not pure English or pure Hindi):
+//
+//   - hinglish_identical_order_status: WER 0.0  (0 errors / 6 words)
+//   - hinglish_one_word_substitution:  WER 1/6  (1 substitution / 6 words)
+//   - hinglish_one_word_deletion:      WER 1/7  (1 deletion / 7 words)
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -85,6 +100,44 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "en",
 			Reference:  "i would like to cancel my subscription",
 			Hypothesis: "i would like cancel my subscription",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// "I want to track my order" — a typical Hinglish
+			// construction where the English noun phrase "order track"
+			// is embedded directly in an otherwise-Hindi sentence,
+			// rather than either fully Romanized Hindi or pure English.
+			Name:       "hinglish_identical_order_status",
+			Language:   "hi",
+			Reference:  "मुझे अपना order track करना है",
+			Hypothesis: "मुझे अपना order track करना है",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// Same sentence as above, but the fake ASR mishears the
+			// English verb "track" as "cancel" — a single substitution
+			// in the middle of a code-switched sentence, exercising WER
+			// alignment across a script boundary (the surrounding
+			// Devanagari words must still align correctly on either
+			// side of the substituted English word).
+			Name:       "hinglish_one_word_substitution",
+			Language:   "hi",
+			Reference:  "मुझे अपना order track करना है",
+			Hypothesis: "मुझे अपना order cancel करना है",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// "Please check my account balance" with the English word
+			// "check" embedded mid-sentence; the fake ASR drops it
+			// entirely — a single deletion, again straddling a
+			// Devanagari/English script boundary.
+			Name:       "hinglish_one_word_deletion",
+			Language:   "hi",
+			Reference:  "please मेरा account balance check कर दीजिए",
+			Hypothesis: "please मेरा account balance कर दीजिए",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

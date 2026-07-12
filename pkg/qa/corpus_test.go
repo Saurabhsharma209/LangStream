@@ -51,11 +51,22 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // (e.g. turns a one-word substitution into a two-word one) fails loudly
 // here instead of only showing up as an unexplained drift in
 // wer_measurement_test.go's reported numbers.
+//
+// Sprint 2026-07-12 (QA): includes the three Hindi/English code-switching
+// ("Hinglish") entries added to FixedCorpus alongside the original English
+// entries — WordErrorRate tokenizes purely on whitespace (see wer.go's doc
+// comment), so a code-switched sentence mixing Devanagari and English
+// words within one string is expected to align/diff correctly exactly like
+// a single-script sentence; these cases confirm that in practice, not just
+// by argument.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
-		"identical_greeting":    0.0,
-		"one_word_substitution": 1.0 / 5.0,
-		"one_word_deletion":     1.0 / 7.0,
+		"identical_greeting":              0.0,
+		"one_word_substitution":           1.0 / 5.0,
+		"one_word_deletion":               1.0 / 7.0,
+		"hinglish_identical_order_status": 0.0,
+		"hinglish_one_word_substitution":  1.0 / 6.0,
+		"hinglish_one_word_deletion":      1.0 / 7.0,
 	}
 
 	entries := FixedCorpus()

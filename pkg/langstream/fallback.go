@@ -194,6 +194,14 @@ type audioRingBuffer struct {
 	mu       sync.Mutex
 	frames   []bufferedFrame
 	capacity int
+
+	// utteranceAt is set to time.Now() by the first push since the last
+	// drain (i.e. the first audio frame of a fresh utterance), and reset
+	// to the zero Time by drain. It backs session.go's "asr_first_chunk"
+	// and "total" latency instrumentation, which need to know when an
+	// utterance's audio started arriving, not just when its final
+	// transcript arrived.
+	utteranceAt time.Time
 }
 
 func newAudioRingBuffer(capacity int) *audioRingBuffer {
@@ -204,7 +212,9 @@ func newAudioRingBuffer(capacity int) *audioRingBuffer {
 }
 
 // push appends one frame, copying pcm so the caller's slice can be reused
-// or mutated after push returns.
+// or mutated after push returns. If this is the first frame since the
+// last drain (i.e. the start of a fresh utterance), it also stamps
+// utteranceAt so callers can later measure end-to-end utterance latency.
 func (b *audioRingBuffer) push(pcm []byte, sampleRate int) {
 	if len(pcm) == 0 {
 		return
@@ -214,10 +224,24 @@ func (b *audioRingBuffer) push(pcm []byte, sampleRate int) {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if len(b.frames) == 0 {
+		b.utteranceAt = time.Now()
+	}
 	b.frames = append(b.frames, bufferedFrame{pcm: cp, sampleRate: sampleRate})
 	if over := len(b.frames) - b.capacity; over > 0 {
 		b.frames = b.frames[over:]
 	}
+}
+
+// utteranceStart returns the time the first frame of the current
+// (not-yet-drained) utterance was pushed, or the zero Time if no frame
+// has been pushed since the last drain. Callers should read this *before*
+// calling drain (which clears it), typically right before draining the
+// buffer for a just-arrived final transcript.
+func (b *audioRingBuffer) utteranceStart() time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.utteranceAt
 }
 
 // drain returns every frame buffered so far and empties the buffer, so the
@@ -229,6 +253,7 @@ func (b *audioRingBuffer) drain() []bufferedFrame {
 	defer b.mu.Unlock()
 	out := b.frames
 	b.frames = nil
+	b.utteranceAt = time.Time{}
 	return out
 }
 
@@ -288,6 +313,19 @@ const (
 	stageLegDegraded   = "leg_degraded"
 )
 
+// Latency stage names used with LatencyRecorder.Record/RecordStage (see
+// pkg/observability/metrics.go's package doc comment, which names exactly
+// these four stages). Distinct from the RecordEvent/RecordError stage
+// names above: those track fallback-decision success/error counts, these
+// track actual elapsed-time samples for the dashboard's latency-percentile
+// view (see session.go's runLeg).
+const (
+	stageASRFirstChunk = "asr_first_chunk"
+	stageMT            = "mt"
+	stageTTSFirstChunk = "tts_first_chunk"
+	stageTotal         = "total"
+)
+
 // recordFallback calls rec.RecordError(stage, vendor) if rec is non-nil,
 // using pkg/observability's pre-existing exported API. vendor is typically
 // the relevant backend's Name(), or a leg name ("caller"/"agent") for
@@ -314,6 +352,34 @@ func recordSuccessMetric(rec *observability.LatencyRecorder, stage, vendor strin
 		vendor = "unknown"
 	}
 	rec.RecordEvent(stage, vendor)
+}
+
+// recordLatency calls rec.Record(stage, ms) if rec is non-nil, mirroring
+// recordFallback/recordSuccessMetric's defensive nil-check so callers (and
+// tests) never need to special-case a nil recorder.
+func recordLatency(rec *observability.LatencyRecorder, stage string, ms float64) {
+	if rec == nil {
+		return
+	}
+	rec.Record(stage, ms)
+}
+
+// msSince returns the elapsed time since t in milliseconds, as a float64
+// suitable for LatencyRecorder.Record.
+func msSince(t time.Time) float64 {
+	return float64(time.Since(t)) / float64(time.Millisecond)
+}
+
+// recordTotalIfStarted records a "total" (glass-to-glass) latency sample
+// from start to now, unless start is the zero Time -- which happens if a
+// fallback/passthrough path runs for an utterance whose audio was never
+// actually pushed via Push{Caller,Agent}Audio (defensive; shouldn't
+// normally happen, see audioRingBuffer.utteranceStart's doc comment).
+func recordTotalIfStarted(rec *observability.LatencyRecorder, start time.Time) {
+	if start.IsZero() {
+		return
+	}
+	recordLatency(rec, stageTotal, msSince(start))
 }
 
 // Degrade-tone synthesis parameters. The tone is a short, quiet,

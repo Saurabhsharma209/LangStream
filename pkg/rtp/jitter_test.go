@@ -430,3 +430,291 @@ func TestSimulatePSTNStreamDeterministicForFixedSeed(t *testing.T) {
 		}
 	}
 }
+
+// --- Harsher stress-test scenarios (2026-07-12 Tech-workstream sprint,
+// Task 2): pkg/rtp/jitter.go is algorithmic groundwork only (see its
+// package doc comment) -- real PSTN tuning is blocked on a live/real
+// transport that doesn't exist yet. These tests don't attempt that; they
+// widen the simulated-condition coverage beyond
+// TestJitterBufferUnderSimulatedPSTNConditions's single ~3%-loss scenario,
+// so the buffer's core invariants (no panics, bounded memory via
+// MaxPacketsBuffered, monotonic in-order playout) are demonstrated under
+// harsher/different synthetic conditions too, ahead of eventual real-
+// traffic tuning. ---
+
+// driveJitterBufferSimulation pushes stream through b and pulls once per
+// nominalInterval tick, mirroring
+// TestJitterBufferUnderSimulatedPSTNConditions's interleaved push/pull
+// pattern (a real receive goroutine and a real playout goroutine driving
+// the same buffer concurrently in production, rather than pushing
+// everything up front). It fails the test outright if the buffer's
+// CurrentlyBuffered count ever exceeds Config.MaxPacketsBuffered (the
+// memory-bound invariant) or if not every generated arrival was pushed
+// before ticks ran out (a test-setup bug, not a buffer bug). It returns
+// the sequence of successfully played packets in play order and the total
+// PullLost count.
+func driveJitterBufferSimulation(t *testing.T, b *JitterBuffer, stream []simulatedPacket, start time.Time, nominalInterval time.Duration, totalTicks int) (played []uint16, lostCount int) {
+	t.Helper()
+	streamIdx := 0
+	for tick := 0; tick < totalTicks; tick++ {
+		now := start.Add(time.Duration(tick) * nominalInterval)
+
+		for streamIdx < len(stream) && !stream[streamIdx].arrival.After(now) {
+			b.Push(Packet{SeqNum: stream[streamIdx].seq}, stream[streamIdx].arrival)
+			streamIdx++
+		}
+
+		pkt, status := b.Pull(now)
+		switch status {
+		case PullOK:
+			played = append(played, pkt.SeqNum)
+		case PullLost:
+			lostCount++
+		case PullWaiting, PullEmpty:
+			// Nothing to do this tick; try again next tick.
+		}
+
+		if cur := b.Stats().CurrentlyBuffered; cur > b.cfg.MaxPacketsBuffered {
+			t.Fatalf("tick %d: CurrentlyBuffered = %d, exceeds MaxPacketsBuffered = %d -- unbounded memory growth under stress", tick, cur, b.cfg.MaxPacketsBuffered)
+		}
+	}
+	if streamIdx != len(stream) {
+		t.Fatalf("test bug: only pushed %d of %d generated arrivals before totalTicks ran out - widen totalTicks", streamIdx, len(stream))
+	}
+	return played, lostCount
+}
+
+// assertMonotonicNoDuplicates fails the test if played is not a strictly
+// increasing sequence of distinct sequence numbers -- the core
+// correctness invariant a jitter buffer must uphold regardless of how
+// harsh the simulated network conditions are: playout order must never
+// regress or double-play a packet.
+func assertMonotonicNoDuplicates(t *testing.T, played []uint16) {
+	t.Helper()
+	seen := make(map[uint16]bool)
+	for i, seq := range played {
+		if seen[seq] {
+			t.Fatalf("sequence %d played more than once", seq)
+		}
+		seen[seq] = true
+		if i > 0 && int32(seq)-int32(played[i-1]) <= 0 {
+			t.Fatalf("playout order not increasing: %d then %d", played[i-1], seq)
+		}
+	}
+}
+
+// TestJitterBufferUnderHarshPacketLoss widens
+// TestJitterBufferUnderSimulatedPSTNConditions's ~3% loss to a much
+// harsher ~13% -- a genuinely bad PSTN/last-mile leg -- and asserts the
+// buffer still makes monotonic, panic-free progress and stays within its
+// memory bound.
+func TestJitterBufferUnderHarshPacketLoss(t *testing.T) {
+	const (
+		n               = 500
+		nominalInterval = 20 * time.Millisecond
+		jitterStdDev    = 15 * time.Millisecond
+		lossP           = 0.13 // ~13% loss, well above the existing 3% baseline test
+	)
+	start := time.Unix(1_700_000_100, 0)
+
+	rng := rand.New(rand.NewSource(101))
+	stream := simulatePSTNStream(rng, n, start, nominalInterval, jitterStdDev, lossP)
+
+	cfg := Config{
+		TargetDelay:        100 * time.Millisecond,
+		PacketInterval:     nominalInterval,
+		MaxPacketsBuffered: 64,
+	}
+	b := NewJitterBuffer(cfg)
+
+	totalTicks := n + int(cfg.TargetDelay/nominalInterval) + int(5*jitterStdDev/nominalInterval) + 10
+	played, lostCount := driveJitterBufferSimulation(t, b, stream, start, nominalInterval, totalTicks)
+
+	assertMonotonicNoDuplicates(t, played)
+
+	stats := b.Stats()
+	t.Logf("harsh-loss simulation: n=%d received=%d lost=%d late=%d duplicates=%d evicted=%d played=%d",
+		n, stats.Received, stats.Lost, stats.Late, stats.Duplicates, stats.EvictedForCapacity, len(played))
+
+	if stats.Lost == 0 {
+		t.Error("expected substantial PullLost given ~13% simulated packet loss")
+	}
+	if float64(stats.Lost) < float64(n)*0.08 || float64(stats.Lost) > float64(n)*0.30 {
+		t.Errorf("Lost = %d is implausible for %d packets at %.0f%% simulated loss with a %v target delay",
+			stats.Lost, n, lossP*100, cfg.TargetDelay)
+	}
+	if len(played)+lostCount == 0 {
+		t.Fatal("nothing played and nothing lost - buffer made no progress")
+	}
+}
+
+// simulateBurstyReorderStream generates a deterministic stream of n
+// packets, nominally spaced nominalInterval apart, but shuffles sequence
+// numbers within successive non-overlapping windows of windowSize packets
+// before assigning arrival times -- so within a burst, a packet can arrive
+// several sequence positions out of order (e.g. seq 7 arriving before seq
+// 0 within an 8-packet window), not just swapped with its immediate
+// neighbor like TestJitterBufferReordersOutOfOrderPackets. The globally
+// lowest sequence number (0) is guaranteed to be the first arrival, since
+// JitterBuffer establishes its base sequence/arrival time from whichever
+// packet is pushed first (see jitter.go's package doc comment) -- a real
+// stream's first-sent packet arriving before the stream "began" isn't a
+// scenario this buffer is designed to handle, so the test doesn't
+// manufacture that impossible case.
+func simulateBurstyReorderStream(rng *rand.Rand, n int, start time.Time, nominalInterval time.Duration, windowSize int) []simulatedPacket {
+	pkts := make([]simulatedPacket, n)
+	for i := 0; i < n; i++ {
+		pkts[i] = simulatedPacket{seq: uint16(i), present: true}
+	}
+
+	for ws := 0; ws < n; ws += windowSize {
+		we := ws + windowSize
+		if we > n {
+			we = n
+		}
+		window := pkts[ws:we]
+		rng.Shuffle(len(window), func(i, j int) { window[i], window[j] = window[j], window[i] })
+	}
+
+	minIdx := 0
+	for i, p := range pkts {
+		if p.seq < pkts[minIdx].seq {
+			minIdx = i
+		}
+	}
+	pkts[0], pkts[minIdx] = pkts[minIdx], pkts[0]
+
+	// Arrival times themselves stay regularly paced at nominalInterval
+	// (matching real per-packet network throughput and the playout
+	// clock's own pace) -- only the sequence-number *labels* attached to
+	// each arrival slot are shuffled above. This models "packets arrived
+	// out of order" without also compressing/inflating the stream's
+	// overall arrival rate, which would conflate reordering with a
+	// separate capacity-under-burst scenario.
+	for i := range pkts {
+		pkts[i].arrival = start.Add(time.Duration(i) * nominalInterval)
+	}
+	return pkts
+}
+
+// TestJitterBufferBurstyMultiPositionReordering exercises reordering
+// bursts harsher than TestJitterBufferReordersOutOfOrderPackets's single
+// adjacent swap: packets arrive shuffled several sequence positions out of
+// order within each burst window. Given a TargetDelay generous enough to
+// absorb a full window's worth of reordering, the buffer should still
+// deliver nearly everything, strictly in order, with no duplicates and no
+// unbounded memory growth.
+func TestJitterBufferBurstyMultiPositionReordering(t *testing.T) {
+	const (
+		n               = 300
+		nominalInterval = 20 * time.Millisecond
+		windowSize      = 8 // packets can arrive up to ~7 positions out of order within a burst
+	)
+	start := time.Unix(1_700_000_200, 0)
+
+	rng := rand.New(rand.NewSource(202))
+	stream := simulateBurstyReorderStream(rng, n, start, nominalInterval, windowSize)
+
+	cfg := Config{
+		TargetDelay:        time.Duration(windowSize+2) * nominalInterval, // generous enough to absorb a full window's worth of reordering
+		PacketInterval:     nominalInterval,
+		MaxPacketsBuffered: 64,
+	}
+	b := NewJitterBuffer(cfg)
+
+	totalTicks := n + int(cfg.TargetDelay/nominalInterval) + 10
+	played, lostCount := driveJitterBufferSimulation(t, b, stream, start, nominalInterval, totalTicks)
+
+	assertMonotonicNoDuplicates(t, played)
+
+	stats := b.Stats()
+	t.Logf("bursty-reorder simulation: n=%d received=%d lost=%d late=%d duplicates=%d evicted=%d played=%d",
+		n, stats.Received, stats.Lost, stats.Late, stats.Duplicates, stats.EvictedForCapacity, len(played))
+
+	if got := len(played); got < n-int(float64(n)*0.05) {
+		t.Errorf("played %d of %d packets, expected nearly all of them to survive multi-position reordering given a generous TargetDelay", got, n)
+	}
+	if lostCount > int(float64(n)*0.05) {
+		t.Errorf("lostCount = %d, implausibly high for a no-real-loss, reordering-only stream", lostCount)
+	}
+}
+
+// simulateJitterSpikeStream generates n packets at nominalInterval with
+// calm steady-state jitter (jitterStdDev), except for a run of spikeLen
+// packets starting at spikeStart which are additionally delayed by
+// spikeExtra -- simulating a sudden mid-call network hiccup (e.g. a brief
+// Wi-Fi or backhaul stall) rather than steady jitter alone.
+func simulateJitterSpikeStream(rng *rand.Rand, n int, start time.Time, nominalInterval, jitterStdDev time.Duration, spikeStart, spikeLen int, spikeExtra time.Duration) []simulatedPacket {
+	pkts := make([]simulatedPacket, 0, n)
+	for i := 0; i < n; i++ {
+		nominal := start.Add(time.Duration(i) * nominalInterval)
+		jitter := time.Duration(rng.NormFloat64() * float64(jitterStdDev))
+		arrival := nominal.Add(jitter)
+		if i >= spikeStart && i < spikeStart+spikeLen {
+			arrival = arrival.Add(spikeExtra)
+		}
+		if arrival.Before(start) {
+			arrival = start
+		}
+		pkts = append(pkts, simulatedPacket{seq: uint16(i), arrival: arrival, present: true})
+	}
+
+	for i := 1; i < len(pkts); i++ {
+		for j := i; j > 0 && pkts[j].arrival.Before(pkts[j-1].arrival); j-- {
+			pkts[j], pkts[j-1] = pkts[j-1], pkts[j]
+		}
+	}
+	return pkts
+}
+
+// TestJitterBufferSuddenJitterSpikeMidStream models a sudden network
+// hiccup partway through an otherwise-calm call: a fixed-delay jitter
+// buffer (this package is explicitly non-adaptive, see jitter.go's package
+// doc comment) cannot absorb an arbitrarily large one-off spike without
+// dropping the packets caught in it, but it must not panic, wedge, or
+// corrupt playout order -- it should keep making forward, in-order
+// progress once the hiccup passes.
+func TestJitterBufferSuddenJitterSpikeMidStream(t *testing.T) {
+	const (
+		n               = 400
+		nominalInterval = 20 * time.Millisecond
+		jitterStdDev    = 8 * time.Millisecond // calm steady-state jitter
+		spikeStart      = 200
+		spikeLen        = 15
+		spikeExtra      = 300 * time.Millisecond // a sudden ~300ms hiccup
+	)
+	start := time.Unix(1_700_000_300, 0)
+
+	rng := rand.New(rand.NewSource(303))
+	stream := simulateJitterSpikeStream(rng, n, start, nominalInterval, jitterStdDev, spikeStart, spikeLen, spikeExtra)
+
+	cfg := Config{
+		TargetDelay:        100 * time.Millisecond, // deliberately can't fully absorb a 300ms spike
+		PacketInterval:     nominalInterval,
+		MaxPacketsBuffered: 64,
+	}
+	b := NewJitterBuffer(cfg)
+
+	totalTicks := n + int((spikeExtra+cfg.TargetDelay)/nominalInterval) + int(5*jitterStdDev/nominalInterval) + 20
+	played, lostCount := driveJitterBufferSimulation(t, b, stream, start, nominalInterval, totalTicks)
+
+	assertMonotonicNoDuplicates(t, played)
+
+	stats := b.Stats()
+	t.Logf("jitter-spike simulation: n=%d received=%d lost=%d late=%d duplicates=%d evicted=%d played=%d",
+		n, stats.Received, stats.Lost, stats.Late, stats.Duplicates, stats.EvictedForCapacity, len(played))
+
+	if len(played) == 0 {
+		t.Fatal("nothing played at all - buffer wedged during the jitter spike")
+	}
+	// The spike itself is expected to cause loss right around it (a fixed
+	// TargetDelay can't absorb a 300ms hiccup on top of its normal 100ms
+	// budget), but the buffer must recover and keep delivering most
+	// non-spike packets, both before and after the hiccup.
+	if got, want := len(played), n-spikeLen*3; got < want {
+		t.Errorf("played %d of %d packets, expected the buffer to recover and deliver most non-spike packets after the hiccup (want at least %d)", got, n, want)
+	}
+	if lostCount == 0 {
+		t.Error("expected some PullLost from the deliberately-unabsorbable jitter spike")
+	}
+}

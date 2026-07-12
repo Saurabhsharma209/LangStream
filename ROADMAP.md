@@ -106,6 +106,11 @@ scheduling slip — see DEVLOG.md 2026-07-08 for the full writeup.
       conditions in tests) — but it has no live transport behind it yet,
       so it's an algorithm proven in simulation, not tuned against real
       PSTN traces. Depends on the same duplex-RTP decision below.
+      **Update (2026-07-12):** added 3 harsher stress-test scenarios
+      (~13% loss, bursty multi-position reordering, mid-stream jitter
+      spike) — still simulation-only groundwork, still blocked on the
+      same duplex-RTP decision for real-condition tuning; not checked
+      off.
 - [x] Fallback behavior: what happens when translation lags, a leg drops,
       or confidence is low (never silently mistranslate — degrade
       gracefully, e.g. pass through original audio with a warning tone).
