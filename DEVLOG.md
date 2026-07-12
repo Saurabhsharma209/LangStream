@@ -512,3 +512,133 @@ tightening in a future sprint, not urgent.
    continue expanding the Hinglish WER corpus with harder cases
 4. Docker-build verification still needs a human with Docker access; flip
    CI's `docker-build` job from informational to blocking once done
+
+## 2026-07-12 (unblock + duplex RTP) — interactive run, not a scheduled sprint
+
+Saurabh messaged directly ("now you are unblocked check") after ClearStream's
+own independent daily automation resolved the standing OnCleanAudio decision.
+This entry covers that interactive session, run the same day as (and after)
+today's regular Sprint 5 scheduled run above.
+
+### ClearStream coordination — RESOLVED
+Checked ClearStream's repo: still tagged `v0.1.0`, but `main` has moved past
+it. Commit `4d5ea467888c97a61d501efe33ba271b039f3348` ("[RTP-SIP] Add
+Session.CleanAudio() channel API for real-time clean-audio hand-off to
+LangStream") resolves the decision blocking LangStream since 2026-07-08:
+`rtp.Session.CleanAudio() <-chan CleanAudioFrame`, opt-in via
+`Config.CleanAudioBufferSize` (0 = disabled/default), delivering owned
+copies of post-suppression 16kHz PCM, non-blocking with drop-oldest-on-full
+backpressure. ClearStream's own `ROADMAP.md` "Resolved Decisions" section
+documents this and the two rejected alternatives (synchronous OnDTMF-style
+callback; LangStream forking its own RTP loop). No ClearStream code was
+touched by LangStream's automation — this was entirely ClearStream's own
+daily automation's work, exactly per COMBINED_ROADMAP.md's standing
+agreement.
+
+### Changes
+- `go.mod`, `go.sum`, `VERSIONING.md` — pinned `github.com/exotel/clearstream`
+  at the exact resolving commit via a pseudo-version
+  (`v0.0.0-20260712052406-4d5ea467888c`) plus a `replace` directive
+  (ClearStream's own `go.mod` declares module path `github.com/exotel/
+  clearstream`, which isn't its actual GitHub location —
+  `github.com/Saurabhsharma209/ClearStream` — so a plain `require` can't
+  resolve it). No ClearStream semver tag exists past this commit yet;
+  `VERSIONING.md` flags switching to a real tag as a follow-up once one
+  exists (EM)
+- `pkg/rtp/duplex.go` (new) — `DuplexSession`: composes two ClearStream
+  `rtp.Session` instances (caller leg, agent leg) bridged to a
+  `*langstream.Session`: `CleanAudio()` → `asr.AudioFrame` →
+  `Push{Caller,Agent}Audio`, and `{Agent,Caller}HearsAudio()` →
+  `InjectBotAudio` (already-existing ClearStream API, no conversion
+  needed — same 16-bit LE PCM byte layout both sides already use).
+  `NewDuplexSession`/`Start`/`Stop` lifecycle, 4 bridging goroutines, PCM
+  int16↔bytes conversion helpers. This is the actual Week 2 "Extend
+  ClearStream's pkg/rtp session for bidirectional media" roadmap item,
+  the single highest-risk item on the whole roadmap, done (Tech)
+- `pkg/rtp/duplex_test.go` (new, Tech) — PCM conversion unit tests plus
+  `TestDuplexSession_EndToEndLoopback`: real loopback UDP RTP packets sent
+  into the caller leg, real langstream.Session with mock ASR/MT/TTS,
+  confirms real synthesized RTP comes out the agent leg's forward socket.
+  (Tech's own agent run hit a stream-timeout mid-task with this test left
+  as a placeholder `t.Fatal("unreachable...")` — the EM finished it,
+  adding a `newLoopbackPort` helper to get a concrete UDP port ClearStream
+  doesn't otherwise expose externally, matching the port-discovery
+  approach the interrupted agent had already started reasoning through in
+  its own comments)
+- `pkg/rtp/duplex_bidirectional_test.go`,
+  `pkg/rtp/duplex_backpressure_test.go`,
+  `pkg/rtp/duplex_shutdown_test.go`, `pkg/rtp/duplex_construct_test.go`
+  (all new) — QA's independent integration testing: concurrent
+  bidirectional traffic (both legs active at once), backpressure/drop-
+  oldest under flood with a goroutine-leak check, shutdown-ordering edge
+  cases, and the `NewDuplexSession` agent-leg-construction-failure path
+  (confirms the caller leg's socket really is released). (QA)
+
+### Bugs found/fixed
+**Real bug: `Start()`/`Stop()` data race, found by QA, fixed by EM same
+day.** QA's `TestDuplexSession_StopConcurrentWithStart` (calling `Start()`
+and `Stop()` concurrently from separate goroutines, simulating a caller
+racing its own startup against a near-simultaneous shutdown signal, e.g. a
+SIP BYE) caught a genuine, `go test -race`-confirmed data race: `Start()`'s
+`d.wg.Add(4)` and `Stop()`'s internal `d.wg.Wait()` goroutine ran under two
+*independent* `sync.Once` guards (`startOnce`, `stopOnce`) with no
+happens-before edge between them — if `Stop()` reached `wg.Wait()` before a
+concurrent `Start()` reached `wg.Add(4)`, that's exactly the "Add with a
+positive delta concurrent with Wait while the counter may still be zero"
+pattern `sync.WaitGroup`'s own doc comment calls out as a data race.
+Reproduced ~2/5 to 1/6 runs. Per QA's charter, QA reported this precisely
+(exact mechanism, reproduction rate, stack trace) without touching
+`duplex.go`. The EM fixed it: replaced the independent `atomic.Bool` +
+`startOnce`/`stopOnce` pair with a single `lifecycleMu` mutex that `Start()`
+holds for its *entire* body (including `wg.Add(4)` and starting both
+ClearStream sessions) and that `Stop()`'s single (`stopOnce`-guarded) body
+uses to atomically read `startedFlag`/set `stoppedFlag` before proceeding —
+guaranteeing `Start()`'s `wg.Add(4)`, if it happens at all, always
+happens-before any concurrent `Stop()`'s `wg.Wait()`. Verified fixed at
+`go test -race -run TestDuplexSession_StopConcurrentWithStart -count=30`
+(0 failures, was previously failing intermittently) and the full suite at
+`-race -count=5` (0 failures). This is the third instance of this exact
+class of bug in this codebase's history (Session.Close() Day-1 ordering
+bug; the `.gitignore` fresh-clone bug; now this) — all three were caught
+by deliberately adversarial verification (integration tests, fresh clones,
+concurrent-call stress) rather than "it compiles and the happy path
+passes."
+
+No other bugs found. Bidirectional, backpressure, and construction-failure
+tests all passed against Tech's code as written.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...` clean
+- `go test ./... -race -count=5` — all 10 packages pass, no flakes,
+  including the race-fix regression test at an additional isolated
+  `-count=30`
+- `gofmt -l .` — clean
+- `git add -A -n` — all 8 new/changed files correctly trackable
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked / follow-ups
+- `DuplexSession` is not yet wired into `cmd/langstream`'s CLI or
+  `examples/vsip_example`'s real SIP/socket address plumbing — that's
+  real network/config work, deliberately scoped out of this run to keep
+  the bridge itself (already the highest-risk item) reviewable on its own.
+  Next concrete unblocked step.
+- `pkg/rtp/jitter.go`'s groundwork is not yet wired into `DuplexSession`
+  (which currently relies on ClearStream's own per-leg `JitterDepth`
+  instead) — worth a decision on whether LangStream's own jitter buffer
+  is still needed on top of ClearStream's, or was superseded by it.
+- ClearStream has no tag past `v0.1.0` covering the `CleanAudio()` commit;
+  `go.mod`'s pseudo-version pin should move to a real tag once one exists.
+- `NewDuplexSession`'s agent-leg-construction-failure path depends on a
+  ClearStream API gap (`Session.Stop()` before `Session.Start()` hangs;
+  worked around via Start-then-Stop) — worth raising with ClearStream as
+  a small upstream ask (e.g. a `Close()`-without-`Start()`, or deferring
+  the UDP bind to `Start()`), not urgent.
+
+### Tomorrow
+1. Wire `DuplexSession` into `cmd/langstream`'s CLI and/or
+   `examples/vsip_example`'s real socket plumbing — the concrete next
+   step now that the bridge itself is proven
+2. Decide whether `pkg/rtp/jitter.go` still has a role once real traffic
+   exists, or whether ClearStream's own per-leg jitter buffer supersedes it
+3. Continue the previously-planned WER corpus / jitter-stress-test
+   tightening from today's earlier Sprint 5 entry

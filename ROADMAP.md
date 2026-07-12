@@ -64,7 +64,7 @@ blocker for this week's checklist items below — do not report it as one.
 - [x] GPT-4o streaming translation, Hindi↔English
 - [x] Cartesia streaming TTS, both languages; basic persona config
 - [x] Wire real backends behind the Week 1 interfaces (swap, don't rewrite)
-- [ ] Extend ClearStream's `pkg/rtp` session for bidirectional media —
+- [x] Extend ClearStream's `pkg/rtp` session for bidirectional media —
       this is the highest-risk item; budget extra time here. **Coordination
       checkpoint** (see `COMBINED_ROADMAP.md`): check ClearStream's latest
       tag first; if `pkg/rtp` needs an actual code change to support
@@ -81,19 +81,43 @@ blocker for this week's checklist items below — do not report it as one.
       optional `Config.OnCleanAudio func([]int16)` callback — is needed
       for the ASR-in direction. Not attempted this run per the standing
       cross-repo rule; not started until Saurabh decides how to proceed.
+      **Done (2026-07-12).** ClearStream's own daily automation resolved
+      the decision by adding `rtp.Session.CleanAudio() <-chan
+      CleanAudioFrame` (opt-in, non-blocking, drop-oldest-on-full —
+      ClearStream's ROADMAP.md "Resolved Decisions" 2026-07-12 entry).
+      Same day, LangStream added `pkg/rtp/duplex.go`'s `DuplexSession`:
+      composes two ClearStream `rtp.Session` instances (caller/agent
+      legs), bridging `CleanAudio()` → `asr.AudioFrame` →
+      `Session.Push{Caller,Agent}Audio` and `Session.{Agent,Caller}HearsAudio()`
+      → `InjectBotAudio`. Proven against real (loopback) UDP RTP end to
+      end, not just mocked — see `pkg/rtp/duplex_test.go`'s
+      `TestDuplexSession_EndToEndLoopback` and the additional QA
+      integration tests (bidirectional concurrent traffic, backpressure/
+      goroutine-leak, shutdown-ordering, construction-failure-path — see
+      DEVLOG.md 2026-07-12). QA's shutdown-ordering test caught, and the
+      EM fixed same day, a real `Start()`/`Wait()` `sync.WaitGroup` data
+      race. `go.mod` now pins ClearStream via a pseudo-version + `replace`
+      (no ClearStream semver tag exists past the fixing commit yet — see
+      `VERSIONING.md`). **Not yet done:** wiring `DuplexSession` into
+      `cmd/langstream`'s CLI or `examples/vsip_example`'s real SIP/socket
+      plumbing — that's real address/config plumbing, intentionally left
+      for a follow-up sprint rather than rushed alongside the bridge
+      itself.
 - [x] First real Hindi↔English round-trip on recorded test audio (not
       live calls yet), measure actual glass-to-glass latency — done
       against fake local vendor servers (Deepgram/Sarvam/GPT-4o/Cartesia
       protocol-accurate fakes), per the Week 2 decision above; live-key
       version deferred until real vendor keys exist.
 
-**Week 2 status (2026-07-08, Sprint 2): 5 of 6 items complete.** Real,
+**Week 2 status: 6 of 6 items complete (2026-07-12).** Real,
 protocol-accurate vendor client code for ASR/MT/TTS is written, tested
 against fake vendor servers, and wired behind the Week 1 interfaces via a
 name-based backend registry (`pkg/langstream/backends.go`,
-`langstream demo --backend deepgram|sarvam|gpt4o|cartesia|mock`). The one
-remaining item (duplex RTP) is a genuine decision point for Saurabh, not a
-scheduling slip — see DEVLOG.md 2026-07-08 for the full writeup.
+`langstream demo --backend deepgram|sarvam|gpt4o|cartesia|mock`). The
+remaining item (duplex RTP) was a genuine decision point for Saurabh, not
+a scheduling slip (see DEVLOG.md 2026-07-08 for the original writeup) —
+resolved and implemented 2026-07-12, see the item above and DEVLOG.md
+2026-07-12.
 
 ## Week 3 — Pilot Hardening (Roadmap Days 11-15, target: ~Jul 11-13)
 
@@ -108,9 +132,14 @@ scheduling slip — see DEVLOG.md 2026-07-08 for the full writeup.
       PSTN traces. Depends on the same duplex-RTP decision below.
       **Update (2026-07-12):** added 3 harsher stress-test scenarios
       (~13% loss, bursty multi-position reordering, mid-stream jitter
-      spike) — still simulation-only groundwork, still blocked on the
-      same duplex-RTP decision for real-condition tuning; not checked
-      off.
+      spike) — still simulation-only groundwork. **The duplex-RTP
+      decision this depended on is now resolved (see the Week 2 item
+      above)** — real transport (`pkg/rtp.DuplexSession`, loopback-UDP
+      proven) exists as of 2026-07-12, but this jitter buffer isn't wired
+      into it yet (`DuplexSession` currently relies on ClearStream's own
+      internal `JitterDepth` per leg, not this package's jitter.go). Real-
+      condition tuning against actual PSTN traces still needs live/pilot
+      traffic, which doesn't exist yet either way. Not checked off.
 - [x] Fallback behavior: what happens when translation lags, a leg drops,
       or confidence is low (never silently mistranslate — degrade
       gracefully, e.g. pass through original audio with a warning tone).
@@ -119,7 +148,7 @@ scheduling slip — see DEVLOG.md 2026-07-08 for the full writeup.
       optional warning tone; repeated failures or a fatal backend error
       permanently degrade a leg without crashing or hanging. See
       `pkg/langstream/fallback.go`, integration-tested end to end.
-- [ ] Exotel vSIP integration example wired end-to-end. **Status (2026-07-10): contract/shape example added, not end-to-end.** `examples/vsip_example/` now shows the intended integration shape (`VSIPCallAdapter` pushing/pulling PCM through a real `langstream.Session`), integration-tested against a real Session with mock backends. Real SIP/RTP socket plumbing and the ClearStream duplex-RTP piece are still not implemented — both depend on the same 2026-07-08 ClearStream decision. Left unchecked deliberately; do not mark this done until real transport is wired.
+- [ ] Exotel vSIP integration example wired end-to-end. **Status (2026-07-10): contract/shape example added, not end-to-end.** `examples/vsip_example/` now shows the intended integration shape (`VSIPCallAdapter` pushing/pulling PCM through a real `langstream.Session`), integration-tested against a real Session with mock backends. Real SIP/RTP socket plumbing and the ClearStream duplex-RTP piece are still not implemented. **Update (2026-07-12):** the ClearStream duplex-RTP dependency itself is resolved and built (`pkg/rtp.DuplexSession`, see the Week 2 item above) — this item is now unblocked, but wiring `examples/vsip_example` to use `DuplexSession` plus real SIP/socket address plumbing is still todo, deliberately scoped out of the 2026-07-12 sprint. Left unchecked; next concrete unblocked step for a future sprint.
 - [x] Observability dashboard (latency percentiles, error rates, per-vendor cost).
       **Done (2026-07-09):** `pkg/observability` now tracks error rates and
       per-vendor cost alongside the existing latency percentiles, and
