@@ -20,6 +20,30 @@
 // and never revised. A packet arriving before its deadline is buffered
 // (absorbing jitter and out-of-order arrival); a sequence number whose
 // deadline passes with no packet on hand is declared lost and skipped.
+//
+// Repurposed (2026-07-13, EM decision) from inbound network-jitter
+// absorption to outbound TTS pacing: this file's original motivating use
+// case was smoothing inbound RTP arrival jitter ahead of ASR (see the
+// ROADMAP.md reference above), built before DuplexSession (duplex.go)
+// existed. Once DuplexSession landed, it turned out ClearStream's own
+// rtp.Session already jitter-buffers each leg's inbound audio internally
+// (see LegConfig.JitterDepth) before ever handing LangStream clean PCM via
+// CleanAudio() -- making JitterBuffer's original inbound role redundant.
+// Rather than delete working, thoroughly-tested code, JitterBuffer is now
+// used by duplex.go's feedTTSPacer/runTTSPacer as an outbound pacing
+// buffer on the TTS-synthesis -> InjectBotAudio path instead: TTS
+// synthesis latency is bursty (variable per-chunk generation time), and
+// this buffer's existing fixed-delay-then-release algorithm is exactly the
+// right shape to smooth that burstiness before InjectBotAudio, just
+// applied at a different point in the pipeline than originally designed
+// for. The algorithm/API below is unchanged; only the caller and the
+// Config values it is constructed with differ (see duplex.go's
+// DefaultTTSPacingTargetDelay/DefaultTTSPacingInterval). One consequence
+// worth calling out explicitly: PullLost's meaning shifts in this new
+// context from "a network packet genuinely never arrived" to "TTS
+// synthesis for this chunk stalled longer than the pacing buffer's
+// TargetDelay budget, so it was dropped to keep output latency bounded"
+// -- see PullLost's doc comment and duplex.go's runTTSPacer.
 package rtp
 
 import (
@@ -167,6 +191,15 @@ const (
 	// (e.g. comfort noise, silence, or repeating the previous frame) --
 	// that is a media-specific policy this transport-agnostic package
 	// deliberately does not impose.
+	//
+	// In duplex.go's outbound-TTS-pacing use of JitterBuffer (see the
+	// package doc comment's repurposing note), "the packet" is a
+	// synthesized tts.AudioChunk, not an RTP packet, so PullLost there
+	// means "TTS synthesis for this chunk took longer than the pacing
+	// buffer's TargetDelay budget", and the caller's chosen concealment
+	// policy (see runTTSPacer) is simply to drop it and move on, bounding
+	// added latency rather than letting synthesized speech fall
+	// arbitrarily far behind real-time.
 	PullLost
 )
 

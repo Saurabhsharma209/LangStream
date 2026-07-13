@@ -453,7 +453,7 @@ func TestSimulatePSTNStreamDeterministicForFixedSeed(t *testing.T) {
 // before ticks ran out (a test-setup bug, not a buffer bug). It returns
 // the sequence of successfully played packets in play order and the total
 // PullLost count.
-func driveJitterBufferSimulation(t *testing.T, b *JitterBuffer, stream []simulatedPacket, start time.Time, nominalInterval time.Duration, totalTicks int) (played []uint16, lostCount int) {
+func driveJitterBufferSimulation(t *testing.T, b *JitterBuffer, stream []simulatedPacket, start time.Time, nominalInterval time.Duration, totalTicks int, n int) (played []uint16, lostCount int) {
 	t.Helper()
 	streamIdx := 0
 	for tick := 0; tick < totalTicks; tick++ {
@@ -477,11 +477,83 @@ func driveJitterBufferSimulation(t *testing.T, b *JitterBuffer, stream []simulat
 		if cur := b.Stats().CurrentlyBuffered; cur > b.cfg.MaxPacketsBuffered {
 			t.Fatalf("tick %d: CurrentlyBuffered = %d, exceeds MaxPacketsBuffered = %d -- unbounded memory growth under stress", tick, cur, b.cfg.MaxPacketsBuffered)
 		}
+
+		// Packet-accounting invariant (2026-07-13 QA-workstream follow-up
+		// to the 2026-07-12 Tech-workstream sprint that added these
+		// harsher stress scenarios): JitterBuffer.Pull always resolves
+		// exactly one sequence number per successful call, advancing its
+		// internal "next expected" pointer by exactly 1 via either
+		// PullOK (played) or PullLost (lost) -- see jitter.go's Pull. So
+		// len(played)+lostCount must equal exactly the number of
+		// sequence positions resolved so far, and once it reaches n (the
+		// simulated stream's full 0..n-1 range) every one of the n
+		// intended packets has been accounted for as played XOR lost,
+		// with none silently dropped without being counted.
+		//
+		// We stop driving the simulation the instant that happens
+		// instead of continuing to burn through totalTicks's slack,
+		// because JitterBuffer has no notion of "end of stream" (by
+		// design -- it's transport-agnostic and doesn't know how many
+		// packets a caller intends to send). If we kept calling Pull
+		// past this point, every further tick would manufacture a
+		// *phantom* PullLost for a sequence number that was never part
+		// of the simulated stream at all (nextSeq just keeps climbing
+		// past n forever once its deadline math says "expired"),
+		// inflating lostCount by however many extra ticks of headroom
+		// totalTicks happens to contain -- a number with no relation to
+		// real packet loss. (This was verified empirically: before this
+		// fix, e.g. the bursty-reordering scenario -- which the
+		// simulator never drops a single packet in -- still reported
+		// stats.Lost=10, exactly matching that test's "+10" totalTicks
+		// padding, i.e. 10 purely phantom losses.) Stopping here keeps
+		// played/lostCount an honest, exact account of precisely the n
+		// real packets under test: no tolerance window is needed
+		// because the buffer's one-resolution-per-Pull design makes the
+		// invariant exact, not approximate, as long as the simulation
+		// itself stops exactly at n instead of overrunning it.
+		if len(played)+lostCount >= n {
+			break
+		}
 	}
 	if streamIdx != len(stream) {
-		t.Fatalf("test bug: only pushed %d of %d generated arrivals before totalTicks ran out - widen totalTicks", streamIdx, len(stream))
+		t.Fatalf("test bug: only pushed %d of %d generated arrivals before the stream fully resolved - widen TargetDelay relative to jitter so arrivals land within the buffering window", streamIdx, len(stream))
+	}
+	if got := len(played) + lostCount; got != n {
+		t.Fatalf("packet-accounting invariant violated: played(%d)+lost(%d) = %d, want exactly n = %d -- either a packet was silently dropped without being counted as lost, or totalTicks ran out before the stream fully resolved (widen totalTicks)", len(played), lostCount, got, n)
 	}
 	return played, lostCount
+}
+
+// assertPacketAccounting asserts the core packet-accounting invariant
+// this package's jitter buffer must uphold under any of the harsher
+// simulated scenarios below: every one of the n sequence numbers in the
+// simulated stream must end up counted as exactly one of played or lost,
+// with none silently disappearing uncounted (e.g. a regression that
+// dropped a packet on the floor without ever incrementing stats.Lost).
+//
+// This is asserted as an *exact* equality, not a fuzzy tolerance window.
+// That's possible (and correct) here because JitterBuffer.Pull always
+// resolves exactly one sequence number per successful call by advancing
+// its internal "next expected" pointer by exactly 1, via either PullOK
+// (played) or PullLost (lost) -- see jitter.go's Pull doc comment. So
+// played+lost is, by construction, always exactly the count of sequence
+// positions resolved so far; it can only fail to equal n if either (a) a
+// packet was dropped without being accounted for (the real regression
+// this guards against), or (b) the simulation kept driving Pull past the
+// stream's real end, which manufactures *phantom* losses for sequence
+// numbers that were never actually sent (see
+// driveJitterBufferSimulation's comment for why, and why it stops itself
+// exactly at n to avoid that). A tolerance window would risk masking
+// exactly the silent-drop regression this check exists to catch, so we
+// don't use one.
+func assertPacketAccounting(t *testing.T, played []uint16, lostCount int, statsLost int64, n int) {
+	t.Helper()
+	if got := len(played) + lostCount; got != n {
+		t.Errorf("packet-accounting invariant violated: played(%d)+lost(%d) = %d, want exactly n=%d -- a packet may have been silently dropped without being counted as lost", len(played), lostCount, got, n)
+	}
+	if int64(lostCount) != statsLost {
+		t.Errorf("lostCount observed by the test (%d) != JitterBuffer's own Stats().Lost (%d) -- the buffer's own counter disagrees with what Pull actually returned", lostCount, statsLost)
+	}
 }
 
 // assertMonotonicNoDuplicates fails the test if played is not a strictly
@@ -528,13 +600,15 @@ func TestJitterBufferUnderHarshPacketLoss(t *testing.T) {
 	b := NewJitterBuffer(cfg)
 
 	totalTicks := n + int(cfg.TargetDelay/nominalInterval) + int(5*jitterStdDev/nominalInterval) + 10
-	played, lostCount := driveJitterBufferSimulation(t, b, stream, start, nominalInterval, totalTicks)
+	played, lostCount := driveJitterBufferSimulation(t, b, stream, start, nominalInterval, totalTicks, n)
 
 	assertMonotonicNoDuplicates(t, played)
 
 	stats := b.Stats()
 	t.Logf("harsh-loss simulation: n=%d received=%d lost=%d late=%d duplicates=%d evicted=%d played=%d",
 		n, stats.Received, stats.Lost, stats.Late, stats.Duplicates, stats.EvictedForCapacity, len(played))
+
+	assertPacketAccounting(t, played, lostCount, stats.Lost, n)
 
 	if stats.Lost == 0 {
 		t.Error("expected substantial PullLost given ~13% simulated packet loss")
@@ -623,13 +697,15 @@ func TestJitterBufferBurstyMultiPositionReordering(t *testing.T) {
 	b := NewJitterBuffer(cfg)
 
 	totalTicks := n + int(cfg.TargetDelay/nominalInterval) + 10
-	played, lostCount := driveJitterBufferSimulation(t, b, stream, start, nominalInterval, totalTicks)
+	played, lostCount := driveJitterBufferSimulation(t, b, stream, start, nominalInterval, totalTicks, n)
 
 	assertMonotonicNoDuplicates(t, played)
 
 	stats := b.Stats()
 	t.Logf("bursty-reorder simulation: n=%d received=%d lost=%d late=%d duplicates=%d evicted=%d played=%d",
 		n, stats.Received, stats.Lost, stats.Late, stats.Duplicates, stats.EvictedForCapacity, len(played))
+
+	assertPacketAccounting(t, played, lostCount, stats.Lost, n)
 
 	if got := len(played); got < n-int(float64(n)*0.05) {
 		t.Errorf("played %d of %d packets, expected nearly all of them to survive multi-position reordering given a generous TargetDelay", got, n)
@@ -696,13 +772,15 @@ func TestJitterBufferSuddenJitterSpikeMidStream(t *testing.T) {
 	b := NewJitterBuffer(cfg)
 
 	totalTicks := n + int((spikeExtra+cfg.TargetDelay)/nominalInterval) + int(5*jitterStdDev/nominalInterval) + 20
-	played, lostCount := driveJitterBufferSimulation(t, b, stream, start, nominalInterval, totalTicks)
+	played, lostCount := driveJitterBufferSimulation(t, b, stream, start, nominalInterval, totalTicks, n)
 
 	assertMonotonicNoDuplicates(t, played)
 
 	stats := b.Stats()
 	t.Logf("jitter-spike simulation: n=%d received=%d lost=%d late=%d duplicates=%d evicted=%d played=%d",
 		n, stats.Received, stats.Lost, stats.Late, stats.Duplicates, stats.EvictedForCapacity, len(played))
+
+	assertPacketAccounting(t, played, lostCount, stats.Lost, n)
 
 	if len(played) == 0 {
 		t.Fatal("nothing played at all - buffer wedged during the jitter spike")

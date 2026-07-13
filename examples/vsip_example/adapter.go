@@ -24,12 +24,13 @@ import (
 //     CallerHearsAudio / AgentHearsAudio
 //
 // A real integration would replace the "in" channels below with audio
-// decoded from RTP packets read off a live vSIP socket (after ClearStream's
-// duplex-RTP integration supplies noise-suppressed PCM for the caller->ASR
-// direction — see DEVLOG.md's 2026-07-08 entry for why that isn't
-// available yet), and would replace the playback callbacks with code that
-// re-encodes the PCM and writes it to the corresponding outbound RTP
-// stream. Neither of those exists in this file; see doc.go.
+// decoded from RTP packets read off a live vSIP socket, and would replace
+// the playback callbacks with code that re-encodes the PCM and writes it
+// to the corresponding outbound RTP stream. Neither of those exists in
+// this file -- see doc.go, and see real_rtp.go's runRealRTPDemo for the
+// real-RTP-socket counterpart to this in-process-channel shape demo
+// (built on rtp.DuplexSession, now that ClearStream's CleanAudio() makes
+// the caller->ASR direction available -- see pkg/rtp/duplex.go).
 type VSIPCallAdapter struct {
 	sess *langstream.Session
 

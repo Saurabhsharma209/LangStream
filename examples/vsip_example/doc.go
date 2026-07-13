@@ -1,30 +1,36 @@
-// Command vsip_example shows the shape of an Exotel vSIP trunk integration
-// with a langstream.Session: what a real integration would call on the
-// Session, and in what order, once a live call's audio is available.
+// Command vsip_example shows two complementary things about integrating a
+// langstream.Session with an Exotel vSIP trunk call:
+//
+//  1. main.go's original VSIPCallAdapter demo: the Session-method-level
+//     integration *contract/shape* -- which langstream.Session methods
+//     (PushCallerAudio, PushAgentAudio, CallerHearsAudio, AgentHearsAudio)
+//     a real integration calls and in what order -- using in-process
+//     channels (see fakeAudioSource) standing in for RTP, so the contract
+//     itself is easy to read without any socket/RTP noise around it.
+//  2. real_rtp.go's runRealRTPDemo: the same kind of call wired to a real
+//     rtp.DuplexSession (see pkg/rtp/duplex.go) over real loopback UDP
+//     sockets and real RTP packets -- proving the actual RTP/ClearStream
+//     integration this file originally (2026-07-08/09) flagged as not
+//     yet implemented now works end to end, not just as a Go-level
+//     method contract.
 //
 // Scope — read this before assuming more than is here:
 //
-//   - This example does NOT implement Exotel vSIP trunk signaling, an RTP
-//     socket, or PCM extraction from RTP packets. Inbound "caller" and
-//     "agent" audio here is produced by a simulated fake source (see
-//     fakeAudioSource in main.go) standing in for "audio already decoded
-//     to 16-bit PCM by whatever sits between the vSIP trunk and this
-//     process".
-//   - It does NOT implement ClearStream's duplex-RTP integration. As of
-//     2026-07-08/09 (see DEVLOG.md), ClearStream's pkg/rtp.Session exports
-//     InjectBotAudio for the TTS-out direction but has no exported hook for
-//     the caller->ASR direction — that needs an (unauthorized, not
-//     attempted) ClearStream code change. This example is deliberately
-//     agnostic to that: VSIPCallAdapter (see adapter.go) just needs
-//     *some* source of decoded PCM frames and *some* sink for playback
-//     chunks, whatever eventually supplies/consumes them.
-//   - This is a contract/shape example, not an end-to-end wired
-//     integration: it demonstrates which langstream.Session methods
-//     (PushCallerAudio, PushAgentAudio, CallerHearsAudio, AgentHearsAudio)
-//     a real vSIP integration would call and how their inputs/outputs
-//     compose via VSIPCallAdapter, so Exotel's SIP team has a concrete
-//     Go-level starting point once the duplex-RTP decision above is
-//     resolved.
+//   - Neither demo implements Exotel vSIP trunk *signaling* (no SIP/SDP).
+//     runRealRTPDemo's "caller sink"/"agent sink" loopback sockets stand
+//     in for wherever a real vSIP trunk would actually terminate each
+//     leg's RTP (an address a real integration would learn via SIP/SDP
+//     negotiation instead); main.go's VSIPCallAdapter demo doesn't use
+//     RTP or sockets at all, real or simulated.
+//   - Both demos use mock ASR/MT/TTS backends (see pkg/langstream's
+//     backend registry) rather than real vendors -- ROADMAP.md's Week 2
+//     decision, and orthogonal to what either demo is actually
+//     demonstrating (Session-method contract vs. real RTP/socket
+//     plumbing, respectively). A real integration would select real
+//     vendor backends the same way `langstream demo --backend NAME` does
+//     (see cmd/langstream/main.go), and would replace runRealRTPDemo's
+//     loopback sinks with the trunk's real remote RTP endpoints and its
+//     simulated RTP sender with the trunk's actual inbound RTP stream.
 //
 // Run it with:
 //

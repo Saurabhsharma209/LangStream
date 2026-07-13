@@ -642,3 +642,150 @@ tests all passed against Tech's code as written.
    exists, or whether ClearStream's own per-leg jitter buffer supersedes it
 3. Continue the previously-planned WER corpus / jitter-stress-test
    tightening from today's earlier Sprint 5 entry
+
+## 2026-07-13 (Sprint 7: vSIP end-to-end + TTS pacing + QA hardening) — scheduled run
+
+### Agents run
+Tech, QA (in parallel). PE/SRE not needed — today's scope (Week 3's two
+remaining items) didn't touch `pkg/asr`/`pkg/translate`/`pkg/tts` or
+CI/Docker/observability files.
+
+### Repo health at start
+Clean: `go build ./...`, `go vet ./...`, `go test ./... -race` (all 10
+packages), `gofmt -l .` all clean before any changes. ClearStream checked
+(`git ls-remote --tags` + GitHub API): still tagged only `v0.1.0`, latest
+commit unchanged since 2026-07-12 (a docs-only DEVLOG entry) — no new
+ClearStream work relevant today, no `VERSIONING.md` pin change needed.
+
+### Changes
+
+**Tech — vSIP example + CLI wired end-to-end (Week 3's last blocked item)**
+- `cmd/langstream/duplex.go` (new): `langstream duplex` subcommand builds
+  a real `rtp.DuplexSession` from CLI flags (both legs' listen/forward UDP
+  addresses, payload type, jitter depth, suppressor backend), mounts the
+  observability dashboard, graceful SIGINT/SIGTERM shutdown. Wired into
+  `main()`/`usage()`.
+- `examples/vsip_example/real_rtp.go` (new): `runRealRTPDemo` runs a real
+  `rtp.DuplexSession` over real loopback UDP sockets (mock ASR/MT/TTS per
+  the Week 2 decision — no vendor keys yet), called from `main()` after
+  the existing shape-only `VSIPCallAdapter` demo.
+- `cmd/langstream/duplex_test.go`, `examples/vsip_example/real_rtp_test.go`
+  (new) — flag validation, construction-failure paths, real loopback
+  end-to-end tests, dashboard on/off variants.
+
+**Tech — jitter buffer repurposed as outbound TTS pacing (2026-07-12's
+"does jitter.go still have a role" question, resolved)**
+- Decision (EM, going into today's agent brief): ClearStream now
+  jitter-buffers each leg's *inbound* audio internally before `CleanAudio()`
+  hands off already-clean PCM, making `jitter.go`'s original inbound use
+  case redundant. Repurposed the same `JitterBuffer` type as an *outbound*
+  pacing/smoothing stage on the TTS→`InjectBotAudio` path instead — TTS
+  synthesis is bursty, so pacing synthesized chunks before injection avoids
+  choppy playback.
+- `pkg/rtp/duplex.go`: `feedTTSPacer` (producer, tags each `tts.AudioChunk`
+  with an incrementing `SeqNum`) + `runTTSPacer` (consumer, ticks at
+  `DefaultTTSPacingInterval`=20ms, releases at most one chunk per tick).
+  `Start()` now runs 6 bridging goroutines (was 4).
+- `pkg/rtp/jitter.go`: new `ttsPacer` wrapper around `*JitterBuffer` with
+  an atomic `pushed` counter, bounding `runTTSPacer` so it stops once all
+  fed chunks are drained instead of ticking forever and manufacturing
+  phantom "lost" chunks past end-of-stream — a real bug Tech's own test
+  caught before landing (see Bugs below).
+- `pkg/rtp/tts_pacing_test.go` (new, Tech): in-order/unmodified delivery,
+  real time-spread pacing, delivery of a buffered chunk after the feed
+  channel closes but before ctx cancellation.
+
+**QA — jitter-buffer packet-accounting invariant tightened (QA's own
+2026-07-12 follow-up)**
+- `pkg/rtp/jitter_test.go`: added an `n int` parameter to the shared
+  `driveJitterBufferSimulation` helper so it stops the instant
+  `len(played)+lostCount == n` and hard-fails if that sum never reaches
+  `n`. New `assertPacketAccounting` helper asserts **exact** equality
+  (`played+lost == n`), with a comment on why exact (not fuzzy-tolerance)
+  equality is correct: `Pull` always resolves exactly one sequence number
+  per call, so a tolerance window would risk masking the exact silent-drop
+  regression this check exists to catch.
+
+**QA — Hinglish WER corpus expanded (6 → 15 entries)**
+- `pkg/qa/corpus.go`, `pkg/qa/corpus_test.go`, `wer_measurement_test.go`:
+  9 new hand-verified cases — mid-sentence code-switching, English
+  loanwords in Hindi grammar, English digits/Hindi dates mixed, filler
+  words, first insertion-only case, first 2-substitution case, a clean
+  (WER 0.0) technical-jargon baseline. All wired into
+  `TestFixedCorpus_PrecomputedWERMatches` and the fake-Sarvam-backed
+  `TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline`.
+
+### Bugs found/fixed
+
+**Two real bugs, both found and fixed by Tech via Tech's own tests, before
+landing (not flagged as cross-workstream issues — contained within Tech's
+own owned files):**
+1. First `runTTSPacer` draft drained *all* ready packets per tick instead
+   of one — `JitterBuffer.Pull` returns immediately for an
+   already-buffered packet regardless of deadline, so pacing only comes
+   from calling `Pull` at most once per tick, not from `Pull` itself.
+2. Unbounded `Pull`-forever bug: without a way to know "no more packets
+   are coming," `runTTSPacer` would tick forever after the last real
+   chunk, manufacturing phantom "lost" chunks for sequence numbers that
+   never existed, for the rest of the process's life. Fixed with the
+   `ttsPacer.pushed` atomic counter bound.
+3. Shutdown-ordering bug (also Tech, own-files): `buildDuplexSession` was
+   constructing `langstream.Session` against the same context that
+   SIGINT/SIGTERM cancels, so the instant shutdown began, the Session's
+   internal translate/synthesize goroutines abandoned the final-utterance
+   flush before `Close()` could deliver it — defeating graceful shutdown
+   silently. Fixed: `Session` now constructed against
+   `context.Background()`; shutdown reordered to `sess.Close()` →
+   `duplexFinalDrainGrace` (250ms) → `duplex.Stop()`. Same fix applied in
+   `examples/vsip_example/real_rtp.go`.
+
+**One measurement-harness finding, QA:** the pre-existing stress-test
+helper drove `Pull` for extra "slack" ticks past the real end of each
+simulated stream. Since `JitterBuffer` has no end-of-stream concept, those
+extra ticks manufactured phantom `PullLost` events tied purely to each
+test's arbitrary tick padding — e.g. `TestJitterBufferBurstyMultiPosition
+Reordering` reported `Lost=10` even though its simulator never drops a
+single packet (all 10 phantom, matching that test's `+10` padding exactly).
+After the fix: harsh-loss `lost` 87→75, bursty-reorder 10→0, jitter-spike
+52→15 (now exactly matching its `late` count). Not a `jitter.go` bug — a
+property of driving `Pull` past the data — but it was corrupting what
+"Lost" meant in these tests. Fixed as part of Task A above.
+
+No cross-workstream bugs — Tech and QA's file sets didn't overlap
+(confirmed via `git status`/`git diff` before integrating), and both
+agents independently verified the other's in-flight build breakage during
+the parallel run resolved once each finished (noted in their own reports).
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...` clean
+- `go test ./... -race -count=3` — all 10 packages pass, no flakes
+- `gofmt -l .` — clean
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- Real-condition jitter-buffer tuning against live PSTN traces — needs
+  live/pilot call traffic, which doesn't exist until Week 4. Unchanged.
+- `runServe`'s pre-existing shutdown path shares the same ctx-sharing
+  pattern the duplex path had before today's fix, but has never been
+  exercised against a real close-during-shutdown flush in its own tests —
+  untested exposure, not a proven bug. Worth a look next time `serve` is
+  touched.
+- TTS-pacing defaults (`DefaultTTSPacingTargetDelay`=40ms,
+  `DefaultTTSPacingInterval`=20ms) are reasoned starting points, not
+  measured against real vendor TTS latency distributions — same
+  "tune later" framing as `jitter.go`'s original defaults.
+- Docker-build verification, legal review of `docs/compliance.md` — both
+  unchanged, still need a human.
+
+### Tomorrow
+1. Week 3 is now 5 of 6 done — the only remaining item (real-PSTN jitter
+   tuning) is blocked on live traffic, not on more agent work. Week 4
+   (pilot launch) can't meaningfully start until Saurabh decides on anchor
+   customers / live traffic, so absent that decision, focus on hardening:
+   look at `runServe`'s shutdown-ordering exposure flagged above, and/or
+   tune TTS-pacing defaults if any real vendor latency data exists yet.
+2. Continue strengthening the WER corpus and jitter stress tests
+   opportunistically — both are cheap, high-value, and don't block on
+   anything.
+3. If Saurabh has a go/no-go or anchor-customer decision for Week 4,
+   that supersedes both of the above.

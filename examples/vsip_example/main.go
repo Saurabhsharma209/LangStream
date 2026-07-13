@@ -129,5 +129,14 @@ func main() {
 
 	wg.Wait()
 
-	fmt.Println("vsip_example complete: this demonstrated the langstream.Session integration contract/shape only -- no real SIP signaling, RTP socket, or ClearStream duplex-RTP integration was involved (see doc.go)")
+	fmt.Println("vsip_example (shape demo) complete: this demonstrated the langstream.Session integration contract/shape only -- no real socket was involved yet (see doc.go)")
+
+	// Now demonstrate the same kind of call over a real rtp.DuplexSession
+	// and real loopback UDP sockets (see real_rtp.go) -- the piece doc.go
+	// originally flagged as not yet implemented here. Deliberately not
+	// passed ctx above (see runRealRTPDemo's own doc comment on why it
+	// owns an independent timeout instead of inheriting this one).
+	if err := runRealRTPDemo(); err != nil {
+		log.Fatalf("real RTP demo failed: %v", err)
+	}
 }

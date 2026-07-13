@@ -59,6 +59,12 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // words within one string is expected to align/diff correctly exactly like
 // a single-script sentence; these cases confirm that in practice, not just
 // by argument.
+//
+// Sprint 2026-07-13 (QA): includes nine more, harder Hinglish entries
+// (mid-sentence switches, embedded loanwords, numbers/dates, digit
+// sequences, filler words, an insertion case, and a two-substitution
+// case) — see FixedCorpus's doc comment for each entry's reasoning and
+// hand-computed WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -67,6 +73,18 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_identical_order_status": 0.0,
 		"hinglish_one_word_substitution":  1.0 / 6.0,
 		"hinglish_one_word_deletion":      1.0 / 7.0,
+
+		// Sprint 2026-07-13 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_midsentence_switch_payment_status":     1.0 / 12.0,
+		"hinglish_loanword_recharge_request":             1.0 / 7.0,
+		"hinglish_numbers_bill_amount_and_date":          1.0 / 12.0,
+		"hinglish_order_number_spoken_in_english_digits": 1.0 / 9.0,
+		"hinglish_filler_words_address_update":           1.0 / 9.0,
+		"hinglish_otp_request_insertion":                 1.0 / 5.0,
+		"hinglish_call_disconnect_network_issue":         0.0,
+		"hinglish_account_block_query_two_substitutions": 2.0 / 13.0,
+		"hinglish_callback_request_deletion_and_filler":  1.0 / 10.0,
 	}
 
 	entries := FixedCorpus()

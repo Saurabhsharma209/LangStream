@@ -140,6 +140,21 @@ resolved and implemented 2026-07-12, see the item above and DEVLOG.md
       internal `JitterDepth` per leg, not this package's jitter.go). Real-
       condition tuning against actual PSTN traces still needs live/pilot
       traffic, which doesn't exist yet either way. Not checked off.
+      **Decision + wiring (2026-07-13):** the original inbound-network-
+      jitter use case for this buffer is now redundant — ClearStream
+      already jitter-buffers each leg internally before handing off
+      clean PCM via `CleanAudio()`. Repurposed the existing `JitterBuffer`
+      as an OUTBOUND pacing/smoothing stage on the TTS→`InjectBotAudio`
+      path instead (`pkg/rtp/duplex.go`'s `feedTTSPacer`/`runTTSPacer`,
+      `pkg/rtp/jitter.go`'s new `ttsPacer` wrapper), since TTS synthesis
+      is bursty and benefits from pacing before injection. Tested
+      (`pkg/rtp/tts_pacing_test.go`); also tightened the stress tests'
+      packet-accounting invariant (`played+lost == n`, exact, see
+      DEVLOG.md) which caught a pre-existing phantom-loss measurement bug
+      in the test harness itself (not `jitter.go`). Still not checked off
+      — real-condition tuning against live PSTN traces remains blocked on
+      pilot traffic, unchanged. But the "does this buffer still have a
+      role" question from 2026-07-12 is now resolved and shipped.
 - [x] Fallback behavior: what happens when translation lags, a leg drops,
       or confidence is low (never silently mistranslate — degrade
       gracefully, e.g. pass through original audio with a warning tone).
@@ -148,7 +163,18 @@ resolved and implemented 2026-07-12, see the item above and DEVLOG.md
       optional warning tone; repeated failures or a fatal backend error
       permanently degrade a leg without crashing or hanging. See
       `pkg/langstream/fallback.go`, integration-tested end to end.
-- [ ] Exotel vSIP integration example wired end-to-end. **Status (2026-07-10): contract/shape example added, not end-to-end.** `examples/vsip_example/` now shows the intended integration shape (`VSIPCallAdapter` pushing/pulling PCM through a real `langstream.Session`), integration-tested against a real Session with mock backends. Real SIP/RTP socket plumbing and the ClearStream duplex-RTP piece are still not implemented. **Update (2026-07-12):** the ClearStream duplex-RTP dependency itself is resolved and built (`pkg/rtp.DuplexSession`, see the Week 2 item above) — this item is now unblocked, but wiring `examples/vsip_example` to use `DuplexSession` plus real SIP/socket address plumbing is still todo, deliberately scoped out of the 2026-07-12 sprint. Left unchecked; next concrete unblocked step for a future sprint.
+- [x] Exotel vSIP integration example wired end-to-end. **Status (2026-07-10): contract/shape example added, not end-to-end.** `examples/vsip_example/` now shows the intended integration shape (`VSIPCallAdapter` pushing/pulling PCM through a real `langstream.Session`), integration-tested against a real Session with mock backends. Real SIP/RTP socket plumbing and the ClearStream duplex-RTP piece are still not implemented. **Update (2026-07-12):** the ClearStream duplex-RTP dependency itself is resolved and built (`pkg/rtp.DuplexSession`, see the Week 2 item above) — this item is now unblocked, but wiring `examples/vsip_example` to use `DuplexSession` plus real SIP/socket address plumbing is still todo, deliberately scoped out of the 2026-07-12 sprint.
+      **Done (2026-07-13):** `cmd/langstream duplex` subcommand now
+      constructs and runs a real `rtp.DuplexSession` from CLI flags (both
+      legs' listen/forward UDP addresses, payload type, jitter depth,
+      suppressor backend), with graceful SIGINT/SIGTERM shutdown and the
+      observability dashboard mounted. `examples/vsip_example` now also
+      runs a real loopback-UDP `DuplexSession` end-to-end
+      (`real_rtp.go`'s `runRealRTPDemo`), alongside the existing shape-
+      only `VSIPCallAdapter` demo. Backends are still mocked (per
+      ROADMAP's Week 2 decision — no vendor keys yet), but the RTP/socket
+      wiring itself is real, not simulated. Integration-tested
+      (`cmd/langstream/duplex_test.go`, `examples/vsip_example/real_rtp_test.go`).
 - [x] Observability dashboard (latency percentiles, error rates, per-vendor cost).
       **Done (2026-07-09):** `pkg/observability` now tracks error rates and
       per-vendor cost alongside the existing latency percentiles, and
@@ -174,6 +200,13 @@ resolved and implemented 2026-07-12, see the item above and DEVLOG.md
       `docs/compliance.md` §4 for short (IVR prompt) and long (written
       consent) variants, with open items flagged for legal (opt-in vs.
       opt-out, retention period, per-vendor training-data claims).
+
+**Week 3 status: 5 of 6 items complete (2026-07-13).** Only real-condition
+jitter-buffer tuning against live PSTN traces remains unchecked, and it
+genuinely can't be closed by agent automation — it needs live/pilot call
+traffic, which doesn't exist until Week 4 starts. Everything else
+(fallback behavior, vSIP example wired end-to-end, observability
+dashboard, DPDP/consent drafts) is done.
 
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 

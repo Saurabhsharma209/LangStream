@@ -111,6 +111,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "serve failed:", err)
 			os.Exit(1)
 		}
+	case "duplex":
+		if err := runDuplex(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "duplex failed:", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -121,7 +126,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: langstream <version|demo|serve|help>")
+	fmt.Fprintln(os.Stderr, "usage: langstream <version|demo|serve|duplex|help>")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "demo [--backend NAME]")
 	fmt.Fprintln(os.Stderr, "    Run a one-shot duplex-session demo against the named backend for")
@@ -138,6 +143,16 @@ func usage() {
 		langstream.AvailableASRBackends(),
 		langstream.AvailableTranslatorBackends(),
 		langstream.AvailableTTSBackends())
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "duplex --caller-listen ADDR --caller-forward ADDR --agent-listen ADDR --agent-forward ADDR [--backend NAME]")
+	fmt.Fprintln(os.Stderr, "    Start a real, long-running duplex Session (same backend selection as demo/")
+	fmt.Fprintln(os.Stderr, "    serve) bridged to two real ClearStream RTP legs (see pkg/rtp.DuplexSession):")
+	fmt.Fprintln(os.Stderr, "    caller-facing and agent-facing UDP sockets, each with its own listen and")
+	fmt.Fprintln(os.Stderr, "    forward address, until SIGINT/SIGTERM. Also mounts the observability")
+	fmt.Fprintln(os.Stderr, "    dashboard on --addr (default matches serve's; pass --addr \"\" to disable it).")
+	fmt.Fprintln(os.Stderr, "    Other flags: --caller-lang/--agent-lang (default hi/en), --caller-payload-type/")
+	fmt.Fprintln(os.Stderr, "    --agent-payload-type, --caller-jitter-depth/--agent-jitter-depth, and")
+	fmt.Fprintf(os.Stderr, "    --suppressor (ClearStream noise-suppressor backend, default %q).\n", defaultSuppressorBackend)
 }
 
 // resolveBackend resolves the backend name for one pipeline leg.

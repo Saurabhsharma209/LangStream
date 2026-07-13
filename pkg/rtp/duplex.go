@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -46,13 +47,69 @@ const defaultCleanAudioBufferSize = 32
 // something resolved per leg config.
 const cleanAudioSampleRate = 16000
 
-// duplexStopTimeout bounds how long Stop waits for the four bridging
+// duplexStopTimeout bounds how long Stop waits for the six bridging
 // goroutines to exit before giving up, mirroring the "bounded wait,
 // cancel as backstop" pattern langstream.Session.Close uses via its own
 // finalFlushTimeout constant (see session.go's doc comment on Close). It
 // doesn't need to match that value -- mocks and loopback UDP both settle
 // in milliseconds -- it's generous on purpose so it (ideally) never fires.
 const duplexStopTimeout = 3 * time.Second
+
+// DefaultTTSPacingTargetDelay is the JitterBuffer TargetDelay
+// DuplexSession uses by default when repurposing JitterBuffer as an
+// outbound TTS-pacing buffer instead of an inbound network-jitter buffer
+// (see jitter.go's package doc comment for the full repurposing
+// rationale, and PullLost's doc comment for what a "lost" packet means in
+// this new context: a synthesized chunk that took unusually long to
+// arrive got dropped to keep pacing/latency bounded, not a real network
+// loss). It intentionally differs from jitter.go's own DefaultTargetDelay
+// (60ms, tuned for inbound arrival-jitter absorption): here it bounds how
+// long DuplexSession lets synthesized speech sit in the pacing buffer
+// absorbing bursty per-chunk TTS generation latency before InjectBotAudio
+// -- big enough to smooth typical chunk-to-chunk burstiness, small enough
+// to not add noticeable extra latency on top of whatever the TTS backend
+// itself already takes. 40ms (two DefaultTTSPacingInterval ticks) is a
+// starting point, not a measured value; tuning it against real vendor TTS
+// latency distributions is a natural follow-up once DuplexSession carries
+// real traffic, mirroring jitter.go's own "groundwork now, tune against
+// real conditions later" framing.
+const DefaultTTSPacingTargetDelay = 40 * time.Millisecond
+
+// DefaultTTSPacingInterval is the JitterBuffer PacketInterval
+// DuplexSession uses by default for outbound TTS pacing: both the nominal
+// spacing the pacing buffer schedules successive chunks' release at, and
+// the tick interval runTTSPacer polls it on. It matches ClearStream's own
+// downstream playback-loop tick (see clearstream/pkg/rtp/playback.go's
+// startPlaybackLoop, which pops one 20ms-of-audio frame off its own
+// PlaybackQueue every 20ms) so the two pacing stages line up -- though,
+// unlike that fixed-duration-frame loop, each "packet" paced here is one
+// whole tts.AudioChunk (see ttsChunkPacket), which may represent more or
+// less than 20ms of audio; see feedTTSPacer/runTTSPacer's doc comments.
+const DefaultTTSPacingInterval = 20 * time.Millisecond
+
+// ttsPacer bundles a JitterBuffer with an atomic count of how many chunks
+// feedTTSPacer has ever pushed into it. JitterBuffer's Pull/deadline math
+// (built for network jitter, see jitter.go's package doc comment) has no
+// notion of "no more packets are, or ever will be, coming" -- a missing
+// network packet is unpredictably either just late or truly gone, never
+// provably finished -- so without an explicit bound, once every real
+// chunk had been resolved (delivered or declared lost), runTTSPacer
+// ticking Pull() forever afterward would keep advancing past sequence
+// numbers nothing will ever fill, logging a spurious "dropped chunk"
+// warning on every single tick for the rest of DuplexSession's life
+// (harmless to correctness, but log spam and wasted work). pushed gives
+// runTTSPacer that bound: it only calls Pull while it has not yet
+// resolved every chunk feedTTSPacer has actually pushed so far.
+type ttsPacer struct {
+	buf    *JitterBuffer
+	pushed atomic.Uint64 // count of chunks feedTTSPacer has ever pushed
+}
+
+// newTTSPacer returns a ready-to-use ttsPacer backed by a JitterBuffer
+// constructed from cfg.
+func newTTSPacer(cfg Config) *ttsPacer {
+	return &ttsPacer{buf: NewJitterBuffer(cfg)}
+}
 
 // LegConfig configures one ClearStream-backed RTP leg (caller-side or
 // agent-side) of a DuplexSession. It is a thin wrapper around the subset
@@ -155,6 +212,32 @@ type DuplexConfig struct {
 	// nil. Distinct from each LegConfig's own Logger, which is ClearStream
 	// Session-scoped.
 	Logger *zap.Logger
+
+	// TTSPacing configures the JitterBuffer DuplexSession uses, one
+	// instance per leg, to smooth bursty TTS synthesis before
+	// InjectBotAudio (see jitter.go's package doc comment for why
+	// JitterBuffer -- originally built for inbound network-jitter
+	// absorption -- was repurposed for this instead). Zero-value fields
+	// default to DefaultTTSPacingTargetDelay / DefaultTTSPacingInterval /
+	// DefaultMaxPacketsBuffered; most callers should leave this unset.
+	TTSPacing Config
+}
+
+// ttsPacingConfig returns the Config each leg's TTS-pacing JitterBuffer is
+// constructed from: cfg.TTSPacing with DefaultTTSPacingTargetDelay/
+// DefaultTTSPacingInterval filled in for any zero-value field (Config's
+// own withDefaults then fills MaxPacketsBuffered from
+// DefaultMaxPacketsBuffered if that is also left zero -- there is no
+// TTS-specific default for that field, the generic one applies as-is).
+func (cfg DuplexConfig) ttsPacingConfig() Config {
+	c := cfg.TTSPacing
+	if c.TargetDelay <= 0 {
+		c.TargetDelay = DefaultTTSPacingTargetDelay
+	}
+	if c.PacketInterval <= 0 {
+		c.PacketInterval = DefaultTTSPacingInterval
+	}
+	return c.withDefaults()
 }
 
 // validate checks that cfg is complete enough to build a DuplexSession.
@@ -177,8 +260,17 @@ func (cfg DuplexConfig) validate() error {
 //
 //   - caller leg CleanAudio() -> asr.AudioFrame -> Session.PushCallerAudio
 //   - agent leg  CleanAudio() -> asr.AudioFrame -> Session.PushAgentAudio
-//   - Session.AgentHearsAudio()  -> agent leg  InjectBotAudio
-//   - Session.CallerHearsAudio() -> caller leg InjectBotAudio
+//   - Session.AgentHearsAudio()  -> agent-leg TTS pacing buffer -> agent  leg InjectBotAudio
+//   - Session.CallerHearsAudio() -> caller-leg TTS pacing buffer -> caller leg InjectBotAudio
+//
+// The TTS-out direction is paced through a per-leg JitterBuffer (see
+// jitter.go's package doc comment for why: JitterBuffer was originally
+// built for inbound network-jitter absorption, and is repurposed here as
+// an outbound smoothing stage for bursty TTS synthesis instead, now that
+// ClearStream jitter-buffers each leg's *inbound* audio internally before
+// ever handing it to CleanAudio()) via feedTTSPacer/runTTSPacer, rather
+// than calling InjectBotAudio directly off Session.AgentHearsAudio()/
+// CallerHearsAudio().
 //
 // Construct with NewDuplexSession, start with Start, and always Stop it
 // exactly once done (Stop is idempotent and safe to call more than once,
@@ -189,6 +281,13 @@ type DuplexSession struct {
 	callerSess *clearstream.Session
 	agentSess  *clearstream.Session
 	session    *langstream.Session
+
+	// callerPacer/agentPacer are the per-leg outbound TTS-pacing buffers
+	// feedTTSPacer/runTTSPacer bridge Session.CallerHearsAudio()/
+	// AgentHearsAudio() through before InjectBotAudio -- see jitter.go's
+	// package doc comment and DuplexSession's own doc comment for why.
+	callerPacer *ttsPacer
+	agentPacer  *ttsPacer
 
 	logger *zap.Logger
 
@@ -286,20 +385,23 @@ func NewDuplexSession(cfg DuplexConfig) (*DuplexSession, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &DuplexSession{
-		cfg:        cfg,
-		callerSess: callerSess,
-		agentSess:  agentSess,
-		session:    cfg.Session,
-		logger:     logger,
-		ctx:        ctx,
-		cancel:     cancel,
+		cfg:         cfg,
+		callerSess:  callerSess,
+		agentSess:   agentSess,
+		session:     cfg.Session,
+		callerPacer: newTTSPacer(cfg.ttsPacingConfig()),
+		agentPacer:  newTTSPacer(cfg.ttsPacingConfig()),
+		logger:      logger,
+		ctx:         ctx,
+		cancel:      cancel,
 	}, nil
 }
 
-// Start starts both underlying ClearStream sessions and the four
-// bridging goroutines described in DuplexSession's doc comment. It is
-// idempotent: calling it more than once has no additional effect beyond
-// the first call.
+// Start starts both underlying ClearStream sessions and the six bridging
+// goroutines described in DuplexSession's doc comment (two CleanAudio()
+// producers, and, per leg, a TTS-pacer feed goroutine plus the pacer's own
+// release goroutine). It is idempotent: calling it more than once has no
+// additional effect beyond the first call.
 func (d *DuplexSession) Start() {
 	d.lifecycleMu.Lock()
 	defer d.lifecycleMu.Unlock()
@@ -307,7 +409,7 @@ func (d *DuplexSession) Start() {
 		// Already started (idempotent no-op, matching the previous
 		// sync.Once-based contract), or Stop() already won the race and
 		// this DuplexSession is shutting down/shut down -- in the
-		// latter case, proceeding would call wg.Add(4) with no
+		// latter case, proceeding would call wg.Add(6) with no
 		// guarantee Stop's wg.Wait() hasn't already been reached. See
 		// lifecycleMu's doc comment.
 		return
@@ -317,15 +419,17 @@ func (d *DuplexSession) Start() {
 	d.callerSess.Start()
 	d.agentSess.Start()
 
-	d.wg.Add(4)
+	d.wg.Add(6)
 	go d.bridgeCleanAudio(d.callerSess, d.session.PushCallerAudio, "caller")
 	go d.bridgeCleanAudio(d.agentSess, d.session.PushAgentAudio, "agent")
-	go d.bridgeHears(d.session.AgentHearsAudio(), d.agentSess.InjectBotAudio, "agent")
-	go d.bridgeHears(d.session.CallerHearsAudio(), d.callerSess.InjectBotAudio, "caller")
+	go d.feedTTSPacer(d.session.AgentHearsAudio(), d.agentPacer, "agent")
+	go d.feedTTSPacer(d.session.CallerHearsAudio(), d.callerPacer, "caller")
+	go d.runTTSPacer(d.agentPacer, d.agentSess.InjectBotAudio, "agent")
+	go d.runTTSPacer(d.callerPacer, d.callerSess.InjectBotAudio, "caller")
 }
 
 // Stop stops both underlying ClearStream sessions and waits (up to
-// duplexStopTimeout) for the four bridging goroutines to exit. It is
+// duplexStopTimeout) for the six bridging goroutines to exit. It is
 // idempotent and safe to call more than once or from multiple goroutines
 // concurrently; only the first call does the work, and every caller
 // observes the same result. Stop does NOT close DuplexConfig.Session --
@@ -370,7 +474,7 @@ func (d *DuplexSession) stopLocked(started bool) {
 		d.agentSess.Stop()
 	}
 	// If Start was never called (started is false here), neither
-	// ClearStream session's goroutines (nor this package's four bridging
+	// ClearStream session's goroutines (nor this package's six bridging
 	// goroutines) were ever started, so there is nothing above to stop
 	// and nothing below to wait for -- but note the two Sessions' UDP
 	// sockets (bound by NewDuplexSession/clearstream.NewSession) are
@@ -451,16 +555,28 @@ func (d *DuplexSession) bridgeCleanAudio(leg *clearstream.Session, push func(asr
 	}
 }
 
-// bridgeHears is the Session.AgentHearsAudio()/CallerHearsAudio() ->
-// InjectBotAudio bridging goroutine: it reads synthesized tts.AudioChunks
-// off in and forwards their PCM (already 16-bit LE mono -- the same byte
-// layout InjectBotAudio expects, so no conversion is needed here) to
-// inject (leg.InjectBotAudio). It exits when in closes (Session was
-// closed by whoever owns its lifecycle) or d.ctx is cancelled (Stop's
-// backstop), whichever comes first.
-func (d *DuplexSession) bridgeHears(in <-chan tts.AudioChunk, inject func([]byte) bool, legName string) {
+// feedTTSPacer is the producer half of DuplexSession's outbound
+// TTS-pacing bridge (see runTTSPacer for the consumer half that actually
+// calls InjectBotAudio, and jitter.go's package doc comment for why a
+// JitterBuffer -- originally built for inbound network-jitter absorption
+// -- is repurposed here instead). It reads synthesized tts.AudioChunks off
+// in (Session.AgentHearsAudio() or Session.CallerHearsAudio()) as ASR->MT->
+// TTS actually produces them -- however bursty that timing is -- and
+// pushes each into pacer tagged with a strictly increasing SeqNum. There
+// is no reordering for pacer to do here (in is a single Go channel, so
+// chunks already arrive in synthesis order); the only thing pacer adds is
+// the release-timing smoothing runTTSPacer applies on the way out.
+//
+// It exits when in closes (Session was closed by whoever owns its
+// lifecycle) or d.ctx is cancelled (Stop's backstop), whichever comes
+// first. Note that pacer may still hold un-released chunks when this
+// returns -- that's fine: runTTSPacer keeps draining pacer on its own
+// ticker independently of whether the feed side has exited, so a final
+// chunk pushed just before in closes is still released and injected.
+func (d *DuplexSession) feedTTSPacer(in <-chan tts.AudioChunk, pacer *ttsPacer, legName string) {
 	defer d.wg.Done()
 
+	var seq uint16
 	for {
 		select {
 		case <-d.ctx.Done():
@@ -472,9 +588,82 @@ func (d *DuplexSession) bridgeHears(in <-chan tts.AudioChunk, inject func([]byte
 			if len(chunk.PCM) == 0 {
 				continue
 			}
-			if !inject(chunk.PCM) {
-				d.logger.Warn("langstream/rtp: InjectBotAudio dropped one or more frames (playback queue full)",
-					zap.String("leg", legName))
+			// Payload carries chunk.PCM as-is (already 16-bit LE mono --
+			// the same byte layout InjectBotAudio expects, so no
+			// conversion is needed here or in runTTSPacer).
+			pacer.buf.Push(Packet{SeqNum: seq, Payload: chunk.PCM}, time.Now())
+			seq++
+			// Recorded *after* Push so runTTSPacer, which loops "while
+			// there is still an unresolved pushed chunk", never observes
+			// pushed incremented before the corresponding packet is
+			// actually visible to Pull.
+			pacer.pushed.Add(1)
+		}
+	}
+}
+
+// runTTSPacer is the consumer half of DuplexSession's outbound TTS-pacing
+// bridge: on a DefaultTTSPacingInterval-ish ticker (see
+// DuplexConfig.TTSPacing), it releases at most one chunk per tick to
+// inject (leg.InjectBotAudio) -- mirroring how a real playout loop would
+// call JitterBuffer.Pull once per fixed interval (see jitter.go's package
+// doc comment: Pull returns an already-buffered packet immediately
+// regardless of its scheduled deadline, so the pacing/spreading-out
+// behavior this stage exists for comes entirely from calling Pull at most
+// once per tick here, not from Pull itself withholding an already-arrived
+// packet). ClearStream's own InjectBotAudio/PlaybackQueue already does the
+// fixed-size, fixed-cadence RTP framing/pacing downstream of this (see
+// clearstream/pkg/rtp/playback.go's startPlaybackLoop), so this stage's
+// job is only to spread bursty TTS *arrivals* out over time before they
+// reach that queue, not to reproduce its per-frame RTP cadence itself.
+//
+// A PullLost status here means pacer's TargetDelay budget elapsed before
+// the next expected chunk arrived -- i.e. TTS synthesis stalled long
+// enough that this chunk was dropped to keep pacing/output latency
+// bounded, not that a network packet was actually lost (see
+// jitter.go's PullLost doc comment and the package doc comment's
+// repurposing note). It's logged, not fatal, and this tick keeps checking
+// past any run of consecutive lost slots so a stale backlog doesn't
+// permanently stall releases -- but it still injects at most one *found*
+// chunk per tick, same as the normal case, and it never calls Pull for a
+// sequence number feedTTSPacer hasn't actually pushed yet (tracked via
+// pacer.pushed -- see ttsPacer's doc comment for why: JitterBuffer itself
+// has no notion of "no more packets are ever coming", so without this
+// bound, every tick after the last real chunk was resolved would keep
+// declaring a nonexistent future chunk lost, forever).
+//
+// runTTSPacer exits only when d.ctx is cancelled (Stop's backstop) --
+// deliberately not when its feedTTSPacer counterpart's input channel
+// closes, so any chunk already buffered in pacer at that point still gets
+// released and injected instead of silently discarded.
+func (d *DuplexSession) runTTSPacer(pacer *ttsPacer, inject func([]byte) bool, legName string) {
+	defer d.wg.Done()
+
+	ticker := time.NewTicker(d.cfg.ttsPacingConfig().PacketInterval)
+	defer ticker.Stop()
+
+	var consumed uint64 // count of sequence numbers this goroutine has resolved (PullOK or PullLost)
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case now := <-ticker.C:
+			for consumed < pacer.pushed.Load() {
+				pkt, status := pacer.buf.Pull(now)
+				if status == PullLost {
+					consumed++
+					d.logger.Warn("langstream/rtp: TTS pacing buffer dropped a synthesized chunk (synthesis stalled past the pacing budget)",
+						zap.String("leg", legName))
+					continue
+				}
+				if status == PullOK {
+					consumed++
+					if !inject(pkt.Payload) {
+						d.logger.Warn("langstream/rtp: InjectBotAudio dropped one or more frames (playback queue full)",
+							zap.String("leg", legName))
+					}
+				}
+				break
 			}
 		}
 	}

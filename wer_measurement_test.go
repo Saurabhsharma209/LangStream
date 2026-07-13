@@ -28,6 +28,16 @@
 // asr.SarvamRecognizer client's transcript parsing and WordErrorRate's
 // whitespace tokenization against real Devanagari+English mixed text, not
 // exercising anything special in the fake server itself.
+//
+// Sprint 2026-07-13 (QA) wires in nine further, harder Hinglish corpus
+// entries (mid-sentence switches, embedded English loanwords in Hindi
+// grammar, numbers/dates spoken across a language boundary, digit
+// sequences, filler words, an ASR-style repeat/insertion, and a
+// two-substitution case) the same way, exercising the same
+// client-parsing + WER path against a wider variety of realistic
+// contact-center Hinglish shapes, most of them Romanized rather than
+// Devanagari-mixed (the 2026-07-12 entries already cover the Devanagari
+// shape).
 package langstream_test
 
 import (
@@ -50,8 +60,8 @@ import (
 // arithmetic against itself.
 func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 	entries := qa.FixedCorpus()
-	if len(entries) < 6 {
-		t.Fatalf("qa.FixedCorpus() returned %d entries, want at least 6", len(entries))
+	if len(entries) < 15 {
+		t.Fatalf("qa.FixedCorpus() returned %d entries, want at least 15", len(entries))
 	}
 
 	// Precomputed expected WER for the entries this test wires up,
@@ -69,6 +79,19 @@ func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 		"hinglish_identical_order_status": 0.0,
 		"hinglish_one_word_substitution":  1.0 / 6.0,
 		"hinglish_one_word_deletion":      1.0 / 7.0,
+
+		// Sprint 2026-07-13 (QA) additions - see pkg/qa/corpus.go's
+		// FixedCorpus doc comment for each entry's reasoning and
+		// hand-computed WER.
+		"hinglish_midsentence_switch_payment_status":     1.0 / 12.0,
+		"hinglish_loanword_recharge_request":             1.0 / 7.0,
+		"hinglish_numbers_bill_amount_and_date":          1.0 / 12.0,
+		"hinglish_order_number_spoken_in_english_digits": 1.0 / 9.0,
+		"hinglish_filler_words_address_update":           1.0 / 9.0,
+		"hinglish_otp_request_insertion":                 1.0 / 5.0,
+		"hinglish_call_disconnect_network_issue":         0.0,
+		"hinglish_account_block_query_two_substitutions": 2.0 / 13.0,
+		"hinglish_callback_request_deletion_and_filler":  1.0 / 10.0,
 	}
 
 	tested := 0
@@ -128,7 +151,7 @@ func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 		})
 	}
 
-	if tested != 6 {
-		t.Fatalf("wired up %d corpus entries against the fake-ASR pipeline, want exactly 6 (identical_greeting, one_word_substitution, one_word_deletion, hinglish_identical_order_status, hinglish_one_word_substitution, hinglish_one_word_deletion) - update wantWER alongside pkg/qa.FixedCorpus if entries changed", tested)
+	if tested != 15 {
+		t.Fatalf("wired up %d corpus entries against the fake-ASR pipeline, want exactly 15 (identical_greeting, one_word_substitution, one_word_deletion, hinglish_identical_order_status, hinglish_one_word_substitution, hinglish_one_word_deletion, hinglish_midsentence_switch_payment_status, hinglish_loanword_recharge_request, hinglish_numbers_bill_amount_and_date, hinglish_order_number_spoken_in_english_digits, hinglish_filler_words_address_update, hinglish_otp_request_insertion, hinglish_call_disconnect_network_issue, hinglish_account_block_query_two_substitutions, hinglish_callback_request_deletion_and_filler) - update wantWER alongside pkg/qa.FixedCorpus if entries changed", tested)
 	}
 }
