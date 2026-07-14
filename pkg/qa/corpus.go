@@ -101,6 +101,30 @@ func placeholderPCM() []byte {
 //   - hinglish_call_disconnect_network_issue:             WER 0.0   (0 errors / 10 words)
 //   - hinglish_account_block_query_two_substitutions:     WER 2/13  (2 substitutions / 13 words)
 //   - hinglish_callback_request_deletion_and_filler:      WER 1/10  (1 deletion / 10 words)
+//
+// Sprint 2026-07-14 (QA) adds ten further entries per DEVLOG.md's
+// 2026-07-13 follow-up flagging categories the corpus still didn't
+// exercise well: a multi-word (not just single-word) deletion, proper
+// noun/brand-name and person-name substitutions, a numbers-spoken-as-
+// words-vs-digit mismatch (both a single-word substitution shape and a
+// digit-sequence deletion shape), two long (18-25 word) utterances (the
+// corpus previously skewed short, topping out around 13 words), a
+// content-word (not filler-word) deletion, a hallucinated-word insertion
+// (distinct from the existing stutter/repeat insertion case), and an
+// English-dominant sentence with an embedded Hindi courtesy phrase (the
+// reverse code-switch direction from every existing entry, which are all
+// Hindi-dominant with embedded English):
+//
+//   - hinglish_two_word_deletion_travel_booking_confirmation:  WER 2/13  (2 deletions / 13 words)
+//   - hinglish_proper_noun_brand_substitution_recharge:        WER 1/8   (1 substitution / 8 words)
+//   - hinglish_proper_noun_person_name_substitution_order:     WER 1/11  (1 substitution / 11 words)
+//   - hinglish_number_word_vs_digit_substitution:              WER 1/9   (1 substitution / 9 words)
+//   - hinglish_long_utterance_single_deletion_callback:        WER 1/25  (1 deletion / 25 words)
+//   - hinglish_content_word_deletion_parcel_delivery_date:     WER 1/12  (1 deletion / 12 words)
+//   - hinglish_insertion_hallucinated_filler_word:             WER 1/7   (1 insertion / 7 words)
+//   - english_dominant_embedded_hindi_courtesy_agent_transfer: WER 1/12  (1 deletion / 12 words)
+//   - hinglish_digit_sequence_deletion_account_number:         WER 1/10  (1 deletion / 10 words)
+//   - hinglish_long_utterance_two_substitutions_refund_status: WER 2/18  (2 substitutions / 18 words)
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -314,6 +338,150 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "aap mujhe thodi der mein call back kar dijiyega please",
 			Hypothesis: "aap mujhe thodi der mein call back kar dijiyega",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-07-14 (QA) additions below: ten more entries per
+		// DEVLOG.md's 2026-07-13 follow-up, covering categories the corpus
+		// still didn't exercise (see FixedCorpus's doc comment above for
+		// the full rationale for each).
+
+		{
+			// A travel/booking-confirmation sentence where the fake ASR
+			// drops the contiguous two-word phrase "email par" ("via
+			// email") entirely — a multi-word deletion, distinct from
+			// every existing deletion case in this corpus, which each
+			// drop exactly one word.
+			Name:       "hinglish_two_word_deletion_travel_booking_confirmation",
+			Language:   "hi",
+			Reference:  "sir aapki flight booking confirm ho gayi hai ticket email par bhej diya",
+			Hypothesis: "sir aapki flight booking confirm ho gayi hai ticket bhej diya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A recharge request naming a telecom brand; the fake ASR
+			// mishears the brand name "Jio" as the competing brand
+			// "Airtel" — a proper-noun/brand-name substitution, a
+			// realistic ASR confusion this corpus hadn't covered (prior
+			// entries only substitute common nouns/verbs).
+			Name:       "hinglish_proper_noun_brand_substitution_recharge",
+			Language:   "hi",
+			Reference:  "sir mera Jio number recharge nahi ho raha",
+			Hypothesis: "sir mera Airtel number recharge nahi ho raha",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A customer stating their name before an order-status query;
+			// the fake ASR mishears the person's given name "Rakesh" as
+			// the phonetically similar "Rajesh" — a person-name
+			// substitution, the other proper-noun category this corpus
+			// hadn't covered.
+			Name:       "hinglish_proper_noun_person_name_substitution_order",
+			Language:   "hi",
+			Reference:  "sir mera naam Rakesh Kumar hai order abhi tak nahi aaya",
+			Hypothesis: "sir mera naam Rajesh Kumar hai order abhi tak nahi aaya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A delivery-timeline sentence where the Hindi number word
+			// "teen" (three) is spoken but the fake ASR transcribes it as
+			// the digit "3" — a number-word-vs-digit mismatch, the same
+			// underlying number but a different literal token, which
+			// WordErrorRate (whitespace tokenization only, no number
+			// normalization per wer.go's doc comment) correctly counts as
+			// a substitution.
+			Name:       "hinglish_number_word_vs_digit_substitution",
+			Language:   "hi",
+			Reference:  "mera order teen din mein deliver ho jayega sir",
+			Hypothesis: "mera order 3 din mein deliver ho jayega sir",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A long (25-word) callback-request sentence — every entry in
+			// this corpus so far topped out around 13 words. The fake ASR
+			// drops one word from the doubled idiom "jaldi se jaldi" ("as
+			// soon as possible", literally "soon from soon"), leaving
+			// "se jaldi" — a single deletion in a long utterance, checking
+			// WER alignment still isolates exactly one error rather than
+			// drifting across the rest of the long sentence.
+			Name:       "hinglish_long_utterance_single_deletion_callback",
+			Language:   "hi",
+			Reference:  "sir aap ki problem hum samajh gaye hain aur hum apni team ko inform kar denge taki wo aapko jaldi se jaldi callback kar sake",
+			Hypothesis: "sir aap ki problem hum samajh gaye hain aur hum apni team ko inform kar denge taki wo aapko se jaldi callback kar sake",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A parcel-delivery-date sentence where the fake ASR drops
+			// "shaam" ("evening") — a content word specifying time of day,
+			// not a filler word like hinglish_filler_words_address_update's
+			// deletion, so this exercises WER against a content-word loss
+			// specifically.
+			Name:       "hinglish_content_word_deletion_parcel_delivery_date",
+			Language:   "hi",
+			Reference:  "sir aapka parcel kal shaam tak aapke delivery address par pahunch jayega",
+			Hypothesis: "sir aapka parcel kal tak aapke delivery address par pahunch jayega",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A balance-check request where the fake ASR hallucinates an
+			// extra word, "ke", that was never spoken at all — distinct
+			// from hinglish_otp_request_insertion's stutter/repeat
+			// insertion (which duplicates an adjacent real word), this
+			// models the other common ASR insertion failure mode: an
+			// invented token with no corresponding audio.
+			Name:       "hinglish_insertion_hallucinated_filler_word",
+			Language:   "hi",
+			Reference:  "sir mera balance check kar dijiye please",
+			Hypothesis: "sir mera balance check kar ke dijiye please",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// An agent-transfer sentence that is English-dominant with a
+			// single embedded Hindi courtesy word, "shukriya" ("thank
+			// you") — the reverse code-switch direction from every other
+			// entry in this corpus, which are all Hindi-dominant with
+			// embedded English. The fake ASR drops "another", a single
+			// deletion.
+			Name:       "english_dominant_embedded_hindi_courtesy_agent_transfer",
+			Language:   "hi",
+			Reference:  "let me transfer your call to another agent one moment please shukriya",
+			Hypothesis: "let me transfer your call to agent one moment please shukriya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// An account-number readout, digit-by-digit in English words
+			// inside a Hindi sentence, like
+			// hinglish_order_number_spoken_in_english_digits, but here the
+			// fake ASR drops one digit ("three") from the middle of the
+			// sequence entirely rather than mishearing it — a digit-
+			// sequence deletion, not a digit substitution.
+			Name:       "hinglish_digit_sequence_deletion_account_number",
+			Language:   "hi",
+			Reference:  "sir mera account number one two three four five hai",
+			Hypothesis: "sir mera account number one two four five hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A long (18-word) refund-status update with *two*
+			// substitutions, like
+			// hinglish_account_block_query_two_substitutions but longer:
+			// the fake ASR mishears "process" as "complete" and
+			// "transfer" as "credit" — two independent, non-adjacent
+			// near-synonym confusions in one long sentence.
+			Name:       "hinglish_long_utterance_two_substitutions_refund_status",
+			Language:   "hi",
+			Reference:  "sir aapka refund process ho chuka hai lekin bank ki taraf se paise abhi tak transfer nahi hue",
+			Hypothesis: "sir aapka refund complete ho chuka hai lekin bank ki taraf se paise abhi tak credit nahi hue",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

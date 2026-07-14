@@ -789,3 +789,135 @@ the parallel run resolved once each finished (noted in their own reports).
    anything.
 3. If Saurabh has a go/no-go or anchor-customer decision for Week 4,
    that supersedes both of the above.
+
+## 2026-07-14 (Sprint 8: runServe shutdown fix, WER/jitter hardening, two flaky-test races found+fixed) — scheduled run
+
+### Agents run
+Tech, QA (in parallel). PE/SRE not needed — Week 3 is 5 of 6 done (the
+only remaining item, real-PSTN jitter tuning, needs live traffic that
+doesn't exist yet) and Week 4 (live pilot, real WER/CSAT, go/no-go) is
+entirely gated on a live-traffic/anchor-customer decision that hasn't been
+made — neither is buildable by agent automation today. Per DEVLOG's own
+2026-07-13 "Tomorrow" list, today's scope was hardening/follow-up work
+instead of new roadmap checkboxes: (1) the untested `runServe` shutdown-
+ordering exposure flagged that day, (2) continued WER corpus / jitter
+stress-test strengthening.
+
+### Repo health at start
+Clean: `go build ./...`, `go vet ./...`, `go test ./... -race` (all 10
+packages), `gofmt -l .` clean before any changes (after working around a
+transient sandbox-disk-full condition with `go clean -cache` — see
+"Sandbox note" below). ClearStream checked (`git ls-remote --tags` + GitHub
+API): still tagged only `v0.1.0`, latest commit (`b76bfa9`, 2026-07-13) is
+past the pinned commit but no new tag exists, so no `VERSIONING.md` pin
+change needed or made.
+
+### Changes
+
+**Tech — `runServe` shutdown-ordering fix (`cmd/langstream/main.go`)**
+- Same bug class as `pkg/rtp/duplex.go`'s 2026-07-13 fix: `runServe`
+  constructed its `langstream.Session` against the SIGINT/SIGTERM-
+  cancelling `ctx`, so the instant a signal arrived, the Session's internal
+  translate/synthesize goroutines abandoned any in-flight final-utterance
+  flush before the deferred `sess.Close()` ever ran.
+- Split `runServe` into `buildServeSession` (constructs the Session against
+  `context.Background()` instead) + `runServeWithContext` (waits for
+  `ctx.Done()`, then explicitly calls `sess.Close()` — which synchronously
+  drains the final flush, bounded by a 3s `finalFlushTimeout` — concurrently
+  with the dashboard's own pre-existing 5s-bounded shutdown). Deliberately
+  did not copy `duplex.go`'s fixed `duplexFinalDrainGrace` sleep: `serve`
+  has no RTP legs draining audio after `Close()` returns, and `Close()`
+  already blocks synchronously on the flush itself, so a fixed sleep would
+  only add dead time.
+- `cmd/langstream/serve_shutdown_test.go` (new): drives a real Session via
+  `buildServeSession`, pushes one buffered caller-audio frame, cancels
+  context mid-utterance, and asserts the flush actually reaches
+  `AgentHearsAudio()` instead of being dropped (the test that would have
+  caught the original bug) — plus construction-failure and no-activity-
+  shutdown coverage.
+
+**QA — WER corpus expanded 15 → 25 entries (`pkg/qa/corpus.go`)**
+10 new hand-verified entries covering categories the corpus didn't
+previously exercise well: contiguous multi-word deletion, brand-name and
+person-name substitution, number-word-vs-digit mismatches (both
+substitution and digit-sequence-deletion shapes), two long (18-25 word)
+utterances (previous entries topped out ~13 words), a content-word (not
+filler-word) deletion, a hallucinated-word insertion, and the first
+English-dominant-with-embedded-Hindi-courtesy-phrase entry (every prior
+entry was Hindi-dominant with embedded English — this is the reverse
+direction). Wired into `TestFixedCorpus_PrecomputedWERMatches` and
+`TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline` (15→25).
+
+**QA — jitter stress-test hardening (`pkg/rtp/jitter_test.go`)**
+Added `TestJitterBufferSimultaneousHighLossAndSevereReordering`: severe
+window-based reordering (up to 9 positions, windowSize=10) combined with
+independent 15% loss *simultaneously* — the three existing harsh scenarios
+each tested loss, reordering, or jitter-spikes in isolation, never
+together. Uses the existing harness/`assertPacketAccounting` unchanged,
+same exact `played+lost==n` equality. n=350, lost=58 (~16.6%), within
+bounds. No bug found in `pkg/rtp/jitter.go` — passed clean against
+unmodified production code.
+
+### Bugs found/fixed
+
+**Two real, pre-existing test races found during EM integration
+verification (not introduced by today's Tech/QA changes — both tests
+predate today, from the 2026-07-12 latency-instrumentation sprint), fixed
+by EM (`pkg/langstream/latency_test.go`):**
+
+`go test ./... -race -count=3` intermittently (roughly 1 run in 3) failed
+`TestSessionPassthroughSkipsUnattemptedStagesButRecordsTotal` and (in a
+separate run) `TestSessionRecordsRealLatencyMetrics`, both with
+`Count("total") = 0, want > 0`. Root cause: `session.go` records the
+"total" glass-to-glass latency sample *after* the final audio chunk has
+already been forwarded to `AgentHearsAudio()` (correct — you can't measure
+total latency until the send actually completes), but both tests read
+`sess.Metrics()` immediately upon receiving that final chunk on their own
+goroutine, racing the sending goroutine's return-then-record path. Not a
+production bug (the recording order is correct for what "total" is
+supposed to measure) — a test-synchronization bug: asserting something
+inherently near-but-not-strictly-synchronous as if it were instantaneous.
+Fixed by polling `m.Count("total")` for up to 1s (2ms interval) instead of
+checking once; verified fixed with `-count=20` isolated reruns of each
+test (20/20 clean) and `-race -count=3` on the full package and full repo.
+
+**Sandbox note (environment, not a code bug):** the shared sandbox disk
+(`/sessions`, ~9.8G) was at 96-99% capacity for most of this run from other
+concurrent sessions' usage, occasionally causing `go build`/`go test` to
+fail mid-compile with "no space left on device" on essentially random
+packages each time (confirmed not a real regression — retried clean each
+time). Worked around by `go clean -cache` when it happened, and for the
+final full verification pass, by pointing `GOCACHE`/`GOPATH`/`GOTMPDIR` at
+`/var/tmp` (the `/` mount, which had 3+ GB free vs. `/sessions`'s <200MB)
+instead of the default `$HOME` location on the cramped `/sessions` mount.
+Not something to "fix" in the repo — noting here in case a future run hits
+the same thing and wants the faster workaround.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+- `go test ./... -race -count=3` — all 10 packages pass, no flakes (after
+  the two latency-test fixes above; confirmed clean on repeat runs)
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- Real-condition jitter-buffer tuning against live PSTN traces — still
+  needs live/pilot call traffic (Week 4). Unchanged.
+- Week 4 (live pilot, real WER/latency/CSAT, go/no-go) cannot start
+  without Saurabh's decision on anchor customer(s) / live traffic — this
+  is a business decision, not an engineering task, and no amount of agent
+  automation closes it. Flagging plainly rather than inventing scope.
+- Docker-build verification, legal review of `docs/compliance.md` — both
+  unchanged, still need a human.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that's the top priority and supersedes everything below.
+2. Absent that: `runServe`'s shutdown path is now fixed and tested; next
+   hardening candidate is auditing whether any other `*_test.go` in the
+   repo has the same "assert immediately after channel receive" race
+   pattern found today (only `pkg/langstream/latency_test.go`'s two tests
+   were confirmed affected, but the pattern could exist elsewhere and just
+   not have been caught yet by `-count=3`).
+3. Continue strengthening the WER corpus and jitter stress tests
+   opportunistically if no higher-priority item exists — still cheap,
+   high-value, and don't block on anything.

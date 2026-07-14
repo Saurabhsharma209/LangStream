@@ -66,8 +66,26 @@ func TestSessionRecordsRealLatencyMetrics(t *testing.T) {
 	if got := m.Count("tts_first_chunk"); got == 0 {
 		t.Error("Count(tts_first_chunk) = 0, want > 0 for a successful round trip")
 	}
-	if got := m.Count("total"); got == 0 {
-		t.Error("Count(total) = 0, want > 0 for a successful round trip")
+
+	// "total" is recorded by runLeg's `if completed` branch only after
+	// forwardAudio's send to AgentHearsAudio() fully completes -- the
+	// sending goroutine still has to return from forwardAudio and call
+	// recordTotalIfStarted after this test's receive on AgentHearsAudio()
+	// above already unblocked, so checking m.Count immediately is a real
+	// (if narrow) race, not a synchronization point. Poll briefly instead
+	// of asserting instantaneously -- same race class discovered during
+	// 2026-07-14's integration verification for the passthrough variant
+	// of this test, below.
+	deadlineTotal := time.After(time.Second)
+	for {
+		if m.Count("total") > 0 {
+			break
+		}
+		select {
+		case <-time.After(2 * time.Millisecond):
+		case <-deadlineTotal:
+			t.Fatal("Count(total) = 0 after 1s, want > 0 for a successful round trip")
+		}
 	}
 
 	// The mt sample should reflect the artificial 30ms delay, not be a
@@ -143,7 +161,25 @@ done:
 	if got := m.Count("tts_first_chunk"); got != 0 {
 		t.Errorf("Count(tts_first_chunk) = %d, want 0 for a passthrough utterance that never called SynthesizeStream", got)
 	}
-	if got := m.Count("total"); got == 0 {
-		t.Error("Count(total) = 0, want > 0 -- glass-to-glass latency must still be recorded for degraded/passthrough calls")
+
+	// emitPassthroughTimed records "total" only after the passthrough send
+	// to AgentHearsAudio() fully completes (see session.go) -- the sending
+	// goroutine still has to return from forwardAudio/emitPassthrough and
+	// call recordTotalIfStarted after this test's receive on
+	// AgentHearsAudio() above already unblocked, so checking m.Count
+	// immediately is a real (if narrow) race, not a synchronization point.
+	// Poll briefly instead of asserting instantaneously -- this is a race
+	// discovered during 2026-07-14's integration verification
+	// (go test -race -count=3 failed roughly 1 run in 3).
+	deadlineTotal := time.After(time.Second)
+	for {
+		if m.Count("total") > 0 {
+			break
+		}
+		select {
+		case <-time.After(2 * time.Millisecond):
+		case <-deadlineTotal:
+			t.Fatal("Count(total) = 0 after 1s, want > 0 -- glass-to-glass latency must still be recorded for degraded/passthrough calls")
+		}
 	}
 }

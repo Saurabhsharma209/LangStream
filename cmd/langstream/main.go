@@ -287,6 +287,12 @@ func runDemo(args []string) error {
 // vSIP integration would use to do that, and DEVLOG.md's 2026-07-08/09
 // entries for why that transport itself is still blocked on a ClearStream
 // decision, unrelated to this subcommand.
+//
+// Construction (buildServeSession) and lifecycle (runServeWithContext) are
+// split the same way duplex.go splits buildDuplexSession/
+// runDuplexWithContext, both for testability (see serve_shutdown_test.go)
+// and because it's what makes the shutdown-ordering fix below possible to
+// express clearly.
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	backend := fs.String("backend", "", `backend name for ASR, MT, and TTS alike (default "mock")`)
@@ -300,30 +306,101 @@ func runServe(args []string) error {
 	ttsName := resolveBackend(*backend, envTTSBackend)
 
 	// signal.NotifyContext gives us a context that's cancelled the moment
-	// SIGINT/SIGTERM arrives; the Session's own context is derived from
-	// this one (see newSession -> langstream.NewSession), so both the
-	// Session's internal goroutines and serveDashboard's shutdown path
-	// react to the same signal.
+	// SIGINT/SIGTERM arrives. Unlike an earlier version of this function,
+	// this ctx is used ONLY to decide *when* to start shutting down
+	// (serveDashboard's own wait, and the <-ctx.Done() in
+	// runServeWithContext below) -- it is deliberately not propagated into
+	// the Session itself. See buildServeSession's doc comment for why.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	sess, err := newSession(ctx, asrName, mtName, ttsName, "hi", "en")
+	sess, srv, err := buildServeSession(asrName, mtName, ttsName, *addr)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := sess.Close(); err != nil {
-			fmt.Fprintln(os.Stderr, "closing session:", err)
-		}
-	}()
-
-	srv := observability.NewDashboardServer(*addr, sess.Metrics())
 
 	fmt.Printf("langstream serve: backends asr=%s mt=%s tts=%s\n", asrName, mtName, ttsName)
 	fmt.Printf("langstream serve: dashboard listening on %s (/, /dashboard.json, /metrics)\n", *addr)
 	fmt.Println("langstream serve: press Ctrl+C to stop")
 
-	return serveDashboard(ctx, srv)
+	return runServeWithContext(ctx, sess, srv)
+}
+
+// buildServeSession resolves the named ASR/MT/TTS backends (see newSession)
+// and constructs both the langstream.Session and the
+// observability.NewDashboardServer mounted in front of its metrics
+// recorder, ready for runServeWithContext to run.
+//
+// The Session is deliberately constructed against context.Background(),
+// NOT any SIGINT/SIGTERM-cancelling context a caller might otherwise have
+// on hand -- this is the exact fix for the bug class already found and
+// fixed in pkg/rtp/duplex.go's buildDuplexSession (see that function's own
+// doc comment, and DEVLOG.md's 2026-07-13 entry, "Bugs found/fixed" item
+// 3, for the original writeup). langstream.NewSession derives the
+// Session's *entire* internal lifecycle context from whatever ctx it's
+// given, and every blocking operation inside Session -- including the
+// translate/synthesize work Session.Close() waits to drain during its
+// final-utterance flush (see session.go's runLeg, guarded throughout by a
+// select on that same context being Done) -- reacts to it immediately.
+// Constructing the Session against the shutdown-signal context directly
+// would mean the instant SIGINT/SIGTERM arrives, Session's internal
+// goroutines would already see their context cancelled and abandon any
+// in-flight flush before runServeWithContext's later, explicit sess.Close()
+// call ever gets a chance to drain it -- silently defeating graceful
+// shutdown, exactly like the duplex.go bug did before its fix. Session's
+// actual lifecycle is instead governed entirely by the explicit Close()
+// call in runServeWithContext.
+func buildServeSession(asrName, mtName, ttsName, addr string) (*langstream.Session, *http.Server, error) {
+	sess, err := newSession(context.Background(), asrName, mtName, ttsName, "hi", "en")
+	if err != nil {
+		return nil, nil, err
+	}
+	srv := observability.NewDashboardServer(addr, sess.Metrics())
+	return sess, srv, nil
+}
+
+// runServeWithContext blocks until ctx is cancelled, then shuts sess and
+// srv down: it closes sess first (flushing any in-flight final utterance
+// through the still-live translate/synthesize pipeline -- safe to do
+// because buildServeSession built sess against context.Background(), not
+// ctx -- bounded by Session's own finalFlushTimeout, see session.go's
+// Close doc comment) while srv's own graceful shutdown (serveDashboard,
+// bounded to 5s) runs concurrently in its own goroutine, since the two
+// components don't interact: nothing in `serve` calls
+// PushCallerAudio/PushAgentAudio or reads AgentHearsAudio()/
+// CallerHearsAudio() (see runServe's doc comment -- no real telephony
+// transport is attached here), so unlike `duplex` (see duplex.go's
+// duplexFinalDrainGrace, needed there because a flushed chunk must still
+// be pulled through the TTS-pacing buffer and injected over a live RTP leg
+// *after* sess.Close() returns) there is no separate external consumer
+// that additionally needs wall-clock time to drain a channel after
+// Session.Close() has already returned -- Close() itself only returns
+// once the flush has actually completed (or timed out), so no extra fixed
+// grace-period sleep is added here; it would add dead time, not
+// correctness.
+//
+// Split out from runServe (mirroring runDuplexWithContext) so it can be
+// exercised directly in tests against a real Session that's had audio
+// pushed into it, without going through flag parsing, backend resolution,
+// or OS signal delivery.
+func runServeWithContext(ctx context.Context, sess *langstream.Session, srv *http.Server) error {
+	dashboardErr := make(chan error, 1)
+	go func() {
+		dashboardErr <- serveDashboard(ctx, srv)
+	}()
+
+	<-ctx.Done()
+
+	var firstErr error
+	if err := sess.Close(); err != nil {
+		firstErr = fmt.Errorf("closing session: %w", err)
+	}
+
+	if err := <-dashboardErr; err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	return firstErr
 }
 
 // serveDashboard runs srv (via ListenAndServe) until ctx is cancelled, then

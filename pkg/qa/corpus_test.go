@@ -65,6 +65,13 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // sequences, filler words, an insertion case, and a two-substitution
 // case) — see FixedCorpus's doc comment for each entry's reasoning and
 // hand-computed WER.
+//
+// Sprint 2026-07-14 (QA): includes ten further entries (a multi-word
+// deletion, proper-noun brand/person-name substitutions, a number-word-
+// vs-digit substitution, two long utterances, a content-word deletion, a
+// hallucinated-insertion case, a reverse-direction English-dominant
+// entry, and a digit-sequence deletion) — see FixedCorpus's doc comment
+// for each entry's reasoning and hand-computed WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -85,6 +92,19 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_call_disconnect_network_issue":         0.0,
 		"hinglish_account_block_query_two_substitutions": 2.0 / 13.0,
 		"hinglish_callback_request_deletion_and_filler":  1.0 / 10.0,
+
+		// Sprint 2026-07-14 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_two_word_deletion_travel_booking_confirmation":  2.0 / 13.0,
+		"hinglish_proper_noun_brand_substitution_recharge":        1.0 / 8.0,
+		"hinglish_proper_noun_person_name_substitution_order":     1.0 / 11.0,
+		"hinglish_number_word_vs_digit_substitution":              1.0 / 9.0,
+		"hinglish_long_utterance_single_deletion_callback":        1.0 / 25.0,
+		"hinglish_content_word_deletion_parcel_delivery_date":     1.0 / 12.0,
+		"hinglish_insertion_hallucinated_filler_word":             1.0 / 7.0,
+		"english_dominant_embedded_hindi_courtesy_agent_transfer": 1.0 / 12.0,
+		"hinglish_digit_sequence_deletion_account_number":         1.0 / 10.0,
+		"hinglish_long_utterance_two_substitutions_refund_status": 2.0 / 18.0,
 	}
 
 	entries := FixedCorpus()

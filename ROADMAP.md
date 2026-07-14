@@ -208,6 +208,17 @@ traffic, which doesn't exist until Week 4 starts. Everything else
 (fallback behavior, vSIP example wired end-to-end, observability
 dashboard, DPDP/consent drafts) is done.
 
+**2026-07-14 note:** no new Week 3/4 checklist items closed today — the
+one remaining Week 3 item and all of Week 4 are genuinely blocked (live
+traffic / a business decision on anchor customers), not on more agent
+work, so today's scheduled run did hardening instead of inventing scope:
+fixed an untested `runServe` shutdown-ordering bug (same class as the
+2026-07-13 duplex fix), found and fixed two pre-existing flaky-test races
+in `pkg/langstream/latency_test.go`, and continued strengthening the WER
+corpus (15→25 entries) and jitter stress tests. See DEVLOG.md's 2026-07-14
+entry. Week 4 cannot meaningfully start until Saurabh decides on anchor
+customers / live traffic.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

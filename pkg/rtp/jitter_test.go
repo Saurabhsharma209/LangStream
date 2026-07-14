@@ -796,3 +796,138 @@ func TestJitterBufferSuddenJitterSpikeMidStream(t *testing.T) {
 		t.Error("expected some PullLost from the deliberately-unabsorbable jitter spike")
 	}
 }
+
+// simulateHighLossSevereReorderStream combines simulateBurstyReorderStream's
+// severe multi-position reordering (sequence labels shuffled within
+// non-overlapping windows of windowSize packets, so a packet can arrive
+// many positions out of order, not just swapped with its immediate
+// neighbor) with simulatePSTNStream's independent per-packet loss --
+// simultaneously, not in isolation the way
+// TestJitterBufferUnderHarshPacketLoss (loss only, in-order-ish arrivals)
+// and TestJitterBufferBurstyMultiPositionReordering (reordering only, no
+// loss) each exercise separately. A real bad last-mile/Wi-Fi leg during
+// network congestion routinely produces both at once, and the two
+// failure modes can interact: a lost packet changes which sequence number
+// the buffer is currently waiting on, which changes how "out of order" a
+// later, reordered arrival looks relative to that wait -- a combination
+// this package's existing scenarios never actually drive.
+//
+// As in simulateBurstyReorderStream, the earliest-arriving *surviving*
+// (non-dropped) packet is guaranteed to carry the globally lowest
+// surviving sequence number: JitterBuffer establishes its base
+// sequence/arrival time from whichever packet is pushed first (see
+// jitter.go's package doc comment), and any packet that arrives "before"
+// that base in sequence-number terms is immediately rejected PushLate
+// (see jitter.go's Push, the dist<0 branch) rather than legitimately
+// reordered. Loss makes this trickier than in the no-loss reordering
+// case: dropping the packet that would otherwise have arrived first can
+// promote a later, higher-numbered packet into that "first arrival"
+// slot, which is exactly the impossible-for-a-real-stream case that swap
+// avoids.
+func simulateHighLossSevereReorderStream(rng *rand.Rand, n int, start time.Time, nominalInterval time.Duration, windowSize int, lossP float64) []simulatedPacket {
+	pkts := make([]simulatedPacket, n)
+	for i := 0; i < n; i++ {
+		pkts[i] = simulatedPacket{seq: uint16(i), present: true}
+	}
+
+	for ws := 0; ws < n; ws += windowSize {
+		we := ws + windowSize
+		if we > n {
+			we = n
+		}
+		window := pkts[ws:we]
+		rng.Shuffle(len(window), func(i, j int) { window[i], window[j] = window[j], window[i] })
+	}
+
+	for i := range pkts {
+		if rng.Float64() < lossP {
+			pkts[i].present = false
+		}
+	}
+
+	// Guarantee the earliest-arriving present packet carries the globally
+	// lowest surviving sequence number (see the doc comment above for
+	// why), by swapping sequence labels between the first present slot
+	// and whichever present slot holds the minimum surviving sequence
+	// number.
+	firstPresent := -1
+	minSeqIdx := -1
+	for i, p := range pkts {
+		if !p.present {
+			continue
+		}
+		if firstPresent == -1 {
+			firstPresent = i
+		}
+		if minSeqIdx == -1 || p.seq < pkts[minSeqIdx].seq {
+			minSeqIdx = i
+		}
+	}
+	if firstPresent != -1 && minSeqIdx != -1 && firstPresent != minSeqIdx {
+		pkts[firstPresent].seq, pkts[minSeqIdx].seq = pkts[minSeqIdx].seq, pkts[firstPresent].seq
+	}
+
+	present := pkts[:0:0]
+	for i, p := range pkts {
+		if !p.present {
+			continue
+		}
+		p.arrival = start.Add(time.Duration(i) * nominalInterval)
+		present = append(present, p)
+	}
+	return present
+}
+
+// TestJitterBufferSimultaneousHighLossAndSevereReordering drives
+// simulateHighLossSevereReorderStream's combined ~15% loss + up-to-a-
+// full-window severe reordering through the same
+// driveJitterBufferSimulation harness as every other harsh scenario
+// above, asserting the same invariants (monotonic in-order playout with
+// no duplicates, the exact played+lost == n packet-accounting invariant,
+// and staying within MaxPacketsBuffered) hold when both harsh conditions
+// hit the buffer at once, not just when tested in isolation.
+func TestJitterBufferSimultaneousHighLossAndSevereReordering(t *testing.T) {
+	const (
+		n               = 350
+		nominalInterval = 20 * time.Millisecond
+		windowSize      = 10   // packets can arrive up to ~9 positions out of order within a burst
+		lossP           = 0.15 // ~15% loss, on top of the reordering
+	)
+	start := time.Unix(1_700_000_400, 0)
+
+	rng := rand.New(rand.NewSource(404))
+	stream := simulateHighLossSevereReorderStream(rng, n, start, nominalInterval, windowSize, lossP)
+
+	cfg := Config{
+		TargetDelay:        time.Duration(windowSize+2) * nominalInterval, // generous enough to absorb a full window's worth of reordering
+		PacketInterval:     nominalInterval,
+		MaxPacketsBuffered: 64,
+	}
+	b := NewJitterBuffer(cfg)
+
+	totalTicks := n + int(cfg.TargetDelay/nominalInterval) + 10
+	played, lostCount := driveJitterBufferSimulation(t, b, stream, start, nominalInterval, totalTicks, n)
+
+	assertMonotonicNoDuplicates(t, played)
+
+	stats := b.Stats()
+	t.Logf("high-loss+severe-reorder simulation: n=%d received=%d lost=%d late=%d duplicates=%d evicted=%d played=%d",
+		n, stats.Received, stats.Lost, stats.Late, stats.Duplicates, stats.EvictedForCapacity, len(played))
+
+	assertPacketAccounting(t, played, lostCount, stats.Lost, n)
+
+	if stats.Lost == 0 {
+		t.Error("expected substantial PullLost given ~15% simulated packet loss combined with severe reordering")
+	}
+	// Bounded generously above the raw lossP since severe reordering on
+	// top of loss can itself push a few additional close-to-the-margin
+	// packets past their deadline (unlike the loss-only or reorder-only
+	// scenarios above, which each budget for only one effect).
+	if float64(stats.Lost) < float64(n)*0.08 || float64(stats.Lost) > float64(n)*0.35 {
+		t.Errorf("Lost = %d is implausible for %d packets at %.0f%% simulated loss plus severe reordering with a %v target delay",
+			stats.Lost, n, lossP*100, cfg.TargetDelay)
+	}
+	if len(played)+lostCount == 0 {
+		t.Fatal("nothing played and nothing lost - buffer made no progress")
+	}
+}
