@@ -980,3 +980,151 @@ Cartesia/ElevenLabs key is wired into LangStream yet, and whether this
 becomes a committed repo feature or a local-only script) — see the
 conversation, not yet in this DEVLOG since scope wasn't settled as of this
 entry.
+
+## 2026-07-14 (interactive session, continued) — real WebRTC live-translation harness + ElevenLabs TTS backend
+
+Continuing from this same day's earlier Sarvam wire-format entry (above):
+Saurabh asked to fix the Sarvam bug in the repo (done, see above) and then
+to be able to test live, real-time translation over an actual browser
+call -- either one person talking to a translating bot, or two real
+people each speaking their own language, both hearing the other
+translated. After scoping questions (mode: two-user relay; TTS backend:
+ElevenLabs, since that's the vendor key available; scope: a real,
+committed repo feature, not a throwaway script), built both.
+
+### Shipped
+
+**`pkg/tts/elevenlabs.go` + `elevenlabs_voices.go` (new, PE-owned files)** —
+a real ElevenLabs TTS backend, verified live against the real API
+(`POST /v1/text-to-speech/{voice_id}/stream?output_format=pcm_8000`,
+`xi-api-key` header, raw headerless PCM16@8kHz streamed response -- no
+WAV/JSON/base64 framing, unlike Cartesia's WebSocket protocol). Two real,
+confirmed voice IDs (via `GET /v1/voices` against the actual account):
+George (`JBFqnCBsd6RMkjVDRZzb`) for English, Sarah (`EXAVITQu4vr4xnSDxMaL`)
+for Hindi. Registered as `--backend elevenlabs` /
+`LANGSTREAM_TTS_BACKEND=elevenlabs` in `cmd/langstream/main.go`. Full test
+suite against an `httptest.Server` fake, plus a real live smoke-test
+against the actual API (33 chunks, ~3.85s of real synthesized audio,
+`IsFinal` correctly set on the last chunk) before trusting it further.
+
+**`pkg/webrtcgw` (new package) + `cmd/langstream/webrtc.go` (new
+subcommand)** — a real, two-user, browser-facing WebRTC test harness. Two
+people each open a served page (`pkg/webrtcgw/static/index.html`,
+embedded via `go:embed`), join the same room with opposite roles
+("caller"/"agent") over a WebSocket signaling protocol
+(`pkg/webrtcgw/signaling.go`), grant mic access, and talk to each other
+live through a real `langstream.Session` (the same duplex orchestrator
+`pkg/rtp.DuplexSession` bridges for ClearStream's telephony legs) -- no
+telephony/RTP infrastructure needed.
+
+**Design decision: G.711 (PCMA), not Opus.** Browsers' WebRTC audio is
+normally Opus, which needs a codec library (cgo/libopus) to decode/encode
+in Go -- real added complexity this repo doesn't need. PCMA/PCMU are
+*mandatory-to-implement* codecs for every WebRTC-compliant browser (RFC
+7874, specifically so browsers can interoperate with legacy telephony
+gateways) -- confirmed via research, not assumed. `pkg/webrtcgw/peer.go`'s
+`newMediaEngine` registers *only* PCMA for audio; since this gateway
+always answers (never offers), restricting our side to PCMA forces
+negotiation onto it with zero special handling needed on the browser
+side (no `setCodecPreferences`, no SDP munging). G.711 companding is
+simple 8-bit math (`pkg/webrtcgw/alaw.go`), not a real codec library --
+this is what keeps the whole gateway cgo-free. Verified live: a raw
+`pion/webrtc` offer with only PCMA/PCMU registered produces a clean
+`m=audio ... 8 0` SDP line with no Opus at all.
+
+**Real bug found and fixed live, via full end-to-end testing with real
+Sarvam ASR + real ElevenLabs TTS through the actual gateway (not just
+mocks):** the first working version pushed every individual 20ms
+RTP-derived audio frame straight into `Session.Push{Caller,Agent}Audio`.
+This worked for `langstream demo` (which explicitly `Close()`s the ASR
+session at the end, and Sarvam responds to the resulting best-effort
+flush signal -- see this same day's earlier Sarvam entry) but *silently
+never finalized a single utterance* in a real, ongoing, never-closed
+room: real Hindi speech went in, real RTP packets were confirmed arriving
+server-side (283 packets, ~90KB, matching the source audio exactly), but
+zero transcripts ever came back, and the test just hung waiting.
+
+Root-caused methodically, not guessed: isolated chunk size as the only
+variable between a working and a silently-broken run against the *live*
+Sarvam endpoint (bypassing the whole gateway, driving `SarvamRecognizer`
+directly with the identical audio content): 400ms chunks with no explicit
+close/flush **did** autonomously finalize via Sarvam's own server-side
+VAD; the same content in 20ms chunks with no close/flush **never** did,
+even waiting 20+ seconds. Conclusion: Sarvam's VAD needs each individual
+message's audio to span a large-enough window to detect a speech/silence
+transition within -- 20ms (one RTP packet) is too short a window for that
+detection to ever trigger, so a session that's never explicitly closed
+(the normal case for a live, ongoing two-user call) just sits there
+forever with nothing to signal "utterance over."
+
+**Fix:** `pkg/webrtcgw/inbound_buffer.go`'s new `inboundBuffer` type:
+accumulates ~400ms of decoded PCM across many small RTP packets before
+calling `Session.Push{Caller,Agent}Audio`, with an explicit `flush()` that
+still delivers whatever's buffered (even if under 400ms) when a track
+ends -- so a real hangup mid-utterance doesn't silently drop the last
+words either. Directly unit-tested (`inbound_buffer_test.go`, no live
+pion/WebRTC transport needed) for: accumulation-not-immediate-forwarding,
+correct reset after a flush, forced partial delivery on `flush()`, and
+flush-on-empty being a safe no-op. Re-verified against the live Sarvam +
+ElevenLabs stack after the fix: real transcript arrived
+(`"मुझे कल शाम को अपना order वापस चाहिए कृपया जल्दी मदद करें"`), real
+mock-translated text, real ElevenLabs audio (79.5KB, ~4.97s) delivered to
+the other peer's WebRTC track.
+
+**A second, smaller bug found via `go test -race`:** the *test harness
+itself* (not gateway code) wrote to its WebSocket connection from two
+goroutines without a mutex (the `OnICECandidate` callback racing the main
+goroutine's join/offer sends) -- caught immediately by `-race` on the
+very first real run, fixed by mirroring the same `writeMu`-guarded
+`writeJSON` pattern the real `SignalingHandler` already used correctly.
+
+**A third bug, flakiness under `-count=N`:** the end-to-end test reused a
+literal room-ID string (`"room-1"`) across repeated runs within the same
+test binary invocation; a room's cleanup (`Manager.leave`, triggered
+asynchronously off `OnConnectionStateChange` once both peers disconnect)
+isn't guaranteed to finish before a later iteration reuses the same ID,
+so a repeated run could race stale room state and silently never connect
+a fresh session. Fixed with a package-level atomic counter minting a
+unique room ID per test call; verified stable across repeated
+`-count=3`/`-count=4` runs after the fix (was reproducibly flaky before).
+
+### Verified
+- `pkg/asr`, `pkg/tts`, `pkg/webrtcgw`: `go build ./...`, `go vet ./...`,
+  `gofmt -l .` clean; `go test ./... -race -count=2` clean across all 11
+  packages (10 existing + the new `pkg/webrtcgw`), no flakes across
+  multiple repeated runs after the room-ID fix above.
+- Full live stack (real Sarvam ASR + real ElevenLabs TTS, mock
+  translation) driven through the actual gateway via two independent,
+  real `pion/webrtc` clients (headless stand-ins for real browsers --
+  everything about the protocol/media path is real; only actual browser
+  JS engines and microphone hardware are out of scope for this sandbox):
+  real ICE/DTLS/SRTP negotiation, real G.711 RTP both directions, real
+  vendor API calls, real translated audio delivered end to end.
+
+### Blocked / not done here
+- GPT-4o/OpenAI-backed translation untested through the WebRTC gateway
+  from this sandbox specifically -- `api.openai.com` is blocked at this
+  sandbox's network egress level (confirmed via direct HTTP request
+  redirecting to a Cisco Secure Access block page), unrelated to any code
+  in this repo. The GPT-4o client itself is unchanged from Week 2 and
+  already tested then; Saurabh is continuing this specific test on his
+  own machine where that domain is reachable.
+- No TURN server configured (only a public STUN default) -- fine for
+  same-host/same-LAN testing (the intended use case here), would need a
+  TURN server added via `--stun` for participants behind restrictive/
+  symmetric NATs.
+- This feature is explicitly out-of-band from the daily six-agent
+  automation's normal roadmap execution (see ROADMAP.md's new section) --
+  not tied to a Week 3/4 checklist item, requested directly in this
+  interactive session.
+
+### Tomorrow (for the next scheduled daily run)
+This work happened in an interactive session, not the scheduled
+automation -- the next scheduled run should read this entry, note the new
+`pkg/webrtcgw`/`pkg/tts/elevenlabs.go` files now exist (Tech and PE's
+file-ownership map in `references/workstreams.md` naturally covers them:
+`pkg/webrtcgw` falls under Tech's `pkg/langstream/*.go, pkg/rtp/*.go,
+cmd/langstream/*.go, examples/` charter in spirit even though the literal
+glob doesn't list it yet -- worth a small workstreams.md update next
+scheduled run to add `pkg/webrtcgw/*.go` explicitly), and continue normal
+Week 3/4 assessment unaffected by this addition.

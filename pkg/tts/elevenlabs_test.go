@@ -1,0 +1,492 @@
+package tts
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// --- fake ElevenLabs HTTP server -----------------------------------
+//
+// ElevenLabs' streaming TTS endpoint is a plain HTTP POST whose response
+// body is a raw, headerless, chunked PCM stream (see elevenlabs.go's
+// package doc comment) -- much simpler to fake than Cartesia's WebSocket
+// protocol: an httptest.Server handler that decodes the JSON request body,
+// then writes+flushes raw bytes (or a non-200 status) is enough.
+
+// fakeElevenLabsRequest captures what SynthesizeStream sent, for tests to
+// assert against.
+type fakeElevenLabsRequest struct {
+	voiceID string
+	apiKey  string
+	ctype   string
+	query   string
+	body    elevenlabsRequest
+}
+
+// newFakeElevenLabsServer starts a server whose /v1/text-to-speech/
+// handler decodes the request and hands it, plus the ResponseWriter, to
+// handle so each test can script exactly the response it wants (chunks,
+// a non-200 error, etc).
+func newFakeElevenLabsServer(t *testing.T, handle func(w http.ResponseWriter, req fakeElevenLabsRequest)) *fakeElevenLabsServerHandle {
+	t.Helper()
+	fs := &fakeElevenLabsServerHandle{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/text-to-speech/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/v1/text-to-speech/")
+		voiceID := strings.TrimSuffix(path, "/stream")
+
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "reading body", http.StatusInternalServerError)
+			return
+		}
+		var reqBody elevenlabsRequest
+		if err := json.Unmarshal(bodyBytes, &reqBody); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+
+		fakeReq := fakeElevenLabsRequest{
+			voiceID: voiceID,
+			apiKey:  r.Header.Get("xi-api-key"),
+			ctype:   r.Header.Get("Content-Type"),
+			query:   r.URL.RawQuery,
+			body:    reqBody,
+		}
+
+		fs.mu.Lock()
+		fs.lastRequest = fakeReq
+		fs.mu.Unlock()
+
+		handle(w, fakeReq)
+	})
+
+	fs.Server = httptest.NewServer(mux)
+	return fs
+}
+
+type fakeElevenLabsServerHandle struct {
+	*httptest.Server
+	mu          sync.Mutex
+	lastRequest fakeElevenLabsRequest
+}
+
+func (fs *fakeElevenLabsServerHandle) request() fakeElevenLabsRequest {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.lastRequest
+}
+
+// newTestElevenLabsSynthesizer builds an ElevenLabsSynthesizer pointed at
+// the fake server, setting ELEVENLABS_API_KEY on the current test's
+// environment since the constructor requires it.
+func newTestElevenLabsSynthesizer(t *testing.T, fs *fakeElevenLabsServerHandle, opts ...ElevenLabsOption) *ElevenLabsSynthesizer {
+	t.Helper()
+	t.Setenv("ELEVENLABS_API_KEY", "test-api-key")
+	allOpts := append([]ElevenLabsOption{WithElevenLabsBaseURL(fs.URL), WithElevenLabsDialTimeout(2 * time.Second)}, opts...)
+	e, err := NewElevenLabsSynthesizer(allOpts...)
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+	return e
+}
+
+func drainElevenLabsChunks(t *testing.T, ch <-chan AudioChunk, timeout time.Duration) []AudioChunk {
+	t.Helper()
+	var chunks []AudioChunk
+	deadline := time.After(timeout)
+	for {
+		select {
+		case c, ok := <-ch:
+			if !ok {
+				return chunks
+			}
+			chunks = append(chunks, c)
+		case <-deadline:
+			t.Fatalf("timed out draining channel; got %d chunks so far", len(chunks))
+		}
+	}
+}
+
+// flushWriter is satisfied by httptest's ResponseWriter (which implements
+// http.Flusher), used so fake handlers can force each Write onto the wire
+// immediately rather than being buffered until the handler returns.
+type flushWriter interface {
+	io.Writer
+	http.Flusher
+}
+
+// --- tests --------------------------------------------------------------
+
+func TestElevenLabsSynthesizer_ConstructionRequiresAPIKey(t *testing.T) {
+	t.Setenv("ELEVENLABS_API_KEY", "")
+	if _, err := NewElevenLabsSynthesizer(); err == nil {
+		t.Fatal("expected error when ELEVENLABS_API_KEY is unset, got nil")
+	}
+}
+
+func TestElevenLabsSynthesizer_NameAndLanguages(t *testing.T) {
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	e, err := NewElevenLabsSynthesizer()
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+	if got := e.Name(); got != "elevenlabs" {
+		t.Errorf("Name() = %q, want %q", got, "elevenlabs")
+	}
+	langs := e.SupportedLanguages()
+	want := map[Language]bool{LanguageEnglish: false, LanguageHindi: false}
+	for _, l := range langs {
+		if _, ok := want[l]; ok {
+			want[l] = true
+		}
+	}
+	for l, found := range want {
+		if !found {
+			t.Errorf("expected SupportedLanguages() to include %q, got %v", l, langs)
+		}
+	}
+}
+
+// TestElevenLabsSynthesizer_RequestShapeAndChunkAssembly verifies that
+// SynthesizeStream sends the right URL/headers/body to ElevenLabs, and
+// correctly assembles the server's raw PCM stream into AudioChunk values,
+// ending with exactly one IsFinal chunk whose PCM bytes match exactly
+// what the fake server sent.
+func TestElevenLabsSynthesizer_RequestShapeAndChunkAssembly(t *testing.T) {
+	const wantText = "namaste, how can I help you today?"
+	persona := Persona{VoiceID: "default-hi", Language: LanguageHindi, Gender: "neutral"}
+
+	pcm1 := []byte{1, 2, 3, 4}
+	pcm2 := []byte{5, 6, 7, 8, 9, 10}
+
+	fs := newFakeElevenLabsServer(t, func(w http.ResponseWriter, req fakeElevenLabsRequest) {
+		wantVoice := elevenlabsVoices[LanguageHindi]["default-hi"]
+		if req.voiceID != wantVoice {
+			t.Errorf("voice id in URL = %q, want %q", req.voiceID, wantVoice)
+		}
+		if req.apiKey != "test-api-key" {
+			t.Errorf("xi-api-key = %q, want %q", req.apiKey, "test-api-key")
+		}
+		if req.ctype != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", req.ctype)
+		}
+		if req.query != "output_format=pcm_8000" {
+			t.Errorf("query = %q, want output_format=pcm_8000", req.query)
+		}
+		if req.body.Text != wantText {
+			t.Errorf("request text = %q, want %q", req.body.Text, wantText)
+		}
+		if req.body.ModelID != elevenlabsDefaultModel {
+			t.Errorf("request model_id = %q, want %q", req.body.ModelID, elevenlabsDefaultModel)
+		}
+		if req.body.LanguageCode != "hi" {
+			t.Errorf("request language_code = %q, want %q", req.body.LanguageCode, "hi")
+		}
+
+		fw, ok := w.(flushWriter)
+		if !ok {
+			t.Fatalf("ResponseWriter does not support flushing")
+		}
+		w.WriteHeader(http.StatusOK)
+		if _, err := fw.Write(pcm1); err != nil {
+			t.Errorf("writing pcm1: %v", err)
+			return
+		}
+		fw.Flush()
+		time.Sleep(50 * time.Millisecond) // force a separate read on the client side
+		if _, err := fw.Write(pcm2); err != nil {
+			t.Errorf("writing pcm2: %v", err)
+			return
+		}
+		fw.Flush()
+	})
+	defer fs.Close()
+
+	e := newTestElevenLabsSynthesizer(t, fs)
+	ch, err := e.SynthesizeStream(context.Background(), wantText, persona)
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+
+	// Whether the server's EOF arrives attached to the last data read or
+	// as a separate zero-length read (both happen in practice against a
+	// real *http.Response.Body depending on timing -- see readLoop's doc
+	// comment) is a race this test must tolerate: assert on the
+	// reassembled byte stream and the IsFinal invariant rather than an
+	// exact chunk count.
+	chunks := drainElevenLabsChunks(t, ch, 5*time.Second)
+	if len(chunks) < 2 {
+		t.Fatalf("got %d chunks, want at least 2: %+v", len(chunks), chunks)
+	}
+
+	var gotPCM []byte
+	for _, c := range chunks {
+		gotPCM = append(gotPCM, c.PCM...)
+	}
+	wantPCM := append(append([]byte{}, pcm1...), pcm2...)
+	if string(gotPCM) != string(wantPCM) {
+		t.Errorf("reassembled PCM = %v, want %v", gotPCM, wantPCM)
+	}
+
+	for i, c := range chunks {
+		wantFinal := i == len(chunks)-1
+		if c.IsFinal != wantFinal {
+			t.Errorf("chunk[%d].IsFinal = %v, want %v (exactly the last chunk should be final)", i, c.IsFinal, wantFinal)
+		}
+		if c.SampleRate != elevenlabsDefaultSampleRate {
+			t.Errorf("chunk[%d].SampleRate = %d, want %d", i, c.SampleRate, elevenlabsDefaultSampleRate)
+		}
+	}
+	if !chunks[0].IsFinal && string(chunks[0].PCM) != string(pcm1) {
+		t.Errorf("chunk[0].PCM = %v, want %v", chunks[0].PCM, pcm1)
+	}
+}
+
+// TestElevenLabsSynthesizer_SingleChunkStreamIsFinal covers the simpler
+// case of a single write from the server: the one chunk delivered must
+// still be marked IsFinal.
+func TestElevenLabsSynthesizer_SingleChunkStreamIsFinal(t *testing.T) {
+	pcm := []byte{42, 42, 42, 42}
+	fs := newFakeElevenLabsServer(t, func(w http.ResponseWriter, req fakeElevenLabsRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pcm)
+	})
+	defer fs.Close()
+
+	e := newTestElevenLabsSynthesizer(t, fs)
+	ch, err := e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	chunks := drainElevenLabsChunks(t, ch, 5*time.Second)
+	if len(chunks) != 1 {
+		t.Fatalf("got %d chunks, want 1", len(chunks))
+	}
+	if !chunks[0].IsFinal {
+		t.Errorf("chunks[0].IsFinal = false, want true")
+	}
+	if string(chunks[0].PCM) != string(pcm) {
+		t.Errorf("chunks[0].PCM = %v, want %v", chunks[0].PCM, pcm)
+	}
+}
+
+func TestElevenLabsSynthesizer_EmptyText(t *testing.T) {
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	e, err := NewElevenLabsSynthesizer()
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+	if _, err := e.SynthesizeStream(context.Background(), "", Persona{Language: LanguageEnglish}); err == nil {
+		t.Fatal("expected error for empty text, got nil")
+	}
+}
+
+func TestElevenLabsSynthesizer_UnsupportedLanguage(t *testing.T) {
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	e, err := NewElevenLabsSynthesizer()
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+	if _, err := e.SynthesizeStream(context.Background(), "bonjour", Persona{Language: "fr"}); err == nil {
+		t.Fatal("expected error for unsupported language, got nil")
+	}
+}
+
+// TestElevenLabsSynthesizer_NonOKStatusSurfacesAsError is the error-path
+// test for a non-200 response: it must return an error (with the response
+// body's content included) rather than a channel, and must never return
+// both a non-nil channel and a non-nil error.
+func TestElevenLabsSynthesizer_NonOKStatusSurfacesAsError(t *testing.T) {
+	fs := newFakeElevenLabsServer(t, func(w http.ResponseWriter, req fakeElevenLabsRequest) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"detail":{"status":"invalid_voice_id","message":"voice not found"}}`))
+	})
+	defer fs.Close()
+
+	e := newTestElevenLabsSynthesizer(t, fs)
+	ch, err := e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err == nil {
+		t.Fatal("expected an error for a non-200 response, got nil")
+	}
+	if ch != nil {
+		t.Errorf("expected a nil channel on error, got %v", ch)
+	}
+	if !strings.Contains(err.Error(), "voice not found") {
+		t.Errorf("error = %v, want it to include the response body's message", err)
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("error = %v, want it to include the status code", err)
+	}
+}
+
+// TestElevenLabsSynthesizer_ConnectionError is the error-path test for
+// connection failure: pointing the client at an address nothing is
+// listening on must return a synchronous error from SynthesizeStream, not
+// a channel that hangs or panics.
+func TestElevenLabsSynthesizer_ConnectionError(t *testing.T) {
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	// Reserve a port, then close it immediately so nothing listens there.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving a port: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	e, err := NewElevenLabsSynthesizer(
+		WithElevenLabsBaseURL("http://"+addr),
+		WithElevenLabsDialTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+
+	ch, err := e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err == nil {
+		t.Fatal("expected a connection error, got nil")
+	}
+	if ch != nil {
+		t.Errorf("expected a nil channel on error, got %v", ch)
+	}
+}
+
+// TestElevenLabsSynthesizer_ContextCancelDoesNotHang mirrors Cartesia's
+// equivalent test: cancelling ctx mid-stream must close the channel
+// promptly instead of leaking the reader goroutine or blocking forever on
+// a server that never finishes sending.
+func TestElevenLabsSynthesizer_ContextCancelDoesNotHang(t *testing.T) {
+	release := make(chan struct{})
+	fs := newFakeElevenLabsServer(t, func(w http.ResponseWriter, req fakeElevenLabsRequest) {
+		fw, ok := w.(flushWriter)
+		if !ok {
+			t.Fatalf("ResponseWriter does not support flushing")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = fw.Write([]byte{1, 2, 3, 4})
+		fw.Flush()
+		// Hold the connection open (no more data, no close) until the
+		// test releases it, simulating a server that never finishes; the
+		// client's context cancellation -- not the server -- must be
+		// what ends the stream.
+		<-release
+	})
+	defer fs.Close()
+	defer close(release)
+
+	e := newTestElevenLabsSynthesizer(t, fs)
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := e.SynthesizeStream(ctx, "hello", Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first chunk")
+	}
+	cancel()
+
+	select {
+	case _, ok := <-ch:
+		if ok {
+			for {
+				select {
+				case _, ok := <-ch:
+					if !ok {
+						return
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("channel did not close after context cancellation")
+				}
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("channel did not close after context cancellation")
+	}
+}
+
+// --- voiceFor fallback tests ---------------------------------------
+
+func TestElevenLabsSynthesizer_VoiceFor_KnownVoiceID(t *testing.T) {
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	e, err := NewElevenLabsSynthesizer()
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+	got := e.voiceFor(Persona{VoiceID: "agent-female-en", Language: LanguageEnglish})
+	want := elevenlabsVoices[LanguageEnglish]["agent-female-en"]
+	if got != want {
+		t.Errorf("voiceFor(agent-female-en) = %q, want %q", got, want)
+	}
+}
+
+func TestElevenLabsSynthesizer_VoiceFor_UnknownVoiceIDFallsBackToLanguageDefault(t *testing.T) {
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	e, err := NewElevenLabsSynthesizer()
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+	got := e.voiceFor(Persona{VoiceID: "totally-unknown-voice-slot", Language: LanguageHindi})
+	want := elevenlabsVoices[LanguageHindi]["default-hi"]
+	if got != want {
+		t.Errorf("voiceFor(unknown, hi) = %q, want default-hi %q", got, want)
+	}
+}
+
+func TestElevenLabsSynthesizer_VoiceFor_UnknownLanguageFallsBackToEnglish(t *testing.T) {
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	e, err := NewElevenLabsSynthesizer()
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+	got := e.voiceFor(Persona{VoiceID: "default-fr", Language: "fr"})
+	want := elevenlabsVoices[LanguageEnglish]["default-en"]
+	if got != want {
+		t.Errorf("voiceFor(default-fr, fr) = %q, want English default %q", got, want)
+	}
+}
+
+func TestElevenLabsSynthesizer_DefaultVoicePerLanguage(t *testing.T) {
+	tests := []struct {
+		lang Language
+		want string
+	}{
+		{LanguageEnglish, elevenlabsVoices[LanguageEnglish]["default-en"]},
+		{LanguageHindi, elevenlabsVoices[LanguageHindi]["default-hi"]},
+	}
+	for _, tc := range tests {
+		var gotVoice string
+		fs := newFakeElevenLabsServer(t, func(w http.ResponseWriter, req fakeElevenLabsRequest) {
+			gotVoice = req.voiceID
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte{9, 9})
+		})
+
+		e := newTestElevenLabsSynthesizer(t, fs)
+		// Persona.VoiceID intentionally left blank: this exercises the
+		// "no persona specified" default-per-language path.
+		ch, err := e.SynthesizeStream(context.Background(), "hi", Persona{Language: tc.lang})
+		if err != nil {
+			fs.Close()
+			t.Fatalf("SynthesizeStream(%s): %v", tc.lang, err)
+		}
+		drainElevenLabsChunks(t, ch, 5*time.Second)
+		fs.Close()
+
+		if gotVoice != tc.want {
+			t.Errorf("language %s: default voice = %q, want %q", tc.lang, gotVoice, tc.want)
+		}
+	}
+}

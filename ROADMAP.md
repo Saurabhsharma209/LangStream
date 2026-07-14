@@ -232,6 +232,71 @@ customers / live traffic.
 
 ---
 
+## Added out-of-band: WebRTC live-test harness (2026-07-14, interactive session)
+
+Not part of the daily six-agent automation's normal roadmap execution --
+requested directly by Saurabh in an interactive session, after testing the
+Sarvam ASR fix (below) live and asking to be able to test real-time
+translation over an actual browser call instead of only via
+`langstream demo`'s one-shot mock harness.
+
+**What shipped:** `langstream webrtc` (`cmd/langstream/webrtc.go`) + a new
+`pkg/webrtcgw` package: a real, two-user, browser-facing test harness.
+Two people each open a served page, join the same room with opposite
+roles ("caller"/"agent"), grant mic access, and talk to each other live
+through real ASR->MT->TTS -- no telephony/RTP infrastructure involved,
+reusing the same `langstream.Session` duplex orchestrator
+`pkg/rtp.DuplexSession` uses for ClearStream's telephony legs.
+
+Key design decision: browsers' WebRTC audio is normally Opus, which would
+need a codec library (cgo/libopus) to decode/encode in Go. Instead, this
+gateway's `pion/webrtc` `MediaEngine` registers *only* G.711 PCMA (payload
+type 8) for audio -- PCMA/PCMU are mandatory-to-implement codecs for every
+WebRTC-compliant browser (RFC 7874, specifically for telephony-gateway
+interop), so restricting our side to PCMA forces negotiation onto it with
+zero special handling needed on the browser/client side. G.711 companding
+is simple 8-bit math, not a real codec library -- this is what keeps the
+whole gateway cgo-free. See `pkg/webrtcgw/alaw.go`'s package doc comment.
+
+Also added: a real `pkg/tts` ElevenLabs backend (`--backend elevenlabs` /
+`LANGSTREAM_TTS_BACKEND=elevenlabs`), verified live against the real
+ElevenLabs API (the only TTS vendor key available in this session; no
+Cartesia key exists). LangStream now has three real TTS backends
+(Cartesia, ElevenLabs) plus mock.
+
+**Real bug found and fixed live, during end-to-end testing with real
+Sarvam + real ElevenLabs through the actual gateway (not just mocks):**
+pushing every individual 20ms RTP-derived audio frame straight into
+`Session.Push{Caller,Agent}Audio` (the naive, obvious approach) worked
+fine for a one-shot `demo` (which explicitly `Close()`s the ASR session,
+and Sarvam responds to the resulting flush signal) but silently never
+finalized any utterance in a real, ongoing, never-closed room. Root-caused
+by isolating chunk size as the only variable between a working and a
+silently-broken run against the live Sarvam endpoint: Sarvam's own
+server-side VAD needs each individual message's audio to span a large
+enough window to detect a speech/silence transition within -- 20ms is too
+short. Fixed with `pkg/webrtcgw/inbound_buffer.go`'s `inboundBuffer`:
+accumulates ~400ms of decoded PCM before pushing into the Session (with a
+unit-tested guarantee that whatever's left over is still flushed when a
+track ends, so a real hangup mid-utterance doesn't silently drop the last
+words). See DEVLOG.md's 2026-07-14 entry for the full investigation.
+
+Verified end-to-end with two real (headless, pion-based) WebRTC clients
+against the actual HTTP server, real ICE/DTLS/SRTP, real G.711 RTP both
+directions, real Sarvam ASR, real ElevenLabs TTS, real Hindi speech audio
+(GPT-4o/OpenAI untestable from this sandbox specifically -- see below --
+so translation used the mock translator for this particular live run;
+`go test`'s own suite uses a deterministic in-process ASR/MT/TTS stand-in
+throughout, no live vendor calls in CI).
+
+**Known environment constraint, not a code issue:** this sandbox's network
+blocks `api.openai.com` at a security-gateway level (confirmed via a
+direct HTTP request returning a Cisco Secure Access block page) --
+`gpt4o`-backed translation could not be live-tested from here. Untested
+here does not mean broken: the GPT-4o client itself is unchanged from
+Week 2's already-tested implementation. Saurabh is continuing this test
+on his own machine, where that domain is reachable.
+
 ## Explicitly out of scope for this month
 - More than one language pair
 - Self-hosted models (Whisper/NLLB/Coqui) for cost reduction — stay on

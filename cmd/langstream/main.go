@@ -67,16 +67,17 @@ const (
 const defaultDashboardAddr = ":8080"
 
 // init registers the real vendor backends (Deepgram/Sarvam for ASR, GPT-4o
-// for MT, Cartesia for TTS) alongside the always-available "mock" backend
-// registered by pkg/langstream itself. Registration is unconditional -- it
-// does not check whether the corresponding API key env var is set -- so
-// `--backend deepgram` always appears in `langstream help`'s available-backends
-// list; the constructor itself returns a clear "DEEPGRAM_API_KEY is not set"
-// error at selection time if the key is missing, which is a better failure
-// mode than silently hiding the option. No live vendor API keys exist in
-// this environment yet (see ROADMAP.md Week 2 decision, 2026-07-07), so
-// these paths are exercised in CI only via fake local servers (see each
-// vendor package's _test.go), not against the real vendor endpoints.
+// for MT, Cartesia/ElevenLabs for TTS) alongside the always-available
+// "mock" backend registered by pkg/langstream itself. Registration is
+// unconditional -- it does not check whether the corresponding API key
+// env var is set -- so `--backend deepgram` always appears in `langstream
+// help`'s available-backends list; the constructor itself returns a clear
+// "DEEPGRAM_API_KEY is not set" error at selection time if the key is
+// missing, which is a better failure mode than silently hiding the
+// option. No live vendor API keys exist in this environment yet (see
+// ROADMAP.md Week 2 decision, 2026-07-07), so these paths are exercised
+// in CI only via fake local servers (see each vendor package's _test.go),
+// not against the real vendor endpoints.
 func init() {
 	langstream.RegisterASRBackend("deepgram", func() (asr.Recognizer, error) {
 		return asr.NewDeepgramRecognizer()
@@ -89,6 +90,9 @@ func init() {
 	})
 	langstream.RegisterTTSBackend("cartesia", func() (tts.Synthesizer, error) {
 		return tts.NewCartesiaSynthesizer()
+	})
+	langstream.RegisterTTSBackend("elevenlabs", func() (tts.Synthesizer, error) {
+		return tts.NewElevenLabsSynthesizer()
 	})
 }
 
@@ -116,6 +120,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "duplex failed:", err)
 			os.Exit(1)
 		}
+	case "webrtc":
+		if err := runWebRTC(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "webrtc failed:", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -126,7 +135,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: langstream <version|demo|serve|duplex|help>")
+	fmt.Fprintln(os.Stderr, "usage: langstream <version|demo|serve|duplex|webrtc|help>")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "demo [--backend NAME]")
 	fmt.Fprintln(os.Stderr, "    Run a one-shot duplex-session demo against the named backend for")
@@ -153,6 +162,16 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "    Other flags: --caller-lang/--agent-lang (default hi/en), --caller-payload-type/")
 	fmt.Fprintln(os.Stderr, "    --agent-payload-type, --caller-jitter-depth/--agent-jitter-depth, and")
 	fmt.Fprintf(os.Stderr, "    --suppressor (ClearStream noise-suppressor backend, default %q).\n", defaultSuppressorBackend)
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "webrtc [--backend NAME] [--addr ADDR] [--caller-lang LANG] [--agent-lang LANG] [--stun URLS]")
+	fmt.Fprintln(os.Stderr, "    Start a real, two-user, browser-facing test harness (same backend selection")
+	fmt.Fprintln(os.Stderr, "    as demo/serve/duplex): serves a static page and a WebSocket signaling")
+	fmt.Fprintln(os.Stderr, "    endpoint on ADDR (default \""+defaultWebRTCAddr+"\"). Two people each open the page,")
+	fmt.Fprintln(os.Stderr, "    join the same room with opposite roles (\"caller\"/\"agent\"), grant mic access, and")
+	fmt.Fprintln(os.Stderr, "    talk to each other live through real ASR->MT->TTS -- no telephony/RTP")
+	fmt.Fprintln(os.Stderr, "    infrastructure involved (see pkg/webrtcgw). --stun sets the ICE STUN/TURN")
+	fmt.Fprintf(os.Stderr, "    server list (comma-separated, default %q).\n", defaultSTUNServer)
+
 }
 
 // resolveBackend resolves the backend name for one pipeline leg.

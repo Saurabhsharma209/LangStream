@@ -32,14 +32,14 @@ GPT-4o/NLLB, Cartesia/ElevenLabs) behind the same interfaces. Never let a
 vendor SDK leak outside its own file.
 
 ## Tech — Backend / Telephony Engineer
-**Owns:** `pkg/langstream/*.go`, `pkg/rtp/*.go`, `cmd/langstream/*.go`, `examples/`
+**Owns:** `pkg/langstream/*.go`, `pkg/rtp/*.go`, `pkg/webrtcgw/*.go`, `cmd/langstream/*.go`, `examples/`
 **Charter:** Own the duplex session orchestrator (`pkg/langstream/session.go`)
 that wires two RTP legs (caller, agent) through ASR→MT→TTS in both
 directions, VAD-based chunk boundaries (`pkg/langstream/vad.go`), and voice
 persona assignment (`pkg/langstream/personas.go`). Extends ClearStream's
 `pkg/rtp` session model for bidirectional media instead of reinventing RTP
 handling. Also owns the CLI entrypoint and the Exotel vSIP integration
-example.
+example, plus `pkg/webrtcgw` (added 2026-07-14, interactive session): a real, two-user WebRTC test harness bridging browser mic/audio through the same `langstream.Session` orchestrator, using G.711/PCMA to avoid an Opus/cgo dependency -- see that package's doc comment.
 
 ## SRE — Infra / Observability
 **Owns:** `Dockerfile`, `docker-compose.yml`, `Makefile`,

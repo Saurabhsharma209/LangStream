@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LangStream WebRTC live translation test</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; }
+  label { display: block; margin-top: 12px; font-size: 0.9rem; color: #444; }
+  input, select { font-size: 1rem; padding: 6px 8px; width: 100%; box-sizing: border-box; margin-top: 4px; }
+  button { font-size: 1rem; padding: 10px 18px; margin-top: 16px; margin-right: 8px; cursor: pointer; }
+  #status { margin-top: 20px; padding: 12px; border-radius: 6px; background: #f4f4f4; font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; min-height: 3em; }
+  .ok { color: #0a7a0a; }
+  .err { color: #b00; }
+  #localLevel, #remoteLevel { height: 8px; background: #eee; border-radius: 4px; overflow: hidden; margin-top: 4px; }
+  #localLevel div, #remoteLevel div { height: 100%; width: 0%; background: #3a8; transition: width 0.1s; }
+</style>
+</head>
+<body>
+<h1>LangStream &mdash; live WebRTC translation test</h1>
+<p>Two people join the same room, one as "caller", one as "agent", each speaking their own language. Each hears the other translated, live.</p>
+
+<label>Room ID <input id="room" value="test-room"></label>
+<label>Your role
+  <select id="role">
+    <option value="caller">Caller (speaks Hindi, hears English)</option>
+    <option value="agent">Agent (speaks English, hears Hindi)</option>
+  </select>
+</label>
+
+<button id="joinBtn">Join call</button>
+<button id="leaveBtn" disabled>Leave</button>
+
+<p>Your mic level <div id="localLevel"><div></div></div></p>
+<p>Translated audio you're hearing <div id="remoteLevel"><div></div></div></p>
+
+<div id="status">Not connected.</div>
+<audio id="remoteAudio" autoplay></audio>
+
+<script>
+const statusEl = document.getElementById('status');
+const joinBtn = document.getElementById('joinBtn');
+const leaveBtn = document.getElementById('leaveBtn');
+const remoteAudio = document.getElementById('remoteAudio');
+
+function log(msg, cls) {
+  const line = document.createElement('div');
+  line.textContent = msg;
+  if (cls) line.className = cls;
+  statusEl.appendChild(line);
+  statusEl.scrollTop = statusEl.scrollHeight;
+}
+
+let pc, ws, localStream, audioCtx;
+
+function meter(stream, elId) {
+  const el = document.querySelector('#' + elId + ' div');
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;
+  src.connect(analyser);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  function tick() {
+    analyser.getByteFrequencyData(data);
+    const avg = data.reduce((a, b) => a + b, 0) / data.length;
+    el.style.width = Math.min(100, avg * 2) + '%';
+    requestAnimationFrame(tick);
+  }
+  tick();
+  return ctx;
+}
+
+async function join() {
+  const room = document.getElementById('room').value.trim();
+  const role = document.getElementById('role').value;
+  if (!room) { log('Room ID is required.', 'err'); return; }
+
+  joinBtn.disabled = true;
+  statusEl.innerHTML = '';
+  log('Requesting microphone access...');
+
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    log('Microphone access denied or unavailable: ' + e.message, 'err');
+    joinBtn.disabled = false;
+    return;
+  }
+  meter(localStream, 'localLevel');
+  log('Microphone ready.', 'ok');
+
+  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+  pc.ontrack = (ev) => {
+    log('Receiving translated audio from the gateway.', 'ok');
+    remoteAudio.srcObject = ev.streams[0];
+    meter(ev.streams[0], 'remoteLevel');
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    log('ICE connection state: ' + pc.iceConnectionState);
+  };
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws');
+
+  ws.onopen = async () => {
+    ws.send(JSON.stringify({ type: 'join', room, role }));
+
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate) {
+        ws.send(JSON.stringify({ type: 'candidate', candidate: ev.candidate.toJSON() }));
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
+    log('Offer sent, waiting for the gateway to answer...');
+  };
+
+  ws.onmessage = async (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'answer') {
+      await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      log('Connected as ' + role + ' in room "' + room + '".', 'ok');
+      leaveBtn.disabled = false;
+    } else if (msg.type === 'candidate' && msg.candidate) {
+      try { await pc.addIceCandidate(msg.candidate); } catch (e) { /* ignore late candidates */ }
+    } else if (msg.type === 'error') {
+      log('Server error: ' + msg.message, 'err');
+      leave();
+    }
+  };
+
+  ws.onclose = () => log('Signaling connection closed.');
+  ws.onerror = () => log('Signaling connection error.', 'err');
+}
+
+function leave() {
+  if (ws) { ws.close(); ws = null; }
+  if (pc) { pc.close(); pc = null; }
+  if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+  joinBtn.disabled = false;
+  leaveBtn.disabled = true;
+  log('Left the call.');
+}
+
+joinBtn.onclick = join;
+leaveBtn.onclick = leave;
+</script>
+</body>
+</html>
