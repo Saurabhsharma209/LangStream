@@ -921,3 +921,62 @@ the same thing and wants the faster workaround.
 3. Continue strengthening the WER corpus and jitter stress tests
    opportunistically if no higher-priority item exists — still cheap,
    high-value, and don't block on anything.
+
+## 2026-07-14 (interactive session, Saurabh) — Sarvam wire-format bug: live-verified and fixed
+
+Saurabh asked to test locally with real OpenAI + Sarvam keys, then to fix
+whatever the testing found. `api.openai.com` is blocked from this sandbox
+at the network level (Cisco Secure Access gateway — confirmed via a direct
+`curl`, not something to route around), so GPT-4o/MT stayed untested here.
+Sarvam is reachable, and testing it live surfaced a real bug.
+
+**Bug (confirmed live, not simulated):** `pkg/asr/sarvam.go`'s "assumption
+(1)" — that the per-message `encoding` field should be `"pcm_s16le"` to
+match the connection-level `input_audio_codec` param, with headerless raw
+PCM as `data` — is wrong. A raw WebSocket session against the real
+`wss://api.sarvam.ai/speech-to-text/ws` endpoint with a real key returned:
+`{"type":"error","data":{"message":"...audio.encoding\n  Input should be
+'audio/wav' [type=enum, input_value='pcm_s16le', ...]"}}`. The real
+contract: `encoding` must always be `"audio/wav"`, and `data` must be a
+real, self-contained WAV file (RIFF/WAVE header + PCM), not headerless
+PCM. Verified two ways: (1) one message containing a whole ~5.6s Hindi
+utterance as a single WAV, and (2) the real streaming shape — many small
+(~400ms) WAV-wrapped chunks sent in sequence, matching how `PushAudio` is
+actually called in production. Both correctly transcribed real Hindi
+speech (synthesized via Google TTS as a stand-in, since OpenAI TTS was
+also blocked): `"मुझे कल शाम को अपना ऑर्डर वापस चाहिए, कृपया जल्दी मदद
+करें"` → `"मुझे कल शाम को अपना order वापस चाहिए कृपया जल्दी मदद करें"`
+(correct, natural code-switch handling on "order").
+
+**Fix:** `pkg/asr/sarvam.go` — new `pcm16MonoToWAV(pcm []byte, sampleRate
+int) []byte` helper wraps each frame in a minimal 44-byte WAV header
+before base64-encoding; `PushAudio` now sets `Encoding: "audio/wav"` and
+sends the wrapped bytes instead of raw PCM. Doc comment's assumption (1)
+rewritten to state the verified (not guessed) contract. Re-verified after
+the code fix by running the real `SarvamRecognizer` client (not just the
+raw protocol probe) against the live endpoint with the same Hindi audio —
+transcript matched exactly.
+
+**Tests:** `pkg/asr/sarvam_test.go`'s existing
+`TestSarvamRecognizer_SendsAudioAndParsesTranscript` updated to assert the
+fake server receives `Encoding == "audio/wav"` and a real WAV-wrapped
+payload (decoded and compared against `pcm16MonoToWAV`'s own output, not
+just magic bytes). Two new tests added: `TestPCM16MonoToWAV` (header
+field-by-field correctness) and `TestPCM16MonoToWAV_EmptyPCM` (zero-length
+frame doesn't panic or produce a malformed header).
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l .` clean;
+`go test ./pkg/asr/... -race -count=3` clean, all tests pass twice over.
+
+**Not touched:** GPT-4o/OpenAI path — untestable from this sandbox
+(network block), no code changes made there. Saurabh is continuing
+locally where OpenAI is reachable.
+
+**Next (Saurabh's ask, in progress separately):** a local WebRTC test
+harness — browser mic in, live ASR→MT→TTS, browser audio out — for both a
+single-user-talks-to-bot mode and a real two-browser two-user duplex
+relay. Scoping questions asked before starting (mode, TTS backend since no
+Cartesia/ElevenLabs key is wired into LangStream yet, and whether this
+becomes a committed repo feature or a local-only script) — see the
+conversation, not yet in this DEVLOG since scope wasn't settled as of this
+entry.

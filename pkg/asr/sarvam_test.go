@@ -141,6 +141,9 @@ func TestSarvamRecognizer_SendsAudioAndParsesTranscript(t *testing.T) {
 			t.Errorf("fake server: could not parse audio message: %v", err)
 			return
 		}
+		if msg.Audio.Encoding != "audio/wav" {
+			t.Errorf("server received Audio.Encoding %q, want \"audio/wav\" (see assumption (1) in sarvam.go)", msg.Audio.Encoding)
+		}
 		receivedAudioB64 <- msg.Audio.Data
 
 		result := `{
@@ -181,9 +184,18 @@ func TestSarvamRecognizer_SendsAudioAndParsesTranscript(t *testing.T) {
 
 	select {
 	case gotB64 := <-receivedAudioB64:
-		want := base64.StdEncoding.EncodeToString(pcm)
-		if gotB64 != want {
-			t.Errorf("server received base64 audio %q, want %q", gotB64, want)
+		// 2026-07-14: the real Sarvam endpoint requires "data" to be a
+		// self-contained WAV file (see assumption (1) in sarvam.go), not
+		// headerless PCM -- so the fake server (and this assertion) checks
+		// for a real WAV wrapper around the original PCM, not the raw
+		// bytes directly.
+		gotWAV, err := base64.StdEncoding.DecodeString(gotB64)
+		if err != nil {
+			t.Fatalf("server received undecodable base64 audio: %v", err)
+		}
+		wantWAV := pcm16MonoToWAV(pcm, frame.SampleRate)
+		if string(gotWAV) != string(wantWAV) {
+			t.Errorf("server received WAV bytes %q, want %q", gotWAV, wantWAV)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for fake server to receive audio")
@@ -293,5 +305,77 @@ func TestSarvamRecognizer_ConnectFailureSurfacesError(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("PushAudio hung instead of returning a connect error")
+	}
+}
+
+// TestPCM16MonoToWAV verifies pcm16MonoToWAV produces a real, standard,
+// parseable WAV file (RIFF/WAVE, PCM format tag 1, mono, 16-bit) around
+// the given PCM samples -- exercised by round-tripping it through Go's
+// standard library-adjacent decode logic (manual header parsing, since
+// the stdlib has no WAV decoder) rather than just checking magic bytes.
+// This is the fix for the real bug found 2026-07-14 testing against a
+// live Sarvam endpoint: the server rejects "encoding":"pcm_s16le" with
+// headerless PCM and requires a real WAV file under "encoding":"audio/wav"
+// (see assumption (1) in sarvam.go).
+func TestPCM16MonoToWAV(t *testing.T) {
+	sampleRate := 16000
+	pcm := make([]byte, 640) // 20ms @ 16kHz, 16-bit mono
+	for i := range pcm {
+		pcm[i] = byte(i)
+	}
+
+	wav := pcm16MonoToWAV(pcm, sampleRate)
+
+	if len(wav) != 44+len(pcm) {
+		t.Fatalf("len(wav) = %d, want %d (44-byte header + %d bytes PCM)", len(wav), 44+len(pcm), len(pcm))
+	}
+	if string(wav[0:4]) != "RIFF" {
+		t.Errorf("bytes[0:4] = %q, want \"RIFF\"", wav[0:4])
+	}
+	if string(wav[8:12]) != "WAVE" {
+		t.Errorf("bytes[8:12] = %q, want \"WAVE\"", wav[8:12])
+	}
+	if string(wav[12:16]) != "fmt " {
+		t.Errorf("bytes[12:16] = %q, want \"fmt \"", wav[12:16])
+	}
+	audioFormat := uint16(wav[20]) | uint16(wav[21])<<8
+	if audioFormat != 1 {
+		t.Errorf("audio format = %d, want 1 (PCM)", audioFormat)
+	}
+	numChannels := uint16(wav[22]) | uint16(wav[23])<<8
+	if numChannels != 1 {
+		t.Errorf("numChannels = %d, want 1 (mono)", numChannels)
+	}
+	gotSampleRate := uint32(wav[24]) | uint32(wav[25])<<8 | uint32(wav[26])<<16 | uint32(wav[27])<<24
+	if int(gotSampleRate) != sampleRate {
+		t.Errorf("sampleRate = %d, want %d", gotSampleRate, sampleRate)
+	}
+	bitsPerSample := uint16(wav[34]) | uint16(wav[35])<<8
+	if bitsPerSample != 16 {
+		t.Errorf("bitsPerSample = %d, want 16", bitsPerSample)
+	}
+	if string(wav[36:40]) != "data" {
+		t.Errorf("bytes[36:40] = %q, want \"data\"", wav[36:40])
+	}
+	dataLen := uint32(wav[40]) | uint32(wav[41])<<8 | uint32(wav[42])<<16 | uint32(wav[43])<<24
+	if int(dataLen) != len(pcm) {
+		t.Errorf("data chunk size = %d, want %d", dataLen, len(pcm))
+	}
+	if string(wav[44:]) != string(pcm) {
+		t.Error("PCM payload after the header does not match the input PCM exactly")
+	}
+}
+
+// TestPCM16MonoToWAV_EmptyPCM verifies the helper doesn't panic or produce
+// a malformed header for a zero-length frame (a real, if rare, input --
+// e.g. a PushAudio call with an empty buffer).
+func TestPCM16MonoToWAV_EmptyPCM(t *testing.T) {
+	wav := pcm16MonoToWAV(nil, 16000)
+	if len(wav) != 44 {
+		t.Fatalf("len(wav) = %d, want 44 (header only, no data)", len(wav))
+	}
+	dataLen := uint32(wav[40]) | uint32(wav[41])<<8 | uint32(wav[42])<<16 | uint32(wav[43])<<24
+	if dataLen != 0 {
+		t.Errorf("data chunk size = %d, want 0", dataLen)
 	}
 }

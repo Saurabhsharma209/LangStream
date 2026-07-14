@@ -23,14 +23,25 @@
 // are explicitly called out per the pilot's instructions rather than
 // silently invented):
 //
-//  1. Per-message "encoding" field for the Audio Transcription Message: the
-//     reference page's only example shows "audio/wav", but our audio is raw
-//     16-bit LE PCM (per pkg/asr/interface.go's AudioFrame contract), and the
-//     connection-level "input_audio_codec" parameter accepts "pcm_s16le" for
-//     exactly this case. We mirror that same string ("pcm_s16le") in the
-//     per-message "encoding" field on the theory that it should match the
-//     negotiated codec, but this exact combination has not been verified
-//     against a live Sarvam endpoint (no API key exists yet for this pilot).
+//  1. Per-message "encoding" field for the Audio Transcription Message:
+//     RESOLVED 2026-07-14 against a live Sarvam endpoint (real API key,
+//     real WebSocket traffic -- see DEVLOG.md's 2026-07-14 entry). The
+//     original guess in this comment (encoding "pcm_s16le" to match the
+//     connection-level input_audio_codec param, with raw headerless PCM as
+//     the "data" payload) is WRONG: Sarvam's server rejects it outright
+//     with a Pydantic validation error ("Input should be 'audio/wav'").
+//     The real, verified contract is: "encoding" must always be the literal
+//     string "audio/wav", and "data" must be a base64-encoded, *self-
+//     contained WAV file* (RIFF/WAVE header + PCM data), not headerless
+//     PCM -- confirmed both for a single-shot whole-utterance send and for
+//     a real streaming session that sends many small (~400ms) WAV-wrapped
+//     chunks in sequence (Sarvam correctly buffers across messages and
+//     still returns one coherent final transcript for the whole
+//     utterance, VAD start/end events included). This is what
+//     pcm16MonoToWAV + PushAudio's msg.Audio.Encoding now implement. The
+//     connection-level "input_audio_codec" query parameter is left as
+//     "pcm_s16le" unchanged -- that one was never rejected, and Sarvam's
+//     error was specific to the per-message field.
 //  2. Flush signal shape: the reference page lists a second Send message
 //     type, "Speech Flush Signal object", gated by the documented
 //     flush_signal=true connection parameter, but its JSON field name is
@@ -250,12 +261,13 @@ func (s *sarvamSession) PushAudio(ctx context.Context, frame AudioFrame) error {
 	}
 
 	msg := sarvamAudioMessage{}
-	msg.Audio.Data = base64.StdEncoding.EncodeToString(frame.PCM)
+	// See assumption (1) in the package doc comment: the real Sarvam
+	// endpoint requires "audio/wav" here, with "data" itself being a
+	// self-contained WAV file, not headerless PCM -- verified live
+	// 2026-07-14.
+	msg.Audio.Data = base64.StdEncoding.EncodeToString(pcm16MonoToWAV(frame.PCM, frame.SampleRate))
 	msg.Audio.SampleRate = strconv.Itoa(frame.SampleRate)
-	// See assumption (1) in the package doc comment: mirroring the
-	// connection-level codec here since Sarvam's own example only covers
-	// the WAV case.
-	msg.Audio.Encoding = "pcm_s16le"
+	msg.Audio.Encoding = "audio/wav"
 
 	if err := s.writeJSON(msg); err != nil {
 		if connErr := s.ensureConnected(frame.SampleRate); connErr != nil {
@@ -357,6 +369,52 @@ func (s *sarvamSession) writeJSON(v interface{}) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return conn.WriteJSON(v)
+}
+
+// pcm16MonoToWAV wraps raw 16-bit-LE mono PCM samples (the format
+// pkg/asr/interface.go's AudioFrame carries) in a minimal, self-contained
+// WAV (RIFF/WAVE, PCM format tag 1) container: a 44-byte header followed
+// by the PCM data unchanged. Sarvam's live streaming endpoint requires
+// each Audio Transcription Message's "data" field to be a real WAV file
+// when "encoding" is "audio/wav" (see assumption (1) above) -- confirmed
+// against a live Sarvam session both for a single whole-utterance message
+// and for a sequence of many small per-chunk WAV messages in a real
+// streaming PushAudio loop, so wrapping every frame this way (rather than
+// only once per utterance) is the correct, verified behavior, not an
+// approximation.
+func pcm16MonoToWAV(pcm []byte, sampleRate int) []byte {
+	const (
+		numChannels   = 1
+		bitsPerSample = 16
+	)
+	byteRate := sampleRate * numChannels * bitsPerSample / 8
+	blockAlign := numChannels * bitsPerSample / 8
+	dataLen := len(pcm)
+
+	buf := make([]byte, 0, 44+dataLen)
+	buf = append(buf, "RIFF"...)
+	buf = append(buf, le32(uint32(36+dataLen))...)
+	buf = append(buf, "WAVE"...)
+	buf = append(buf, "fmt "...)
+	buf = append(buf, le32(16)...) // fmt chunk size
+	buf = append(buf, le16(1)...)  // audio format: 1 = PCM
+	buf = append(buf, le16(numChannels)...)
+	buf = append(buf, le32(uint32(sampleRate))...)
+	buf = append(buf, le32(uint32(byteRate))...)
+	buf = append(buf, le16(blockAlign)...)
+	buf = append(buf, le16(bitsPerSample)...)
+	buf = append(buf, "data"...)
+	buf = append(buf, le32(uint32(dataLen))...)
+	buf = append(buf, pcm...)
+	return buf
+}
+
+func le16(v int) []byte {
+	return []byte{byte(v), byte(v >> 8)}
+}
+
+func le32(v uint32) []byte {
+	return []byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)}
 }
 
 // sarvamAudioMessage is the "Audio Transcription Message" sent to Sarvam,
