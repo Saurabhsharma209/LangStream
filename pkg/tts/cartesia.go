@@ -24,12 +24,15 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/exotel/langstream/pkg/observability"
 )
 
 // cartesiaDefaultBaseURL is Cartesia's production WebSocket endpoint host.
@@ -54,6 +57,31 @@ const cartesiaDefaultSampleRate = 8000
 // independent of any deadline already on the caller's ctx.
 const cartesiaDefaultDialTimeout = 10 * time.Second
 
+// cartesiaMaxAttempts caps how many times SynthesizeStream's connect+send
+// phase will retry a transient failure (429/5xx handshake rejection, or a
+// generic dial/TLS/write error): one initial try plus up to two retries.
+// Kept small since TTS sits on the live-call critical path and a tight
+// latency budget matters more than squeezing out one more retry.
+const cartesiaMaxAttempts = 3
+
+// cartesiaRetryBaseDelay / cartesiaRetryMaxDelay bound the capped-
+// exponential backoff (see retryBackoff) applied between retry attempts.
+const (
+	cartesiaRetryBaseDelay = 150 * time.Millisecond
+	cartesiaRetryMaxDelay  = 1200 * time.Millisecond
+)
+
+// cartesiaCostPerCharUSD approximates Cartesia's published Sonic TTS
+// pay-as-you-go pricing (~$0.00004/character, i.e. roughly $40 per 1M
+// characters, per cartesia.ai/pricing as reviewed while writing this).
+// Cartesia bills per character of input text, not per second of audio
+// produced, so this is charged against len(text) once Cartesia has
+// accepted the generation request (see SynthesizeStream). This is for
+// pilot cost-visibility only, not billing-grade accuracy -- Cartesia's
+// actual rates vary by plan/commitment and change over time, and this
+// value is not read live from any API.
+const cartesiaCostPerCharUSD = 0.00004
+
 // CartesiaSynthesizer implements Synthesizer against Cartesia's streaming
 // TTS WebSocket API. Each call to SynthesizeStream opens its own
 // short-lived WebSocket connection and context (Cartesia's term for one
@@ -68,6 +96,7 @@ type CartesiaSynthesizer struct {
 	modelID     string
 	sampleRate  int
 	dialTimeout time.Duration
+	metrics     *observability.LatencyRecorder
 }
 
 // Option configures a CartesiaSynthesizer at construction time.
@@ -105,6 +134,16 @@ func WithSampleRate(hz int) Option {
 // (the call still respects ctx's own deadline/cancellation).
 func WithDialTimeout(d time.Duration) Option {
 	return func(c *CartesiaSynthesizer) { c.dialTimeout = d }
+}
+
+// WithMetrics wires a shared *observability.LatencyRecorder into this
+// synthesizer so every successfully-submitted SynthesizeStream call
+// attributes its cost (see RecordCost) to the "cartesia" vendor, per
+// cartesiaCostPerCharUSD. Optional -- a nil/unset recorder (the default)
+// makes cost recording a no-op, matching this package's existing
+// functional-options convention (WithBaseURL, WithModel, ...).
+func WithMetrics(m *observability.LatencyRecorder) Option {
+	return func(c *CartesiaSynthesizer) { c.metrics = m }
 }
 
 // NewCartesiaSynthesizer constructs a CartesiaSynthesizer, reading the API
@@ -190,6 +229,48 @@ type cartesiaMessage struct {
 	ErrorCode  string `json:"error_code"`
 }
 
+// isRetryableDialErr classifies an error from connectAndSend: a
+// handshake explicitly rejected with a status code is retryable only for
+// 429/5xx (see isRetryableStatusCode); anything else (a generic dial/TLS/
+// write failure with no status code at all) is treated as a transient
+// connection-level problem (see isRetryableConnErr).
+func isRetryableDialErr(err error) bool {
+	var statusErr *wsHandshakeStatusError
+	if errors.As(err, &statusErr) {
+		return isRetryableStatusCode(statusErr.StatusCode)
+	}
+	return isRetryableConnErr(err)
+}
+
+// connectAndSend performs one attempt of SynthesizeStream's connect
+// phase: dial Cartesia's WebSocket endpoint and send one generation
+// request. On success it returns the live connection/reader; on failure
+// it always closes any connection it opened before returning.
+func (c *CartesiaSynthesizer) connectAndSend(ctx context.Context, wsURL string, header http.Header, req cartesiaGenerationRequest) (net.Conn, *bufio.Reader, error) {
+	dialCtx := ctx
+	if c.dialTimeout > 0 {
+		var cancel context.CancelFunc
+		dialCtx, cancel = context.WithTimeout(ctx, c.dialTimeout)
+		defer cancel()
+	}
+
+	conn, br, err := dialWS(dialCtx, wsURL, header)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tts/cartesia: connecting: %w", err)
+	}
+
+	payload, err := json.Marshal(req)
+	if err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("tts/cartesia: encoding generation request: %w", err)
+	}
+	if err := writeWSFrame(conn, wsOpText, payload); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("tts/cartesia: sending generation request: %w", err)
+	}
+	return conn, br, nil
+}
+
 // SynthesizeStream implements Synthesizer. It opens a fresh WebSocket
 // connection to Cartesia, sends one generation request for the full text
 // (Continue: false, since callers of this interface pass complete
@@ -198,6 +279,17 @@ type cartesiaMessage struct {
 // channel is closed once Cartesia reports the context done, on any
 // connection/protocol error, or when ctx is cancelled -- whichever comes
 // first.
+//
+// The connect+send phase (not the subsequent audio stream) is retried up
+// to cartesiaMaxAttempts times with capped exponential backoff (see
+// retryBackoff) on transient failures -- HTTP 429/5xx handshake
+// rejections, or a generic dial/TLS/write error indistinguishable from a
+// network blip at this layer -- since Cartesia has no concept of
+// resuming a generation that never got an ack; a retry is simply "do the
+// whole handshake again" with a fresh context_id, the same shape as
+// asr's Deepgram/Sarvam reconnect policy (see pkg/asr/backoff.go) but
+// scoped to one SynthesizeStream call. Any other handshake rejection
+// (bad auth, bad request, ...) fails fast on the first attempt.
 func (c *CartesiaSynthesizer) SynthesizeStream(ctx context.Context, text string, persona Persona) (<-chan AudioChunk, error) {
 	if text == "" {
 		return nil, fmt.Errorf("tts/cartesia: empty text")
@@ -211,50 +303,69 @@ func (c *CartesiaSynthesizer) SynthesizeStream(ctx context.Context, text string,
 		return nil, fmt.Errorf("tts/cartesia: unsupported language %q", lang)
 	}
 
-	dialCtx := ctx
-	var cancel context.CancelFunc
-	if c.dialTimeout > 0 {
-		dialCtx, cancel = context.WithTimeout(ctx, c.dialTimeout)
-		defer cancel()
-	}
-
 	header := http.Header{}
 	header.Set("X-API-Key", c.apiKey)
 	header.Set("Cartesia-Version", c.apiVersion)
 
 	wsURL := fmt.Sprintf("%s/tts/websocket?cartesia_version=%s", strings.TrimRight(c.baseURL, "/"), c.apiVersion)
-	conn, br, err := dialWS(dialCtx, wsURL, header)
-	if err != nil {
-		return nil, fmt.Errorf("tts/cartesia: connecting: %w", err)
+
+	var (
+		conn      net.Conn
+		br        *bufio.Reader
+		contextID string
+		lastErr   error
+	)
+
+	for attempt := 0; attempt < cartesiaMaxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := retryBackoff(attempt-1, cartesiaRetryBaseDelay, cartesiaRetryMaxDelay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			}
+		}
+
+		cid, err := newCartesiaContextID()
+		if err != nil {
+			return nil, fmt.Errorf("tts/cartesia: generating context id: %w", err)
+		}
+
+		req := cartesiaGenerationRequest{
+			ModelID:    c.modelID,
+			Transcript: text,
+			Voice:      cartesiaVoiceRef{Mode: "id", ID: c.voiceFor(persona)},
+			Language:   string(lang),
+			ContextID:  cid,
+			OutputFormat: cartesiaOutputFormat{
+				Container:  "raw",
+				Encoding:   "pcm_s16le",
+				SampleRate: c.sampleRate,
+			},
+			Continue: false,
+		}
+
+		conn, br, lastErr = c.connectAndSend(ctx, wsURL, header, req)
+		if lastErr == nil {
+			contextID = cid
+			break
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !isRetryableDialErr(lastErr) || attempt == cartesiaMaxAttempts-1 {
+			return nil, lastErr
+		}
 	}
 
-	contextID, err := newCartesiaContextID()
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("tts/cartesia: generating context id: %w", err)
-	}
-
-	req := cartesiaGenerationRequest{
-		ModelID:    c.modelID,
-		Transcript: text,
-		Voice:      cartesiaVoiceRef{Mode: "id", ID: c.voiceFor(persona)},
-		Language:   string(lang),
-		ContextID:  contextID,
-		OutputFormat: cartesiaOutputFormat{
-			Container:  "raw",
-			Encoding:   "pcm_s16le",
-			SampleRate: c.sampleRate,
-		},
-		Continue: false,
-	}
-	payload, err := json.Marshal(req)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("tts/cartesia: encoding generation request: %w", err)
-	}
-	if err := writeWSFrame(conn, wsOpText, payload); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("tts/cartesia: sending generation request: %w", err)
+	// Cartesia bills per character of input text once it has accepted
+	// the generation request, regardless of whether the subsequent audio
+	// stream later fails mid-way -- see cartesiaCostPerCharUSD's doc
+	// comment.
+	if c.metrics != nil {
+		c.metrics.RecordCost("cartesia", float64(len(text))*cartesiaCostPerCharUSD)
 	}
 
 	out := make(chan AudioChunk, 4)

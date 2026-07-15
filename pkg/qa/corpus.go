@@ -125,6 +125,30 @@ func placeholderPCM() []byte {
 //   - english_dominant_embedded_hindi_courtesy_agent_transfer: WER 1/12  (1 deletion / 12 words)
 //   - hinglish_digit_sequence_deletion_account_number:         WER 1/10  (1 deletion / 10 words)
 //   - hinglish_long_utterance_two_substitutions_refund_status: WER 2/18  (2 substitutions / 18 words)
+//
+// Sprint 2026-07-15 (QA) adds five further entries covering categories the
+// corpus still didn't exercise: a negation-word deletion (dropping "nahi"
+// flips the entire sentence's meaning -- a small edit distance but a
+// disproportionately high-impact error class not yet represented, since
+// every prior deletion drops a content or filler word rather than a
+// negation), two acronym/homophone substitutions ("KYC" misheard as the
+// phonetically similar "casey", and "IVR" misheard as "aivar" -- acronyms
+// are routine in Indian contact-center speech and are exactly the kind of
+// short, low-context token an ASR model is prone to mishear as a normal
+// word), a two-insertion case (this corpus's existing insertion entries
+// each add exactly one spurious word; this one has two independent
+// duplicated-word insertions in the same short sentence, checking WER
+// alignment doesn't miscount when insertions occur at multiple points),
+// and a second long-utterance entry exercising a multi-word *deletion*
+// specifically at long-utterance length (the corpus's other 18-25 word
+// entries only exercise substitutions or a single-word deletion, not a
+// multi-word deletion at that length):
+//
+//   - hinglish_negation_deletion_service_unavailable:                WER 1/7   (1 deletion / 7 words)
+//   - hinglish_acronym_kyc_homophone_substitution:                   WER 1/7   (1 substitution / 7 words)
+//   - hinglish_two_insertions_confirmation_repeat:                   WER 2/5   (2 insertions / 5 words)
+//   - hinglish_acronym_ivr_homophone_substitution:                   WER 1/7   (1 substitution / 7 words)
+//   - hinglish_long_utterance_two_deletions_kyc_document_submission: WER 2/20  (2 deletions / 20 words)
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -482,6 +506,92 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir aapka refund process ho chuka hai lekin bank ki taraf se paise abhi tak transfer nahi hue",
 			Hypothesis: "sir aapka refund complete ho chuka hai lekin bank ki taraf se paise abhi tak credit nahi hue",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-07-15 (QA) additions below: five more entries
+		// per the doc comment above (a negation deletion, two acronym/
+		// homophone substitutions, a two-insertion case, and a second
+		// long-utterance entry with a multi-word deletion).
+
+		{
+			// Dropping the negation word "nahi" ("not") flips this
+			// sentence's meaning entirely (from "this service is not
+			// available" to "this service is available") even though
+			// it's a single-word deletion like several other entries --
+			// included specifically because negation words are a
+			// disproportionately high-impact ASR failure mode that this
+			// corpus otherwise never isolates on its own.
+			Name:       "hinglish_negation_deletion_service_unavailable",
+			Language:   "hi",
+			Reference:  "sir yeh service abhi available nahi hai",
+			Hypothesis: "sir yeh service abhi available hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// "KYC" (Know Your Customer, ubiquitous in Indian
+			// banking/telecom support calls) misheard as the
+			// phonetically similar "casey" -- an acronym/homophone
+			// substitution, a realistic ASR confusion category this
+			// corpus hadn't covered (prior substitutions mishear common
+			// nouns/verbs, proper nouns, or number words, not
+			// acronyms).
+			Name:       "hinglish_acronym_kyc_homophone_substitution",
+			Language:   "hi",
+			Reference:  "sir aapka KYC update ho gaya hai",
+			Hypothesis: "sir aapka casey update ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// Every existing insertion entry in this corpus
+			// (hinglish_otp_request_insertion,
+			// hinglish_insertion_hallucinated_filler_word) adds exactly
+			// one spurious word. This entry has two independent
+			// duplicated-word insertions in the same short sentence
+			// ("sir" repeated at the start, "ho" repeated mid-sentence)
+			// -- checking WER alignment correctly isolates two separate
+			// insertion points rather than miscounting when errors
+			// aren't adjacent to each other.
+			Name:       "hinglish_two_insertions_confirmation_repeat",
+			Language:   "hi",
+			Reference:  "sir aapka refund ho jayega",
+			Hypothesis: "sir sir aapka refund ho ho jayega",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// "IVR" (Interactive Voice Response, another acronym
+			// routine in Indian telecom/contact-center speech)
+			// misheard as "aivar" -- a second acronym/homophone
+			// substitution alongside
+			// hinglish_acronym_kyc_homophone_substitution, the same way
+			// this corpus already carries two two-substitution entries
+			// at different lengths (hinglish_account_block_query_two_substitutions,
+			// hinglish_long_utterance_two_substitutions_refund_status)
+			// for the same error shape.
+			Name:       "hinglish_acronym_ivr_homophone_substitution",
+			Language:   "hi",
+			Reference:  "call IVR ke through connect hua tha",
+			Hypothesis: "call aivar ke through connect hua tha",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A long (20-word) KYC-document sentence where the fake ASR
+			// drops the contiguous two-word phrase "ja kar" ("by
+			// going") entirely -- this corpus's other long (18-25 word)
+			// entries (hinglish_long_utterance_single_deletion_callback,
+			// hinglish_long_utterance_two_substitutions_refund_status)
+			// exercise a single-word deletion or two substitutions at
+			// that length, but not a multi-word deletion at long-
+			// utterance length specifically, which this entry fills in.
+			Name:       "hinglish_long_utterance_two_deletions_kyc_document_submission",
+			Language:   "hi",
+			Reference:  "sir aapko apna KYC document branch mein ja kar submit karna hoga varna aapka account temporarily block ho sakta hai",
+			Hypothesis: "sir aapko apna KYC document branch mein submit karna hoga varna aapka account temporarily block ho sakta hai",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

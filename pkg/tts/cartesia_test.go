@@ -11,8 +11,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/exotel/langstream/pkg/observability"
 )
 
 // --- fake Cartesia WebSocket server -----------------------------------
@@ -551,3 +554,181 @@ func TestCartesiaSynthesizer_SendsAuthHeaders(t *testing.T) {
 // code and takes exactly that type.
 var _ = bufio.NewReader
 var _ = fmt.Sprintf
+
+// --- retry-with-backoff and cost-recording tests ------------------------
+
+// newCountingCartesiaServer starts a server whose /tts/websocket handler
+// is invoked via respond(attempt, w, r) for every request (1-indexed), so
+// tests can script "reject the handshake N times, then succeed" sequences
+// to exercise SynthesizeStream's retry loop deterministically.
+func newCountingCartesiaServer(t *testing.T, respond func(attempt int, w http.ResponseWriter, r *http.Request)) (*httptest.Server, *int32) {
+	t.Helper()
+	var attempts int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tts/websocket", func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&attempts, 1)
+		respond(int(n), w, r)
+	})
+	srv := httptest.NewServer(mux)
+	return srv, &attempts
+}
+
+// acceptCartesiaHandshakeAndFinish hijacks the connection, completes the
+// WebSocket handshake, drains the client's one generation request frame,
+// and immediately sends a {"type":"done"} message so the caller's
+// readLoop finishes right away.
+func acceptCartesiaHandshakeAndFinish(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "hijacking unsupported", http.StatusInternalServerError)
+		return
+	}
+	conn, rw, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	accept := computeAcceptKey(r.Header.Get("Sec-WebSocket-Key"))
+	resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: " + accept + "\r\n\r\n"
+	if _, err := rw.Writer.WriteString(resp); err != nil {
+		return
+	}
+	if err := rw.Writer.Flush(); err != nil {
+		return
+	}
+
+	if _, _, _, err := readWSFrame(rw.Reader); err != nil {
+		return
+	}
+	doneMsg, _ := json.Marshal(cartesiaMessage{Type: "done"})
+	_ = writeServerFrame(rw.Writer, wsOpText, doneMsg)
+	_ = rw.Writer.Flush()
+}
+
+func TestCartesiaSynthesizer_RetriesOn429ThenSucceeds(t *testing.T) {
+	srv, attempts := newCountingCartesiaServer(t, func(attempt int, w http.ResponseWriter, r *http.Request) {
+		if attempt < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("rate limited"))
+			return
+		}
+		acceptCartesiaHandshakeAndFinish(t, w, r)
+	})
+	defer srv.Close()
+
+	t.Setenv("CARTESIA_API_KEY", "test-key")
+	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
+	c, err := NewCartesiaSynthesizer(WithBaseURL(wsURL), WithDialTimeout(2*time.Second))
+	if err != nil {
+		t.Fatalf("NewCartesiaSynthesizer: %v", err)
+	}
+
+	ch, err := c.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainChunks(t, ch, 5*time.Second)
+
+	if got := atomic.LoadInt32(attempts); got != 2 {
+		t.Errorf("attempts = %d, want 2 (1 failure + 1 success)", got)
+	}
+}
+
+func TestCartesiaSynthesizer_RetriesOn5xxThenSucceeds(t *testing.T) {
+	srv, attempts := newCountingCartesiaServer(t, func(attempt int, w http.ResponseWriter, r *http.Request) {
+		if attempt < 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("bad gateway"))
+			return
+		}
+		acceptCartesiaHandshakeAndFinish(t, w, r)
+	})
+	defer srv.Close()
+
+	t.Setenv("CARTESIA_API_KEY", "test-key")
+	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
+	c, err := NewCartesiaSynthesizer(WithBaseURL(wsURL), WithDialTimeout(2*time.Second))
+	if err != nil {
+		t.Fatalf("NewCartesiaSynthesizer: %v", err)
+	}
+
+	ch, err := c.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainChunks(t, ch, 5*time.Second)
+
+	if got := atomic.LoadInt32(attempts); int(got) != cartesiaMaxAttempts {
+		t.Errorf("attempts = %d, want cartesiaMaxAttempts = %d", got, cartesiaMaxAttempts)
+	}
+}
+
+func TestCartesiaSynthesizer_DoesNotRetryOn400(t *testing.T) {
+	srv, attempts := newCountingCartesiaServer(t, func(attempt int, w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
+	})
+	defer srv.Close()
+
+	t.Setenv("CARTESIA_API_KEY", "test-key")
+	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
+	c, err := NewCartesiaSynthesizer(WithBaseURL(wsURL), WithDialTimeout(2*time.Second))
+	if err != nil {
+		t.Fatalf("NewCartesiaSynthesizer: %v", err)
+	}
+
+	_, err = c.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err == nil {
+		t.Fatal("expected an error for a 400 handshake rejection, got nil")
+	}
+	if got := atomic.LoadInt32(attempts); got != 1 {
+		t.Errorf("attempts = %d, want exactly 1 (400 must fail fast, not retry)", got)
+	}
+}
+
+func TestCartesiaSynthesizer_RecordsCostPerCharacter(t *testing.T) {
+	fs := newFakeCartesiaServer(t, func(conn net.Conn, req cartesiaGenerationRequest) {
+		doneMsg := mustMarshal(t, cartesiaMessage{Type: "done"})
+		_ = writeServerFrame(conn, wsOpText, doneMsg)
+	})
+	defer fs.Close()
+
+	metrics := observability.NewLatencyRecorder()
+	c := newTestSynthesizer(t, fs, WithMetrics(metrics))
+
+	const text = "namaste, how can I help you today?"
+	ch, err := c.SynthesizeStream(context.Background(), text, Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainChunks(t, ch, 5*time.Second)
+
+	want := float64(len(text)) * cartesiaCostPerCharUSD
+	got := metrics.CostTotal("cartesia")
+	if diff := got - want; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("CostTotal(cartesia) = %v, want %v", got, want)
+	}
+	if n := metrics.CostEventCount("cartesia"); n != 1 {
+		t.Errorf("CostEventCount(cartesia) = %d, want 1", n)
+	}
+}
+
+func TestCartesiaSynthesizer_NoMetricsConfiguredNoOp(t *testing.T) {
+	fs := newFakeCartesiaServer(t, func(conn net.Conn, req cartesiaGenerationRequest) {
+		doneMsg := mustMarshal(t, cartesiaMessage{Type: "done"})
+		_ = writeServerFrame(conn, wsOpText, doneMsg)
+	})
+	defer fs.Close()
+
+	c := newTestSynthesizer(t, fs)
+	ch, err := c.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainChunks(t, ch, 5*time.Second)
+}

@@ -45,6 +45,20 @@ const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 // headroom.
 const maxWSFramePayload = 16 * 1024 * 1024
 
+// wsHandshakeStatusError records the HTTP status code a WebSocket
+// handshake was rejected with, so a caller (SynthesizeStream's retry
+// logic, via isRetryableStatusCode) can classify it as a transient
+// vendor-side condition (429/5xx) worth retrying or a permanent client
+// error (other 4xx: bad auth, bad request, ...) that a retry cannot fix,
+// without parsing dialWS's formatted error string.
+type wsHandshakeStatusError struct {
+	StatusCode int
+}
+
+func (e *wsHandshakeStatusError) Error() string {
+	return fmt.Sprintf("websocket handshake rejected: status %d", e.StatusCode)
+}
+
 // dialWS opens a client WebSocket connection to rawURL (scheme "ws" or
 // "wss"), sending the given extra headers (e.g. auth) during the
 // handshake. It returns the underlying connection and a *bufio.Reader
@@ -143,7 +157,8 @@ func dialWS(ctx context.Context, rawURL string, header http.Header) (net.Conn, *
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		conn.Close()
-		return nil, nil, fmt.Errorf("tts/cartesia: websocket handshake rejected: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, nil, fmt.Errorf("tts/cartesia: websocket handshake rejected: status %d: %s: %w",
+			resp.StatusCode, strings.TrimSpace(string(body)), &wsHandshakeStatusError{StatusCode: resp.StatusCode})
 	}
 	if !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") {
 		conn.Close()

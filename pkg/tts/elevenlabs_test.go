@@ -9,8 +9,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/exotel/langstream/pkg/observability"
 )
 
 // --- fake ElevenLabs HTTP server -----------------------------------
@@ -489,4 +492,186 @@ func TestElevenLabsSynthesizer_DefaultVoicePerLanguage(t *testing.T) {
 			t.Errorf("language %s: default voice = %q, want %q", tc.lang, gotVoice, tc.want)
 		}
 	}
+}
+
+// --- retry-with-backoff and cost-recording tests ------------------------
+
+// newCountingElevenLabsServer starts a server whose /v1/text-to-speech/
+// handler is invoked via respond(attempt, w) for every request
+// (1-indexed), so tests can script "fail N times, then succeed"
+// sequences to exercise SynthesizeStream's retry loop deterministically.
+func newCountingElevenLabsServer(t *testing.T, respond func(attempt int, w http.ResponseWriter)) (*httptest.Server, *int32) {
+	t.Helper()
+	var attempts int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/text-to-speech/", func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&attempts, 1)
+		respond(int(n), w)
+	})
+	srv := httptest.NewServer(mux)
+	return srv, &attempts
+}
+
+func TestElevenLabsSynthesizer_RetriesOn429ThenSucceeds(t *testing.T) {
+	pcm := []byte{1, 2, 3, 4}
+	srv, attempts := newCountingElevenLabsServer(t, func(attempt int, w http.ResponseWriter) {
+		if attempt < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"detail":{"status":"rate_limited"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pcm)
+	})
+	defer srv.Close()
+
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	e, err := NewElevenLabsSynthesizer(WithElevenLabsBaseURL(srv.URL), WithElevenLabsDialTimeout(2*time.Second))
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+
+	ch, err := e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainElevenLabsChunks(t, ch, 5*time.Second)
+
+	if got := atomic.LoadInt32(attempts); got != 2 {
+		t.Errorf("attempts = %d, want 2 (1 failure + 1 success)", got)
+	}
+}
+
+func TestElevenLabsSynthesizer_RetriesOn5xxThenSucceeds(t *testing.T) {
+	pcm := []byte{9, 9, 9, 9}
+	srv, attempts := newCountingElevenLabsServer(t, func(attempt int, w http.ResponseWriter) {
+		if attempt < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("unavailable"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pcm)
+	})
+	defer srv.Close()
+
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	e, err := NewElevenLabsSynthesizer(WithElevenLabsBaseURL(srv.URL), WithElevenLabsDialTimeout(2*time.Second))
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+
+	ch, err := e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainElevenLabsChunks(t, ch, 5*time.Second)
+
+	if got := atomic.LoadInt32(attempts); int(got) != elevenlabsMaxAttempts {
+		t.Errorf("attempts = %d, want elevenlabsMaxAttempts = %d", got, elevenlabsMaxAttempts)
+	}
+}
+
+func TestElevenLabsSynthesizer_DoesNotRetryOn400(t *testing.T) {
+	srv, attempts := newCountingElevenLabsServer(t, func(attempt int, w http.ResponseWriter) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"detail":{"status":"invalid_voice_id"}}`))
+	})
+	defer srv.Close()
+
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	e, err := NewElevenLabsSynthesizer(WithElevenLabsBaseURL(srv.URL), WithElevenLabsDialTimeout(2*time.Second))
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+
+	_, err = e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err == nil {
+		t.Fatal("expected an error for a 400 response, got nil")
+	}
+	if got := atomic.LoadInt32(attempts); got != 1 {
+		t.Errorf("attempts = %d, want exactly 1 (400 must fail fast, not retry)", got)
+	}
+}
+
+func TestElevenLabsSynthesizer_ExhaustsRetriesOnPersistentFailure(t *testing.T) {
+	srv, attempts := newCountingElevenLabsServer(t, func(attempt int, w http.ResponseWriter) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("still down"))
+	})
+	defer srv.Close()
+
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	e, err := NewElevenLabsSynthesizer(WithElevenLabsBaseURL(srv.URL), WithElevenLabsDialTimeout(2*time.Second))
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+
+	_, err = e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err == nil {
+		t.Fatal("expected an error after exhausting retries, got nil")
+	}
+	if got := atomic.LoadInt32(attempts); int(got) != elevenlabsMaxAttempts {
+		t.Errorf("attempts = %d, want elevenlabsMaxAttempts = %d", got, elevenlabsMaxAttempts)
+	}
+}
+
+func TestElevenLabsSynthesizer_RecordsCostPerCharacter(t *testing.T) {
+	fs := newFakeElevenLabsServer(t, func(w http.ResponseWriter, req fakeElevenLabsRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte{1, 2, 3, 4})
+	})
+	defer fs.Close()
+
+	metrics := observability.NewLatencyRecorder()
+	e := newTestElevenLabsSynthesizer(t, fs, WithElevenLabsMetrics(metrics))
+
+	const text = "namaste, how can I help you today?"
+	ch, err := e.SynthesizeStream(context.Background(), text, Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainElevenLabsChunks(t, ch, 5*time.Second)
+
+	want := float64(len(text)) * elevenlabsCostPerCharUSD
+	got := metrics.CostTotal("elevenlabs")
+	if diff := got - want; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("CostTotal(elevenlabs) = %v, want %v", got, want)
+	}
+	if n := metrics.CostEventCount("elevenlabs"); n != 1 {
+		t.Errorf("CostEventCount(elevenlabs) = %d, want 1", n)
+	}
+}
+
+func TestElevenLabsSynthesizer_FailedRequestDoesNotRecordCost(t *testing.T) {
+	fs := newFakeElevenLabsServer(t, func(w http.ResponseWriter, req fakeElevenLabsRequest) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"detail":{"status":"invalid_voice_id"}}`))
+	})
+	defer fs.Close()
+
+	metrics := observability.NewLatencyRecorder()
+	e := newTestElevenLabsSynthesizer(t, fs, WithElevenLabsMetrics(metrics))
+
+	if _, err := e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish}); err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if n := metrics.CostEventCount("elevenlabs"); n != 0 {
+		t.Errorf("CostEventCount(elevenlabs) = %d, want 0 for a failed request", n)
+	}
+}
+
+func TestElevenLabsSynthesizer_NoMetricsConfiguredNoOp(t *testing.T) {
+	fs := newFakeElevenLabsServer(t, func(w http.ResponseWriter, req fakeElevenLabsRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte{5, 6, 7, 8})
+	})
+	defer fs.Close()
+
+	e := newTestElevenLabsSynthesizer(t, fs)
+	ch, err := e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainElevenLabsChunks(t, ch, 5*time.Second)
 }

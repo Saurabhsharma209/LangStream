@@ -34,6 +34,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -41,6 +42,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/exotel/langstream/pkg/observability"
 )
 
 // elevenlabsDefaultBaseURL is ElevenLabs' production HTTP API host. Tests
@@ -71,6 +74,35 @@ const elevenlabsDefaultDialTimeout = 10 * time.Second
 // AudioChunk roughly every 200ms as bytes arrive.
 const elevenlabsReadBufBytes = 3200
 
+// elevenlabsMaxAttempts caps how many times SynthesizeStream's
+// request/status-check phase will retry a transient failure (HTTP
+// 429/5xx, or a generic connection error): one initial try plus up to two
+// retries. Kept small since TTS sits on the live-call critical path and a
+// tight latency budget matters more than squeezing out one more retry.
+const elevenlabsMaxAttempts = 3
+
+// elevenlabsRetryBaseDelay / elevenlabsRetryMaxDelay bound the
+// capped-exponential backoff (see retryBackoff) applied between retry
+// attempts.
+const (
+	elevenlabsRetryBaseDelay = 150 * time.Millisecond
+	elevenlabsRetryMaxDelay  = 1200 * time.Millisecond
+)
+
+// elevenlabsCostPerCharUSD approximates ElevenLabs' published pay-as-you-
+// go/subscription character pricing (roughly $0.00018/character --
+// derived from tiers such as the Creator plan's ~100,000 credits for
+// $22/mo, where one credit is approximately one character for the
+// eleven_multilingual_v2 model used here -- per elevenlabs.io/pricing as
+// reviewed while writing this). ElevenLabs bills per character of input
+// text, not per second of audio produced, so this is charged against
+// len(text) once ElevenLabs has accepted the request (HTTP 200; see
+// SynthesizeStream). This is for pilot cost-visibility only, not
+// billing-grade accuracy -- ElevenLabs' actual rates vary by plan/
+// model/commitment and change over time, and this value is not read live
+// from any API.
+const elevenlabsCostPerCharUSD = 0.00018
+
 // ElevenLabsSynthesizer implements Synthesizer against ElevenLabs'
 // streaming text-to-speech HTTP API. Each call to SynthesizeStream issues
 // its own HTTP request and reads the streamed response body on its own
@@ -83,6 +115,7 @@ type ElevenLabsSynthesizer struct {
 	sampleRate  int
 	dialTimeout time.Duration
 	httpClient  *http.Client
+	metrics     *observability.LatencyRecorder
 }
 
 // ElevenLabsOption configures an ElevenLabsSynthesizer at construction
@@ -117,6 +150,17 @@ func WithElevenLabsSampleRate(hz int) ElevenLabsOption {
 // deadline/cancellation).
 func WithElevenLabsDialTimeout(d time.Duration) ElevenLabsOption {
 	return func(e *ElevenLabsSynthesizer) { e.dialTimeout = d }
+}
+
+// WithElevenLabsMetrics wires a shared *observability.LatencyRecorder
+// into this synthesizer so every successfully-accepted SynthesizeStream
+// call attributes its cost (see RecordCost) to the "elevenlabs" vendor,
+// per elevenlabsCostPerCharUSD. Optional -- a nil/unset recorder (the
+// default) makes cost recording a no-op, matching this package's
+// existing functional-options convention (WithElevenLabsBaseURL,
+// WithElevenLabsModel, ...).
+func WithElevenLabsMetrics(m *observability.LatencyRecorder) ElevenLabsOption {
+	return func(e *ElevenLabsSynthesizer) { e.metrics = m }
 }
 
 // NewElevenLabsSynthesizer constructs an ElevenLabsSynthesizer, reading
@@ -198,6 +242,60 @@ type elevenlabsErrorBody struct {
 	Detail interface{} `json:"detail"`
 }
 
+// requestOnce performs one attempt of SynthesizeStream's request/status-
+// check phase: build and send the HTTP request, and validate the status
+// code. On success it returns the live response (caller owns closing its
+// body); on failure it always closes any response body it opened.
+func (e *ElevenLabsSynthesizer) requestOnce(ctx context.Context, url string, payload []byte) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("tts/elevenlabs: building request: %w", err)
+	}
+	httpReq.Header.Set("xi-api-key", e.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := e.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("tts/elevenlabs: connecting: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		return nil, &elevenlabsStatusError{
+			StatusCode: resp.StatusCode,
+			err:        fmt.Errorf("tts/elevenlabs: unexpected status %d: %s", resp.StatusCode, describeElevenLabsError(body)),
+		}
+	}
+	return resp, nil
+}
+
+// elevenlabsStatusError records the HTTP status code a request failed
+// with, so SynthesizeStream's retry loop can classify it (429/5xx are
+// transient and worth retrying; other 4xx -- bad auth, bad request, ...
+// -- are permanent client errors a retry cannot fix) without parsing the
+// formatted error string.
+type elevenlabsStatusError struct {
+	StatusCode int
+	err        error
+}
+
+func (e *elevenlabsStatusError) Error() string { return e.err.Error() }
+func (e *elevenlabsStatusError) Unwrap() error { return e.err }
+
+// isRetryableElevenLabsErr classifies an error from requestOnce: a
+// response with an explicit status code is retryable only for 429/5xx
+// (see isRetryableStatusCode); anything else (a connection-level failure
+// with no status code at all) is treated as a transient connection
+// problem (see isRetryableConnErr).
+func isRetryableElevenLabsErr(err error) bool {
+	var statusErr *elevenlabsStatusError
+	if errors.As(err, &statusErr) {
+		return isRetryableStatusCode(statusErr.StatusCode)
+	}
+	return isRetryableConnErr(err)
+}
+
 // SynthesizeStream implements Synthesizer. It issues one streaming HTTP
 // request to ElevenLabs for the full text and streams the raw PCM bytes
 // of the response body back on the returned channel, chunked into
@@ -205,6 +303,13 @@ type elevenlabsErrorBody struct {
 // closed once the response body reaches EOF (the last chunk before that
 // has IsFinal=true), on any request/transport error, or when ctx is
 // cancelled -- whichever comes first.
+//
+// The request/status-check phase (not the subsequent body streaming) is
+// retried up to elevenlabsMaxAttempts times with capped exponential
+// backoff (see retryBackoff) on transient failures -- HTTP 429/5xx, or a
+// generic connection error indistinguishable from a network blip at this
+// layer. Any other non-200 status (bad auth, bad request, ...) fails
+// fast on the first attempt.
 func (e *ElevenLabsSynthesizer) SynthesizeStream(ctx context.Context, text string, persona Persona) (<-chan AudioChunk, error) {
 	if text == "" {
 		return nil, fmt.Errorf("tts/elevenlabs: empty text")
@@ -235,22 +340,41 @@ func (e *ElevenLabsSynthesizer) SynthesizeStream(ctx context.Context, text strin
 	// returned channel -- see newHTTPClient's doc comment for why the
 	// dial timeout is applied at the Transport level instead.
 	url := fmt.Sprintf("%s/v1/text-to-speech/%s/stream?output_format=pcm_%d", e.baseURL, e.voiceFor(persona), e.sampleRate)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("tts/elevenlabs: building request: %w", err)
-	}
-	httpReq.Header.Set("xi-api-key", e.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := e.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("tts/elevenlabs: connecting: %w", err)
+	var (
+		resp    *http.Response
+		lastErr error
+	)
+	for attempt := 0; attempt < elevenlabsMaxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := retryBackoff(attempt-1, elevenlabsRetryBaseDelay, elevenlabsRetryMaxDelay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			}
+		}
+
+		resp, lastErr = e.requestOnce(ctx, url, payload)
+		if lastErr == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !isRetryableElevenLabsErr(lastErr) || attempt == elevenlabsMaxAttempts-1 {
+			return nil, lastErr
+		}
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		return nil, fmt.Errorf("tts/elevenlabs: unexpected status %d: %s", resp.StatusCode, describeElevenLabsError(body))
+	// ElevenLabs bills per character of input text once it has accepted
+	// the request (HTTP 200), regardless of whether the subsequent audio
+	// stream later fails mid-way -- see elevenlabsCostPerCharUSD's doc
+	// comment.
+	if e.metrics != nil {
+		e.metrics.RecordCost("elevenlabs", float64(len(text))*elevenlabsCostPerCharUSD)
 	}
 
 	out := make(chan AudioChunk, 4)

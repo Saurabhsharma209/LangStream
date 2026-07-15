@@ -41,6 +41,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/exotel/langstream/pkg/observability"
 	"github.com/gorilla/websocket"
 )
 
@@ -54,6 +55,15 @@ const (
 
 	dgReconnectBase = 250 * time.Millisecond
 	dgReconnectMax  = 5 * time.Second
+
+	// deepgramCostPerMinuteUSD approximates Deepgram's published
+	// Pay-As-You-Go pricing for Nova-2 streaming transcription
+	// (~$0.0059 per audio-minute processed, per deepgram.com/pricing as
+	// reviewed while writing this). This is for pilot cost-visibility
+	// only, not billing-grade accuracy -- Deepgram's actual rates vary by
+	// plan/commitment and change over time, and this value is not read
+	// live from any API.
+	deepgramCostPerMinuteUSD = 0.0059
 )
 
 // DeepgramOption configures a DeepgramRecognizer.
@@ -85,6 +95,16 @@ func WithDialer(d *websocket.Dialer) DeepgramOption {
 	return func(r *DeepgramRecognizer) { r.dialer = d }
 }
 
+// WithMetrics wires a shared *observability.LatencyRecorder into this
+// recognizer so every audio frame successfully pushed to Deepgram
+// attributes its cost (see RecordCost) to the "deepgram" vendor, per
+// deepgramCostPerMinuteUSD. Optional -- a nil/unset recorder (the
+// default) makes cost recording a no-op, matching this package's
+// existing functional-options convention (WithBaseURL, WithDialer, ...).
+func WithMetrics(m *observability.LatencyRecorder) DeepgramOption {
+	return func(r *DeepgramRecognizer) { r.metrics = m }
+}
+
 // DeepgramRecognizer is a real, English-only streaming ASR backend backed by
 // Deepgram's live transcription WebSocket API.
 type DeepgramRecognizer struct {
@@ -93,6 +113,7 @@ type DeepgramRecognizer struct {
 	model                string
 	maxReconnectAttempts int
 	dialer               *websocket.Dialer
+	metrics              *observability.LatencyRecorder
 }
 
 // NewDeepgramRecognizer builds a Deepgram-backed Recognizer. It reads the
@@ -229,7 +250,21 @@ func (s *deepgramSession) PushAudio(ctx context.Context, frame AudioFrame) error
 			return fmt.Errorf("asr/deepgram: write audio after reconnect: %w", err)
 		}
 	}
+	s.recordAudioCost(frame)
 	return nil
+}
+
+// recordAudioCost attributes the cost of processing one successfully
+// pushed audio frame to the "deepgram" vendor, in USD, based on the
+// frame's duration and deepgramCostPerMinuteUSD. It is a no-op if no
+// metrics recorder was configured via WithMetrics.
+func (s *deepgramSession) recordAudioCost(frame AudioFrame) {
+	if s.r.metrics == nil || frame.SampleRate <= 0 {
+		return
+	}
+	samples := len(frame.PCM) / 2 // 16-bit mono PCM
+	minutes := float64(samples) / float64(frame.SampleRate) / 60.0
+	s.r.metrics.RecordCost("deepgram", minutes*deepgramCostPerMinuteUSD)
 }
 
 // ensureConnected dials Deepgram if there is no live connection, applying

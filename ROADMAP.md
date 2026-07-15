@@ -219,6 +219,21 @@ corpus (15→25 entries) and jitter stress tests. See DEVLOG.md's 2026-07-14
 entry. Week 4 cannot meaningfully start until Saurabh decides on anchor
 customers / live traffic.
 
+**2026-07-15 note:** same situation — still genuinely blocked, so today's
+scheduled run (Sprint 9) again did hardening across all four workstreams
+in parallel rather than inventing roadmap scope: added retry/backoff to
+the three vendor clients that had none (GPT-4o, Cartesia, ElevenLabs);
+wired the existing `observability.RecordCost` API into all five real
+vendor clients, since it had zero real callers before today despite the
+dashboard already being able to display it; added an idle-room timeout +
+max-concurrent-rooms cap to `pkg/webrtcgw/room.go` (a resource leak for
+abandoned single-peer rooms); and found+fixed one real regression
+(`Join`'s `OnConnectionStateChange` cleanup hook was dropped mid-refactor,
+reintroducing a leak on a full room's ICE/DTLS failure — the opposite
+side of the bug being fixed). See DEVLOG.md's 2026-07-15 entry. Week 4
+still cannot meaningfully start until Saurabh decides on anchor customers
+/ live traffic.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

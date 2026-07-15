@@ -1,5 +1,173 @@
 # LangStream Dev Log
 
+## 2026-07-15 (Sprint 9: vendor retry/backoff, per-vendor cost wiring, webrtcgw idle-room hardening) — scheduled run
+
+### Agents run
+PE, SRE, Tech, QA (all four, in parallel). Week 3 remains 5 of 6 done
+(real-PSTN jitter tuning still needs live traffic) and Week 4 is still
+entirely gated on Saurabh's anchor-customer/live-traffic decision — same
+as Sprint 8, neither is closeable by agent automation today. Per Sprint
+8's "Tomorrow" list, today's scope was hardening rather than new roadmap
+checkboxes, this time across all four workstreams since there was real,
+scoped work in each: (1) two real vendor clients (GPT-4o, Cartesia,
+ElevenLabs) had zero retry/backoff on transient failures, unlike
+Deepgram/Sarvam; (2) `observability.RecordCost` — the Week 3 "per-vendor
+cost" dashboard primitive — had zero real callers anywhere in the vendor
+clients despite the dashboard already being able to display it; (3)
+`pkg/webrtcgw/room.go` (added 2026-07-14) had no idle-room timeout, a
+resource leak for any room where a second peer never shows up.
+
+### Repo health at start
+Clean: `go build ./...`, `go vet ./...`, `go test ./... -race` (all 11
+packages), `gofmt -l .` clean, before any changes. ClearStream checked
+(`git ls-remote --tags`): still only `v0.1.0` tagged, no coordination
+action needed (today's scope never touched `pkg/rtp`/duplex-RTP).
+
+### Sandbox note (environment, not a code bug)
+Same class of issue as Sprint 8's note, worse this run: the shared
+`/sessions` disk was at 100% (0 bytes free) for the entire run, not just
+96-99% — `$HOME` itself (where the task's own instructions say to clone)
+could not even write a `.git/index.lock`. Pointing `GOCACHE`/`GOPATH`/
+`TMPDIR` at `/` (which had ~2.5G free) alone wasn't sufficient this time,
+because the git working tree at `$HOME/LangStream` itself lived on the
+full `/sessions` mount. Workaround: re-cloned the repo into `/tmp/ls-em-
+work/LangStream` (on `/`, not `/sessions`) and did the entire run's work
+there instead, including the final push. `/tmp` itself turned out to be a
+shared, multi-tenant scratch space with leftover multi-hundred-MB
+directories from unrelated prior sessions/automations (some not
+deletable — sticky-bit-protected, owned by other UIDs); worked around by
+creating a uniquely-named own-user-owned subdirectory
+(`/tmp/ls-em-work/`) rather than trying to clean up or reuse those. Not a
+repo issue — noting here in case a future run hits the same thing and
+wants the faster path directly to a `/tmp`-based clone instead of
+diagnosing `/sessions` capacity first.
+
+### Changes
+
+**PE — retry/backoff for transient vendor errors (`pkg/translate/gpt4o.go`,
+`pkg/tts/cartesia.go`, `pkg/tts/cartesia_ws.go`, `pkg/tts/elevenlabs.go`,
+plus new `pkg/translate/backoff.go` and `pkg/tts/backoff.go`)**
+Deepgram and Sarvam (ASR) already shared `pkg/asr/backoff.go`'s capped-
+exponential-with-jitter `reconnectBackoff`; GPT-4o and both TTS vendors had
+none — a transient 429/5xx/reset failed the whole request outright. Added
+package-local retry helpers mirroring that same policy (3 attempts, 150ms/
+1200ms base/max) to all three, retrying only on 429/5xx/connection-reset/
+timeout — never on 4xx auth/bad-request errors, and never masking `ctx`
+cancellation. Tested against fake HTTP/WS servers: retry-then-succeed,
+retry-exhaustion, and fail-fast-on-4xx cases for each vendor.
+
+**PE — `observability.RecordCost` wired into all five real vendor clients**
+(`pkg/asr/deepgram.go`, `pkg/asr/sarvam.go`, `pkg/translate/gpt4o.go`,
+`pkg/tts/cartesia.go`, `pkg/tts/elevenlabs.go`) via a new `WithMetrics`/
+`WithSarvamMetrics`/`WithElevenLabsMetrics` functional option per package
+(nil recorder = no-op, matching each package's existing options
+convention). Approximate documented per-unit pricing: Deepgram $0.0059/min,
+Sarvam $0.006/min (flagged as a thinner-docs assumption), GPT-4o
+$2.50/$10.00 per 1M input/output tokens (real token counts via
+`stream_options.include_usage=true` when the API returns them, ~4 chars/
+token fallback otherwise), Cartesia $0.00004/char, ElevenLabs $0.00018/
+char — every constant has an inline comment citing the assumption and
+stating "pilot cost-visibility only, not billing-grade." This closes the
+gap QA's cost-tracking integration test (below) verified end to end.
+
+**SRE — audited (no code changes needed)**
+Checked whether `pkg/observability/dashboard.go`'s HTML/JSON/`/metrics`
+routes already surface `CostSnapshot()` — they do, built in Sprint 3
+(2026-07-09), just with no real data flowing through it until PE's change
+above. Also audited `.github/workflows/ci.yml`'s cache-key behavior against
+the heavier `pion/webrtc` dependency tree added 2026-07-14 — `setup-go`'s
+default `**/go.sum`-hash cache key already covers it correctly (single
+root `go.mod`/`go.sum`, no nested modules, no per-branch/OS key
+fragmentation). No changes made to either file; verified rather than
+assumed in both cases.
+
+**Tech — idle-room timeout + max-concurrent-rooms cap (`pkg/webrtcgw/room.go`,
+new `pkg/webrtcgw/room_test.go`)**
+A room where only one peer ever joins (dead shared link, browser crash
+before joining, abandoned tab) previously lived forever — its Session,
+goroutines, and buffers never freed. Added `DefaultRoomIdleTimeout` (2
+minutes, configurable via new `WithIdleTimeout` `ManagerOption`,
+`d<=0` disables it) and an optional `WithMaxRooms` cap on concurrent
+rooms (checked only at new-room creation, never blocks joining an
+existing room as its second peer). `NewManager`'s signature stays
+backward compatible (`opts ...ManagerOption`). Handles the race between
+`expireIncomplete` firing and a second peer's concurrent `Join` via a
+`Room.closed` flag shared by both cleanup paths, with `roomFor` retrying
+against a stale closed room. Tested: idle single-peer room is expired
+and its `PeerConnection`/`Session` actually closed; a full two-peer room
+is never touched by the timeout even at 5x its duration; new-room
+creation is rejected past the `WithMaxRooms` cap while joining an
+existing room isn't.
+
+**QA — cross-cutting verification + WER corpus growth**
+- New `cost_tracking_integration_test.go` (repo root): drives real
+  `asr.DeepgramRecognizer`/`asr.SarvamRecognizer` against fake WS servers
+  with a shared `LatencyRecorder`, checking exactly the three ways PE's
+  cost wiring could have been subtly wrong in isolation — double-counting
+  (`CostEventCount` matches exact call count), wrong-vendor attribution
+  (`CostSnapshot` has exactly 2, correctly-keyed entries), wrong units
+  (cost scales with audio duration, not call count) — and confirms the
+  same data surfaces through `BuildDashboardData`.
+- New `pkg/webrtcgw/idle_room_qa_test.go`: independently verified Tech's
+  idle-room cleanup via `runtime.NumGoroutine()` before/after (both a
+  single batch and repeated batches, to catch a slow cumulative leak),
+  going beyond Tech's own room-count/PeerConnection-state assertions.
+- WER corpus grown 25 → 30 entries (`pkg/qa/corpus.go`): five new
+  Hindi-English code-switching cases (negation deletion that flips
+  meaning, two acronym/homophone substitutions, a two-insertion case, a
+  long-utterance two-deletion case), same style/verification convention
+  as existing entries; `wer_measurement_test.go`'s hardcoded entry-count
+  guards updated in sync.
+- Fresh-clone-class `.gitignore` audit: `git check-ignore -v` against
+  every file touched by all four agents today, plus hypothetical new
+  filenames under each changed package — no matches, no repeat of the
+  2026-07-07 whole-package-exclusion bug.
+
+### Bug found/fixed
+
+**Real bug, found by QA, fixed by EM during integration
+(`pkg/webrtcgw/room.go`):** Tech's idle-timeout refactor of `Join`
+silently dropped the pre-existing
+`p.pc.OnConnectionStateChange(func(state) { ... m.leave(...) ... })`
+registration that used to fire on `Failed`/`Closed`/`Disconnected` — QA
+caught it via `git diff` + a repo-wide grep showing zero remaining
+`OnConnectionStateChange` registrations outside stale comments. Effect:
+a *full* two-peer room whose media path died at the ICE/DTLS level
+(not a clean WebSocket close) would never have been cleaned up — the
+exact bug class being fixed today, just on the opposite side (a full
+room instead of an incomplete one). Restored the registration in `Join`
+right after peer creation; `m.leave` was already idempotent against an
+already-closed room (needed for the idle-timeout path anyway), so no
+further changes were required to make it safe. Re-verified clean after
+the fix: full repo `go build`/`go vet`/`gofmt -l .` clean, `go test
+./... -race -count=3` all 11 packages pass, no flakes.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+- `go test ./... -race -count=3` — all 11 packages pass, no flakes
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- Real-condition jitter-buffer tuning against live PSTN traces — still
+  needs live/pilot call traffic (Week 4). Unchanged.
+- Week 4 (live pilot, real WER/latency/CSAT, go/no-go) still cannot start
+  without Saurabh's decision on anchor customer(s) / live traffic —
+  unchanged, flagging plainly rather than inventing scope.
+- Docker-build verification, legal review of `docs/compliance.md` — both
+  unchanged, still need a human.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that supersedes everything below.
+2. Absent that: GPT-4o/Cartesia/ElevenLabs cost-wiring now exists but
+   only Deepgram/Sarvam got a dedicated QA cross-check today (PE's own
+   change landed cost-wiring for all five, but QA's integration test only
+   covered the two ASR vendors since translate/tts hadn't landed yet when
+   QA started that test) — worth a follow-up integration test covering
+   GPT-4o/Cartesia/ElevenLabs cost-recording specifically.
+3. Continue opportunistic hardening (WER corpus, jitter stress tests) if
+   no higher-priority item exists.
+
 ## 2026-07-07 — Week 1 verification + a second Day-1 bug
 
 Saurabh asked to confirm Week 1 was fully executed. Ran a fresh `git clone`

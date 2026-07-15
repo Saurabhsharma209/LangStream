@@ -5,11 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
+	"time"
+
+	"github.com/exotel/langstream/pkg/observability"
 )
 
 // defaultGPT4oBaseURL is OpenAI's production API root. Tests override this
@@ -23,6 +27,41 @@ const defaultGPT4oModel = "gpt-4o"
 // single SSE "data: ..." line (one JSON chunk) is never truncated even for
 // unusually long completions.
 const maxSSELineSize = 1 << 20 // 1MiB
+
+// gpt4oMaxAttempts caps how many times Translate will try a request that
+// keeps failing with a transient error (see transientTranslateError):
+// one initial try plus up to two retries. Kept deliberately small since
+// this call sits on the live-call translation critical path and a tight
+// latency budget matters more here than squeezing out one more retry.
+const gpt4oMaxAttempts = 3
+
+// gpt4oRetryBaseDelay / gpt4oRetryMaxDelay bound the capped-exponential
+// backoff (see retryBackoff) applied between retry attempts.
+const (
+	gpt4oRetryBaseDelay = 150 * time.Millisecond
+	gpt4oRetryMaxDelay  = 1200 * time.Millisecond
+)
+
+// gpt4oInputCostPerTokenUSD / gpt4oOutputCostPerTokenUSD approximate
+// OpenAI's published gpt-4o pricing (https://openai.com/api/pricing/, as
+// reviewed while writing this): $2.50 per 1M input tokens, $10.00 per 1M
+// output tokens. This is for pilot cost-visibility only, not
+// billing-grade accuracy -- OpenAI's actual prices change over time and
+// this value is not read live from any API.
+const (
+	gpt4oInputCostPerTokenUSD  = 2.50 / 1_000_000
+	gpt4oOutputCostPerTokenUSD = 10.00 / 1_000_000
+
+	// gpt4oApproxCharsPerToken is the commonly cited rule-of-thumb ratio
+	// ("~4 characters per token" for English text) used to approximate
+	// token counts on the fallback path, when the API response doesn't
+	// carry a usage field (see recordCost). This is a documented
+	// approximation, not a real tokenizer count -- it is least accurate
+	// for non-Latin scripts such as Hindi/Devanagari, where GPT
+	// tokenizers typically produce a different characters-per-token
+	// ratio -- so treat fallback-derived cost as directional only.
+	gpt4oApproxCharsPerToken = 4.0
+)
 
 // GPT4oTranslator implements Translator using OpenAI's GPT-4o chat
 // completions endpoint in streaming mode (Server-Sent Events). It performs
@@ -43,6 +82,7 @@ type GPT4oTranslator struct {
 	model      string
 	httpClient *http.Client
 	pairs      [][2]Language
+	metrics    *observability.LatencyRecorder
 }
 
 // Option configures a GPT4oTranslator at construction time.
@@ -76,6 +116,15 @@ func WithHTTPClient(c *http.Client) Option {
 			g.httpClient = c
 		}
 	}
+}
+
+// WithMetrics wires a shared *observability.LatencyRecorder into this
+// translator so every successful Translate call attributes its cost (see
+// RecordCost) to the "gpt-4o" vendor. Optional -- a nil/unset recorder
+// (the default) makes cost recording a no-op, matching this package's
+// existing functional-options convention (WithBaseURL, WithModel, ...).
+func WithMetrics(m *observability.LatencyRecorder) Option {
+	return func(g *GPT4oTranslator) { g.metrics = m }
 }
 
 // WithSupportedPairs overrides the (source, target) pairs this translator
@@ -166,10 +215,31 @@ type chatMessage struct {
 // chatCompletionRequest is the request body for POST /chat/completions with
 // stream:true.
 type chatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Stream      bool          `json:"stream"`
-	Temperature float64       `json:"temperature"`
+	Model         string         `json:"model"`
+	Messages      []chatMessage  `json:"messages"`
+	Stream        bool           `json:"stream"`
+	Temperature   float64        `json:"temperature"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+// streamOptions requests OpenAI's documented "final usage chunk" for a
+// streamed chat completion (a real, published API feature, not a guess):
+// with include_usage:true, the server sends one extra SSE chunk right
+// before "[DONE]" whose "usage" field carries the same prompt/completion/
+// total token counts a non-streamed response would report. recordCost
+// uses this for exact per-call cost, falling back to a character-count
+// approximation only if it's ever absent (e.g. an older proxy stripping
+// unknown fields).
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+// chatCompletionUsage mirrors OpenAI's "usage" object: token counts for
+// one chat completion.
+type chatCompletionUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // chatCompletionChunk is one SSE "data: {...}" payload in a streamed chat
@@ -181,6 +251,10 @@ type chatCompletionChunk struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+	// Usage is only populated on the final chunk of a stream started with
+	// stream_options.include_usage:true (see streamOptions); nil on every
+	// other chunk.
+	Usage *chatCompletionUsage `json:"usage,omitempty"`
 }
 
 // openAIErrorBody is the JSON body OpenAI returns on non-2xx responses:
@@ -193,8 +267,34 @@ type openAIErrorBody struct {
 	} `json:"error"`
 }
 
+// transientTranslateError marks an error surfaced by translateOnce as a
+// transient, worth-retrying failure: the request never made it to
+// OpenAI (a network-level problem), the response came back 429/5xx, or
+// the response stream broke off mid-read. Errors NOT wrapped this way --
+// malformed SSE JSON, an unsupported language pair, request-encoding
+// failures, other 4xx statuses (bad auth, bad request, ...) -- are
+// treated as permanent, so Translate fails fast on them instead of
+// spending this call's tight latency budget on retries that cannot help.
+type transientTranslateError struct{ err error }
+
+func (e *transientTranslateError) Error() string { return e.err.Error() }
+func (e *transientTranslateError) Unwrap() error { return e.err }
+
+// isRetryableTranslateErr reports whether err (as returned by
+// translateOnce) is worth retrying; see transientTranslateError's doc
+// comment for the classification rule.
+func isRetryableTranslateErr(err error) bool {
+	var transient *transientTranslateError
+	return errors.As(err, &transient)
+}
+
 // Translate implements Translator using GPT-4o's streaming chat completions
-// API.
+// API. Transient failures (network errors, HTTP 429, HTTP 5xx, or the
+// response stream dropping mid-read) are retried up to gpt4oMaxAttempts
+// times with capped exponential backoff (see retryBackoff); permanent
+// failures (unsupported pair, bad auth/bad request, malformed responses)
+// fail fast on the first attempt. ctx cancellation/deadline is always
+// respected immediately rather than being masked by a retry.
 func (g *GPT4oTranslator) Translate(ctx context.Context, text string, source, target Language, isFinal bool) (Chunk, error) {
 	select {
 	case <-ctx.Done():
@@ -206,6 +306,49 @@ func (g *GPT4oTranslator) Translate(ctx context.Context, text string, source, ta
 		return Chunk{}, fmt.Errorf("translate/gpt4o: unsupported pair %q->%q", source, target)
 	}
 
+	var lastErr error
+	for attempt := 0; attempt < gpt4oMaxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := retryBackoff(attempt-1, gpt4oRetryBaseDelay, gpt4oRetryMaxDelay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return Chunk{}, ctx.Err()
+			}
+		}
+
+		translated, usage, err := g.translateOnce(ctx, text, source, target)
+		if err == nil {
+			g.recordCost(text, translated, usage)
+			return Chunk{
+				Text:       translated,
+				SourceLang: source,
+				TargetLang: target,
+				IsFinal:    isFinal,
+			}, nil
+		}
+
+		if ctx.Err() != nil {
+			// The caller's own cancellation/deadline, not a vendor
+			// failure -- propagate it directly rather than retrying or
+			// returning a possibly-stale vendor error instead.
+			return Chunk{}, ctx.Err()
+		}
+
+		lastErr = err
+		if !isRetryableTranslateErr(err) || attempt == gpt4oMaxAttempts-1 {
+			return Chunk{}, err
+		}
+	}
+	return Chunk{}, lastErr
+}
+
+// translateOnce performs exactly one HTTP round trip against GPT-4o's
+// streaming chat completions endpoint. See Translate's doc comment for
+// the retry policy built on top of this.
+func (g *GPT4oTranslator) translateOnce(ctx context.Context, text string, source, target Language) (string, *chatCompletionUsage, error) {
 	reqBody := chatCompletionRequest{
 		Model: g.model,
 		Messages: []chatMessage{
@@ -218,19 +361,20 @@ func (g *GPT4oTranslator) Translate(ctx context.Context, text string, source, ta
 				Content: text,
 			},
 		},
-		Stream:      true,
-		Temperature: 0.2,
+		Stream:        true,
+		Temperature:   0.2,
+		StreamOptions: &streamOptions{IncludeUsage: true},
 	}
 
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return Chunk{}, fmt.Errorf("translate/gpt4o: encode request: %w", err)
+		return "", nil, fmt.Errorf("translate/gpt4o: encode request: %w", err)
 	}
 
 	url := g.baseURL + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return Chunk{}, fmt.Errorf("translate/gpt4o: build request: %w", err)
+		return "", nil, fmt.Errorf("translate/gpt4o: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
@@ -239,47 +383,74 @@ func (g *GPT4oTranslator) Translate(ctx context.Context, text string, source, ta
 	resp, err := g.httpClient.Do(httpReq)
 	if err != nil {
 		if ctx.Err() != nil {
-			return Chunk{}, ctx.Err()
+			return "", nil, ctx.Err()
 		}
-		return Chunk{}, fmt.Errorf("translate/gpt4o: request failed: %w", err)
+		// A failure to even complete the HTTP round trip (dial refused,
+		// TLS failure, connection reset, timeout, ...) is exactly the
+		// "transient network blip" case retries exist for.
+		return "", nil, &transientTranslateError{fmt.Errorf("translate/gpt4o: request failed: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		var apiErr openAIErrorBody
+		var errOut error
 		if jsonErr := json.Unmarshal(body, &apiErr); jsonErr == nil && apiErr.Error.Message != "" {
-			return Chunk{}, fmt.Errorf("translate/gpt4o: API error (status %d, type %q, code %q): %s",
+			errOut = fmt.Errorf("translate/gpt4o: API error (status %d, type %q, code %q): %s",
 				resp.StatusCode, apiErr.Error.Type, apiErr.Error.Code, apiErr.Error.Message)
+		} else {
+			errOut = fmt.Errorf("translate/gpt4o: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
-		return Chunk{}, fmt.Errorf("translate/gpt4o: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			return "", nil, &transientTranslateError{errOut}
+		}
+		// Any other 4xx (bad auth, bad request, not found, ...) is a
+		// permanent client error a retry cannot fix.
+		return "", nil, errOut
 	}
 
-	translated, err := g.readStream(ctx, resp.Body)
-	if err != nil {
-		return Chunk{}, err
-	}
+	return g.readStream(ctx, resp.Body)
+}
 
-	return Chunk{
-		Text:       translated,
-		SourceLang: source,
-		TargetLang: target,
-		IsFinal:    isFinal,
-	}, nil
+// gpt4oInputCostPerTokenUSD's package doc comment above documents the
+// pricing assumptions; recordCost attributes the cost of one successful
+// Translate call to the "gpt-4o" vendor, in USD. It prefers exact token
+// counts from the API's usage field (populated via
+// stream_options.include_usage; see translateOnce) and falls back to
+// approximating token counts from input/output character counts (see
+// gpt4oApproxCharsPerToken) only if usage is nil. No-op if no metrics
+// recorder was configured via WithMetrics.
+func (g *GPT4oTranslator) recordCost(inputText, outputText string, usage *chatCompletionUsage) {
+	if g.metrics == nil {
+		return
+	}
+	var promptTokens, completionTokens float64
+	if usage != nil {
+		promptTokens = float64(usage.PromptTokens)
+		completionTokens = float64(usage.CompletionTokens)
+	} else {
+		promptTokens = float64(len(inputText)) / gpt4oApproxCharsPerToken
+		completionTokens = float64(len(outputText)) / gpt4oApproxCharsPerToken
+	}
+	cost := promptTokens*gpt4oInputCostPerTokenUSD + completionTokens*gpt4oOutputCostPerTokenUSD
+	g.metrics.RecordCost("gpt-4o", cost)
 }
 
 // readStream parses an SSE stream of chat-completion chunks, concatenating
 // delta.content fields until it hits the "[DONE]" sentinel or the body
-// closes. It respects ctx cancellation between lines.
-func (g *GPT4oTranslator) readStream(ctx context.Context, body io.Reader) (string, error) {
+// closes, and captures the final usage chunk (see streamOptions) if the
+// server sent one. It respects ctx cancellation between lines.
+func (g *GPT4oTranslator) readStream(ctx context.Context, body io.Reader) (string, *chatCompletionUsage, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineSize)
 
 	var out strings.Builder
+	var usage *chatCompletionUsage
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", nil, ctx.Err()
 		default:
 		}
 
@@ -294,24 +465,35 @@ func (g *GPT4oTranslator) readStream(ctx context.Context, body io.Reader) (strin
 		}
 		data = strings.TrimSpace(data)
 		if data == "[DONE]" {
-			return out.String(), nil
+			return out.String(), usage, nil
 		}
 
 		var chunk chatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			return "", fmt.Errorf("translate/gpt4o: malformed SSE chunk %q: %w", data, err)
+			// Malformed data from an otherwise-successful response: a
+			// protocol/parsing problem, not a transient network
+			// condition, so this is deliberately NOT wrapped as
+			// transientTranslateError (retrying a malformed response
+			// verbatim cannot help).
+			return "", nil, fmt.Errorf("translate/gpt4o: malformed SSE chunk %q: %w", data, err)
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
 		}
 		for _, choice := range chunk.Choices {
 			out.WriteString(choice.Delta.Content)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("translate/gpt4o: reading stream: %w", err)
+		// The stream broke off mid-read (connection reset, timeout,
+		// ...); this is the same class of transient failure as a
+		// request that never got a response at all.
+		return "", nil, &transientTranslateError{fmt.Errorf("translate/gpt4o: reading stream: %w", err)}
 	}
 	// Body closed without an explicit [DONE] sentinel: treat whatever we
 	// accumulated as the final result rather than erroring, since some
 	// proxies/servers close the connection right after the last chunk.
-	return out.String(), nil
+	return out.String(), usage, nil
 }
 
 var _ Translator = (*GPT4oTranslator)(nil)

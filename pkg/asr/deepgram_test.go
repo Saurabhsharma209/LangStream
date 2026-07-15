@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/exotel/langstream/pkg/observability"
 	"github.com/gorilla/websocket"
 )
 
@@ -253,5 +254,78 @@ func TestDeepgramRecognizer_ConnectFailureSurfacesError(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("PushAudio hung instead of returning a connect error")
+	}
+}
+
+// TestDeepgramRecognizer_RecordsCostPerAudioMinute verifies that a
+// successfully pushed audio frame attributes cost to the "deepgram"
+// vendor via WithMetrics, proportional to the frame's duration and
+// deepgramCostPerMinuteUSD.
+func TestDeepgramRecognizer_RecordsCostPerAudioMinute(t *testing.T) {
+	srv, wsURL := newFakeDeepgramServer(t, func(t *testing.T, conn *websocket.Conn) {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	defer srv.Close()
+
+	os.Setenv("DEEPGRAM_API_KEY", "unit-test-key")
+	metrics := observability.NewLatencyRecorder()
+	r, err := NewDeepgramRecognizer(WithBaseURL(wsURL), WithMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewDeepgramRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "en")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	// 320 bytes @ 8kHz/16-bit mono = 160 samples = 20ms of audio.
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio: %v", err)
+	}
+
+	wantMinutes := 0.02 / 60.0
+	want := wantMinutes * deepgramCostPerMinuteUSD
+	got := metrics.CostTotal("deepgram")
+	if diff := got - want; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("CostTotal(deepgram) = %v, want %v", got, want)
+	}
+	if n := metrics.CostEventCount("deepgram"); n != 1 {
+		t.Errorf("CostEventCount(deepgram) = %d, want 1", n)
+	}
+}
+
+// TestDeepgramRecognizer_NoMetricsConfiguredNoOp verifies PushAudio never
+// panics when no metrics recorder was configured (the common case for
+// existing callers that predate WithMetrics).
+func TestDeepgramRecognizer_NoMetricsConfiguredNoOp(t *testing.T) {
+	srv, wsURL := newFakeDeepgramServer(t, func(t *testing.T, conn *websocket.Conn) {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	defer srv.Close()
+
+	os.Setenv("DEEPGRAM_API_KEY", "unit-test-key")
+	r, err := NewDeepgramRecognizer(WithBaseURL(wsURL))
+	if err != nil {
+		t.Fatalf("NewDeepgramRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "en")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio: %v", err)
 	}
 }

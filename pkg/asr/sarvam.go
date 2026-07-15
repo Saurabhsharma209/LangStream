@@ -77,6 +77,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/exotel/langstream/pkg/observability"
 	"github.com/gorilla/websocket"
 )
 
@@ -92,6 +93,18 @@ const (
 
 	sarvamReconnectBase = 250 * time.Millisecond
 	sarvamReconnectMax  = 5 * time.Second
+
+	// sarvamCostPerMinuteUSD is an ASSUMPTION, in the same spirit as the
+	// numbered assumptions in this file's package doc comment: Sarvam's
+	// public pricing docs are thin (no per-minute streaming STT rate
+	// found alongside the API reference used to build this backend), so
+	// this approximates their listed STT pricing (~INR 0.5 per
+	// audio-minute, converted at a nominal ~83 INR/USD) as roughly
+	// $0.006/minute. This is for pilot cost-visibility only, not
+	// billing-grade accuracy, and should be replaced with a verified
+	// figure once Sarvam's actual invoiced rate for this account is
+	// known.
+	sarvamCostPerMinuteUSD = 0.006
 )
 
 // sarvamLanguageCodes maps our internal Language tags to Sarvam's BCP-47-ish
@@ -129,6 +142,17 @@ func WithSarvamDialer(d *websocket.Dialer) SarvamOption {
 	return func(r *SarvamRecognizer) { r.dialer = d }
 }
 
+// WithSarvamMetrics wires a shared *observability.LatencyRecorder into
+// this recognizer so every audio frame successfully pushed to Sarvam
+// attributes its cost (see RecordCost) to the "sarvam" vendor, per
+// sarvamCostPerMinuteUSD. Optional -- a nil/unset recorder (the default)
+// makes cost recording a no-op, matching this package's existing
+// functional-options convention (WithSarvamBaseURL, WithSarvamDialer,
+// ...).
+func WithSarvamMetrics(m *observability.LatencyRecorder) SarvamOption {
+	return func(r *SarvamRecognizer) { r.metrics = m }
+}
+
 // SarvamRecognizer is a real, code-switching-aware streaming ASR backend for
 // Hindi (and Hindi-English code-mixed speech) backed by Sarvam AI's
 // streaming speech-to-text WebSocket API.
@@ -138,6 +162,7 @@ type SarvamRecognizer struct {
 	model                string
 	maxReconnectAttempts int
 	dialer               *websocket.Dialer
+	metrics              *observability.LatencyRecorder
 }
 
 // NewSarvamRecognizer builds a Sarvam-backed Recognizer. It reads the API
@@ -283,7 +308,21 @@ func (s *sarvamSession) PushAudio(ctx context.Context, frame AudioFrame) error {
 	s.mu.Lock()
 	s.totalMS += frameMS
 	s.mu.Unlock()
+	s.recordAudioCost(frameMS)
 	return nil
+}
+
+// recordAudioCost attributes the cost of processing one successfully
+// pushed audio frame (frameMS milliseconds of audio) to the "sarvam"
+// vendor, in USD. See sarvamCostPerMinuteUSD's doc comment for the
+// pricing assumption. No-op if no metrics recorder was configured via
+// WithSarvamMetrics.
+func (s *sarvamSession) recordAudioCost(frameMS int64) {
+	if s.r.metrics == nil || frameMS <= 0 {
+		return
+	}
+	minutes := float64(frameMS) / 1000.0 / 60.0
+	s.r.metrics.RecordCost("sarvam", minutes*sarvamCostPerMinuteUSD)
 }
 
 // ensureConnected dials Sarvam if there is no live connection, applying the

@@ -103,13 +103,11 @@ type FallbackConfig struct {
 	// shared recorder here instead if you want fallback events from
 	// multiple sessions aggregated in one place.
 	//
-	// TODO(SRE/EM, Week 3 "observability dashboard" roadmap item): wire
-	// Session.Metrics() (or a shared *observability.LatencyRecorder
-	// passed in here) into the dashboard once it exists, so fallback
-	// rates show up next to latency/cost. Not started here — this change
-	// only calls the pre-existing exported RecordEvent/RecordError API
-	// from the fallback call sites below; it does not add a dashboard or
-	// touch pkg/observability/metrics.go.
+	// Done (2026-07-15): cmd/langstream/main.go and duplex.go already
+	// pass Session.Metrics() straight into observability.NewDashboardServer,
+	// and this field defaults to the Session's own recorder when nil, so
+	// fallback/degrade events recorded here land in the same recorder the
+	// dashboard reads from — no separate wiring needed.
 	Metrics *observability.LatencyRecorder
 }
 

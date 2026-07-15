@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/exotel/langstream/pkg/observability"
 	"github.com/gorilla/websocket"
 )
 
@@ -377,5 +378,78 @@ func TestPCM16MonoToWAV_EmptyPCM(t *testing.T) {
 	dataLen := uint32(wav[40]) | uint32(wav[41])<<8 | uint32(wav[42])<<16 | uint32(wav[43])<<24
 	if dataLen != 0 {
 		t.Errorf("data chunk size = %d, want 0", dataLen)
+	}
+}
+
+// TestSarvamRecognizer_RecordsCostPerAudioMinute verifies that a
+// successfully pushed audio frame attributes cost to the "sarvam" vendor
+// via WithSarvamMetrics, proportional to the frame's duration and
+// sarvamCostPerMinuteUSD.
+func TestSarvamRecognizer_RecordsCostPerAudioMinute(t *testing.T) {
+	srv, wsURL := newFakeSarvamServer(t, func(t *testing.T, conn *websocket.Conn) {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	defer srv.Close()
+
+	os.Setenv("SARVAM_API_KEY", "unit-test-key")
+	metrics := observability.NewLatencyRecorder()
+	r, err := NewSarvamRecognizer(WithSarvamBaseURL(wsURL), WithSarvamMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewSarvamRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	// 320 bytes @ 16kHz/16-bit mono = 160 samples = 10ms of audio.
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 16000}
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio: %v", err)
+	}
+
+	wantMinutes := 0.01 / 60.0
+	want := wantMinutes * sarvamCostPerMinuteUSD
+	got := metrics.CostTotal("sarvam")
+	if diff := got - want; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("CostTotal(sarvam) = %v, want %v", got, want)
+	}
+	if n := metrics.CostEventCount("sarvam"); n != 1 {
+		t.Errorf("CostEventCount(sarvam) = %d, want 1", n)
+	}
+}
+
+// TestSarvamRecognizer_NoMetricsConfiguredNoOp verifies PushAudio never
+// panics when no metrics recorder was configured (the common case for
+// existing callers that predate WithSarvamMetrics).
+func TestSarvamRecognizer_NoMetricsConfiguredNoOp(t *testing.T) {
+	srv, wsURL := newFakeSarvamServer(t, func(t *testing.T, conn *websocket.Conn) {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	defer srv.Close()
+
+	os.Setenv("SARVAM_API_KEY", "unit-test-key")
+	r, err := NewSarvamRecognizer(WithSarvamBaseURL(wsURL))
+	if err != nil {
+		t.Fatalf("NewSarvamRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 16000}
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio: %v", err)
 	}
 }

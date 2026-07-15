@@ -45,6 +45,12 @@
 // hallucinated-insertion case, a reverse-direction English-dominant
 // entry, and a digit-sequence deletion) the same way — see
 // pkg/qa/corpus.go's FixedCorpus doc comment for each entry's reasoning.
+//
+// Sprint 2026-07-15 (QA) wires in five further entries (a negation-word
+// deletion, two acronym/homophone substitutions, a two-insertion case,
+// and a second long-utterance entry with a multi-word deletion) the same
+// way — see pkg/qa/corpus.go's FixedCorpus doc comment for each entry's
+// reasoning.
 package langstream_test
 
 import (
@@ -67,8 +73,8 @@ import (
 // arithmetic against itself.
 func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 	entries := qa.FixedCorpus()
-	if len(entries) < 25 {
-		t.Fatalf("qa.FixedCorpus() returned %d entries, want at least 25", len(entries))
+	if len(entries) < 30 {
+		t.Fatalf("qa.FixedCorpus() returned %d entries, want at least 30", len(entries))
 	}
 
 	// Precomputed expected WER for the entries this test wires up,
@@ -113,6 +119,15 @@ func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 		"english_dominant_embedded_hindi_courtesy_agent_transfer": 1.0 / 12.0,
 		"hinglish_digit_sequence_deletion_account_number":         1.0 / 10.0,
 		"hinglish_long_utterance_two_substitutions_refund_status": 2.0 / 18.0,
+
+		// Sprint 2026-07-15 (QA) additions - see pkg/qa/corpus.go's
+		// FixedCorpus doc comment for each entry's reasoning and
+		// hand-computed WER.
+		"hinglish_negation_deletion_service_unavailable":                1.0 / 7.0,
+		"hinglish_acronym_kyc_homophone_substitution":                   1.0 / 7.0,
+		"hinglish_two_insertions_confirmation_repeat":                   2.0 / 5.0,
+		"hinglish_acronym_ivr_homophone_substitution":                   1.0 / 7.0,
+		"hinglish_long_utterance_two_deletions_kyc_document_submission": 2.0 / 20.0,
 	}
 
 	tested := 0
@@ -172,7 +187,7 @@ func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 		})
 	}
 
-	if tested != 25 {
-		t.Fatalf("wired up %d corpus entries against the fake-ASR pipeline, want exactly 25 (identical_greeting, one_word_substitution, one_word_deletion, hinglish_identical_order_status, hinglish_one_word_substitution, hinglish_one_word_deletion, hinglish_midsentence_switch_payment_status, hinglish_loanword_recharge_request, hinglish_numbers_bill_amount_and_date, hinglish_order_number_spoken_in_english_digits, hinglish_filler_words_address_update, hinglish_otp_request_insertion, hinglish_call_disconnect_network_issue, hinglish_account_block_query_two_substitutions, hinglish_callback_request_deletion_and_filler, hinglish_two_word_deletion_travel_booking_confirmation, hinglish_proper_noun_brand_substitution_recharge, hinglish_proper_noun_person_name_substitution_order, hinglish_number_word_vs_digit_substitution, hinglish_long_utterance_single_deletion_callback, hinglish_content_word_deletion_parcel_delivery_date, hinglish_insertion_hallucinated_filler_word, english_dominant_embedded_hindi_courtesy_agent_transfer, hinglish_digit_sequence_deletion_account_number, hinglish_long_utterance_two_substitutions_refund_status) - update wantWER alongside pkg/qa.FixedCorpus if entries changed", tested)
+	if tested != 30 {
+		t.Fatalf("wired up %d corpus entries against the fake-ASR pipeline, want exactly 30 (identical_greeting, one_word_substitution, one_word_deletion, hinglish_identical_order_status, hinglish_one_word_substitution, hinglish_one_word_deletion, hinglish_midsentence_switch_payment_status, hinglish_loanword_recharge_request, hinglish_numbers_bill_amount_and_date, hinglish_order_number_spoken_in_english_digits, hinglish_filler_words_address_update, hinglish_otp_request_insertion, hinglish_call_disconnect_network_issue, hinglish_account_block_query_two_substitutions, hinglish_callback_request_deletion_and_filler, hinglish_two_word_deletion_travel_booking_confirmation, hinglish_proper_noun_brand_substitution_recharge, hinglish_proper_noun_person_name_substitution_order, hinglish_number_word_vs_digit_substitution, hinglish_long_utterance_single_deletion_callback, hinglish_content_word_deletion_parcel_delivery_date, hinglish_insertion_hallucinated_filler_word, english_dominant_embedded_hindi_courtesy_agent_transfer, hinglish_digit_sequence_deletion_account_number, hinglish_long_utterance_two_substitutions_refund_status, hinglish_negation_deletion_service_unavailable, hinglish_acronym_kyc_homophone_substitution, hinglish_two_insertions_confirmation_repeat, hinglish_acronym_ivr_homophone_substitution, hinglish_long_utterance_two_deletions_kyc_document_submission) - update wantWER alongside pkg/qa.FixedCorpus if entries changed", tested)
 	}
 }
