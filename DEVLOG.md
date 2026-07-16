@@ -1,5 +1,215 @@
 # LangStream Dev Log
 
+## 2026-07-16 (Sprint 10: vendor circuit breakers, TURN credential support, cost-recording test + WER growth) — scheduled run
+
+### Agents run
+PE, Tech, QA, SRE (all four, in parallel). Week 3 remains 5 of 6 done
+(real-PSTN jitter tuning still needs live traffic) and Week 4 is still
+entirely gated on Saurabh's anchor-customer/live-traffic decision --
+unchanged since Sprint 8. No message from Saurabh on that decision as of
+this run, so today continued Sprint 9's "Tomorrow" list: (1) a
+circuit-breaker/fail-fast layer on top of Sprint 9's retry/backoff for the
+three request/response vendors (GPT-4o, Cartesia, ElevenLabs), since every
+request during a sustained outage was still paying the full 3-attempt
+retry budget; (2) the cost-recording integration test for GPT-4o/
+Cartesia/ElevenLabs specifically, flagged as a gap in Sprint 9's report
+(the existing test only covered Deepgram/Sarvam); (3) TURN server
+credential support for `pkg/webrtcgw`/`cmd/langstream webrtc`, closing the
+"no TURN server configured" gap flagged in the 2026-07-14 interactive
+session's DEVLOG entry; (4) continued WER corpus growth.
+
+### Repo health at start
+Clean: `go build ./...`, `go vet ./...`, `go test ./... -race` (all 11
+packages), `gofmt -l .` clean, before any changes. ClearStream checked
+(`git ls-remote --tags`): still only `v0.1.0` tagged, no coordination
+action needed (today's scope never touched `pkg/rtp`/duplex-RTP).
+
+### Sandbox note (environment, not a code bug)
+Same class of issue as Sprint 8/9's notes: the shared `/sessions` disk was
+at 100% (0 bytes free) again for this entire run -- `$HOME` itself
+couldn't be written to at all. Worked around exactly as Sprint 9 did: the
+whole run's work happened in `/tmp/langstream_run/LangStream` (on `/`, not
+`/sessions`), including the final push. `/tmp` itself was also nearly
+full (~1.4G of leftover, mostly-undeletable multi-tenant scratch data from
+unrelated sessions -- some sticky-bit/other-UID protected); worked around
+the same way Sprint 9 did, with a uniquely-named own subdirectory rather
+than fighting for space in shared `/tmp` paths. Disk stayed tight (usually
+800M-1.5G free on `/`) for this run's entire duration -- worth flagging to
+Saurabh if this becomes a recurring pattern, since it's now shown up in
+3 consecutive scheduled runs (Sprint 8, 9, 10).
+
+One workstream agent (Tech) hit a distinct infrastructure problem this
+run: its sandboxed shell became unresponsive for most of its session
+(`RPC error: process ... already running`, large file writes silently not
+landing despite appearing to succeed in brief responsive windows). Tech
+correctly detected this itself, verified via `wc -l` that no partial/
+corrupted state was left behind, and reported back a fully-specified,
+ready-to-apply design instead of guessing or forcing it through. The EM
+(this session) then implemented that exact design directly during
+integration (see Tech's item below) rather than re-spawning and burning
+more time against a possibly-still-degraded shell.
+
+### Changes
+
+**PE -- circuit breaker / fail-fast on top of Sprint 9's retry/backoff
+(`pkg/translate/gpt4o.go`, `pkg/tts/cartesia.go`, `pkg/tts/elevenlabs.go`,
+new `pkg/translate/circuitbreaker.go` and `pkg/tts/circuitbreaker.go`)**
+Every request during a sustained vendor outage was still paying the full
+3-attempt retry budget (with backoff delays) before failing, burning
+exactly the latency budget this product cares about most, right when a
+vendor is already confirmed down. Added a small, thread-safe breaker per
+client: opens after 5 consecutive *full-retry-exhaustion* failures
+(permanent 4xx failures never count toward this, matching Sprint 9's
+retry policy), fails fast with no attempt/backoff for a 10s cooldown, then
+lets exactly one probe call through -- success closes the breaker, failure
+reopens the cooldown. Configurable via `WithCircuitBreaker`/
+`WithElevenLabsCircuitBreaker` functional options matching each package's
+existing convention; on by default with no config needed. 19 new tests
+against the existing fake HTTP/WS servers (plus new toggle-able fake
+servers to flip vendor health mid-test) covering open/cooldown/probe/
+close/reopen, permanent errors never tripping the breaker, and concurrent
+access under `-race`.
+
+**Tech -- TURN server credential support (`cmd/langstream/webrtc.go`,
+`cmd/langstream/main.go`'s usage text, new `cmd/langstream/webrtc_test.go`)**
+DEVLOG's 2026-07-14 entry flagged a real gap: `--stun` only ever built
+anonymous `webrtc.ICEServer{URLs: [...]}` entries, so a real `turn:`/
+`turns:` URL (which needs RFC 5766 long-term-credential auth, unlike
+STUN) would just fail to authenticate. Added `--turn-username`/
+`--turn-credential` flags; a new `iceServerForURL`/`buildICEServers` pair
+attaches `Username`/`Credential` only to `turn:`/`turns:`-scheme entries
+(case-insensitive prefix check, since STUN/TURN URLs per RFC 7064/7065
+aren't hierarchical and `net/url.Parse` doesn't reliably yield the
+scheme), and only when *both* flags are non-empty -- a half-supplied pair
+is treated as not configured rather than sent partially. `stun:`/`stuns:`
+entries, and the fully-default no-flags-set case, are byte-for-byte
+unchanged from before. This workstream's own agent hit a sandbox
+infrastructure failure mid-session (see the note above) and could not
+land its own diff, but did fully specify the design and confirmed via
+grep that no other file/test depends on `--stun`'s exact current shape --
+the EM implemented that exact design directly during integration,
+including the 12-case `webrtc_test.go` the agent had planned (covering
+turn:/turns:/stun:/stuns: scheme handling, case-insensitivity, partial-
+credential-pairs-are-ignored, whitespace/empty-entry handling, and the
+unchanged-default-behavior case).
+
+**QA -- GPT-4o/Cartesia/ElevenLabs cost-recording integration test +
+WER corpus growth**
+- New `gpt4o_tts_cost_integration_test.go` (repo root, matching
+  `cost_tracking_integration_test.go`'s existing style): drives real
+  `GPT4oTranslator`/`CartesiaSynthesizer`/`ElevenLabsSynthesizer` against
+  fake servers sharing one `LatencyRecorder`, checking no double-counting
+  (deliberately different call counts per vendor: 5/3/6), correct
+  per-vendor attribution (exactly 3 correctly-keyed `CostSnapshot`
+  entries), and correct units -- a fake GPT-4o server that echoes back
+  real `prompt_tokens`/`completion_tokens` via `stream_options.
+  include_usage` gives an *exact* 2.0x cost-doubling assertion when input
+  length doubles, tighter than the ASR test's tolerance-banded check.
+  Also confirms the same data surfaces through `BuildDashboardData`.
+  Closes the exact gap flagged in Sprint 9's "Tomorrow" list.
+- WER corpus grown 30 -> 35 entries (`pkg/qa/corpus.go`): an
+  acronym/homophone case (EMI -> "emmy"), the corpus's first
+  digit-insertion case, its first trailing-position insertion case, and
+  two long-utterance cases (one mixing two different error types, one a
+  long-utterance counterpart to an existing short two-insertion entry).
+  `corpus_test.go`'s exhaustive `want` map and `wer_measurement_test.go`'s
+  count guards updated in sync; every new WER matched hand computation on
+  the first try.
+- Cross-workstream check (`git diff --stat` + targeted greps, plus a
+  `.gitignore` audit on every new file today): found two real issues in
+  PE's circuit-breaker work (see Bug found/fixed below), confirmed Tech's
+  workstream had landed nothing yet at check time (correctly reported,
+  not assumed), and found one stray untracked file
+  (`cmd/langstream/.write_test`, a leftover permission-probe artifact) --
+  deleted by the EM before committing.
+
+**SRE -- `RecordErrorReason`/`ReasonSnapshot` audit + addition
+(`pkg/observability/metrics.go`, `dashboard.go`)**
+Audited (per the SRE charter's "verify before proposing changes"
+convention) whether a circuit-open fast-fail is distinguishable on the
+dashboard from an ordinary single-request transient failure. Traced the
+real call path (vendor client -> `pkg/langstream/fallback.go`'s
+`recordFallback` -> `RecordError`) and confirmed a genuine gap: no error-
+type inspection anywhere in that path, so a circuit-open storm (many
+fast-fails/sec, near-zero latency, breaker protecting the pipeline)
+renders identically to many genuinely-failed full-retry calls on the
+dashboard -- exactly the ambiguity that would make the new breaker's
+protection invisible during the one scenario it exists for. Added
+`RecordErrorReason(stage, vendor, reason string)`/`ReasonSnapshot()` to
+`pkg/observability/metrics.go` (`RecordError` now delegates to
+`RecordErrorReason(..., "")`, byte-for-byte backward compatible --
+verified with a dedicated test), a `..._error_reason_total{reason=...}`
+Prometheus line, and a new dashboard table. 13 new tests (backward-compat,
+reason isolation, concurrent-write race safety, HTML/JSON/`/metrics`
+surfaces). Correctly did not wire real callers into `pkg/langstream/
+fallback.go` (owned by another workstream) -- left that one-line call as
+ready-to-use for whoever wires it. Also confirmed `go.mod`/`go.sum`
+unchanged today, so skipped re-auditing the CI cache-key (no new deps to
+audit against).
+
+### Bug found/fixed
+
+**Real bug, found by QA, fixed by EM during integration
+(`pkg/translate/circuitbreaker.go`, `pkg/tts/circuitbreaker.go`):** if a
+post-cooldown probe call's context was cancelled (or, found independently
+during integration, if a *permanent* non-retryable error occurred) before
+the call reached `recordSuccess`/`recordFailure`, `probeInFlight` was
+never reset -- `allow()` then returned `false` forever, permanently
+stuck open regardless of how much time passed (verified stuck even 24h
+later in a test). Root cause: `allow()`'s in-flight-probe check ran
+before checking whether that probe had ever actually resolved. Fixed with
+a new `circuitBreaker.abort()` method (clears only `probeInFlight`, never
+touches open/closed state or the failure count -- ctx cancellation and
+already-excluded permanent errors aren't vendor-health signals) called
+via `defer` immediately after every `allow()`-gated call in all three
+vendor clients, guarded by a local `breakerSettled` bool so `abort()` is a
+no-op whenever `recordSuccess`/`recordFailure` already ran. Two new
+regression tests per package (`TestCircuitBreaker_AbortReleasesStuckProbe`,
+`TestCircuitBreaker_AbortIsNoOpWhenClosed`) directly reproduce the stuck
+scenario and confirm the fix. Also wired the now-real
+`RecordErrorReason(stage, vendor, "circuit_open")` call into all three
+vendor clients' circuit-open rejection path (SRE's new API had zero real
+callers as landed -- a second, smaller issue QA flagged as "dead/
+half-wired"), using the exact stage/vendor strings `pkg/langstream/
+fallback.go` already uses (`"translate"`/`"tts"`, `Name()`) so the
+dashboard groups them consistently with existing error-rate data.
+
+**Housekeeping:** deleted a stray untracked `cmd/langstream/.write_test`
+(leftover permission-probe artifact, not gitignored) before committing, so
+it doesn't get swept in by `git add -A`.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+- `go test ./... -race -count=3` -- all 11 packages pass, no flakes
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- Real-condition jitter-buffer tuning against live PSTN traces -- still
+  needs live/pilot call traffic (Week 4). Unchanged.
+- Week 4 (live pilot, real WER/latency/CSAT, go/no-go) still cannot start
+  without Saurabh's decision on anchor customer(s) / live traffic --
+  unchanged.
+- Docker-build verification, legal review of `docs/compliance.md` -- both
+  unchanged, still need a human.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that supersedes everything below.
+2. Absent that: `pkg/langstream/fallback.go`'s `recordFallback` call
+   sites could tag circuit-open errors with `RecordErrorReason(...,
+   "circuit_open")` at the langstream-orchestrator level too (today's fix
+   tags it at the vendor-client level, which already gets it onto the
+   dashboard; a langstream-level tag would let fallback-triggering logic
+   itself branch on "vendor confirmed down" vs. "one flaky call" if that
+   ever becomes useful, but isn't needed for dashboard visibility, which
+   is done) -- low priority, not a gap, just a possible enhancement.
+3. The recurring `/sessions`-disk-full pattern (3 scheduled runs in a
+   row now) may be worth a permanent fix outside this repo (e.g. always
+   cloning to `/tmp/<unique>` by default instead of discovering the full
+   disk each time) rather than continuing to route around it fresh every
+   run.
+4. Continue opportunistic hardening if no higher-priority item exists.
+
 ## 2026-07-15 (Sprint 9: vendor retry/backoff, per-vendor cost wiring, webrtcgw idle-room hardening) — scheduled run
 
 ### Agents run

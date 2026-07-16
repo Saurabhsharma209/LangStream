@@ -382,3 +382,148 @@ func TestConcurrentErrorAndCostRecording(t *testing.T) {
 		t.Fatalf("CostTotal after concurrent writes = %v, want %v", got, wantCost)
 	}
 }
+
+func TestRecordErrorReasonBackwardCompatibleWithRecordError(t *testing.T) {
+	r := NewLatencyRecorder()
+
+	// Plain RecordError (used by every pre-existing call site, e.g.
+	// pkg/langstream/fallback.go's recordFallback) must behave exactly as
+	// before: it contributes to ErrorCount/EventCount/ErrorRate, but never
+	// shows up in ReasonSnapshot, since it carries no reason.
+	r.RecordError("mt", "gpt-4o")
+
+	if got, want := r.ErrorCount("mt", "gpt-4o"), int64(1); got != want {
+		t.Fatalf("ErrorCount = %d, want %d", got, want)
+	}
+	if got, want := r.EventCount("mt", "gpt-4o"), int64(1); got != want {
+		t.Fatalf("EventCount = %d, want %d", got, want)
+	}
+	if got := r.ReasonCount("mt", "gpt-4o", ""); got != 0 {
+		t.Errorf("ReasonCount for empty reason = %d, want 0 (plain RecordError must not populate reasons)", got)
+	}
+	if snap := r.ReasonSnapshot(); len(snap) != 0 {
+		t.Errorf("ReasonSnapshot after plain RecordError = %+v, want empty", snap)
+	}
+}
+
+func TestRecordErrorReasonDistinguishesCircuitOpenFromOrdinaryError(t *testing.T) {
+	r := NewLatencyRecorder()
+
+	// Simulate: two ordinary vendor failures, then three circuit-breaker
+	// fast-fails while the breaker is open (see pkg/translate/
+	// circuitbreaker.go's errCircuitOpen -- this test exercises the
+	// observability-side contract that would let a caller like
+	// pkg/langstream/fallback.go tag those fast-fails distinctly).
+	r.RecordError("mt", "gpt-4o")
+	r.RecordError("mt", "gpt-4o")
+	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+	r.RecordEvent("mt", "gpt-4o")
+
+	// The aggregate error/event view is unaffected by reason tagging:
+	// all 5 failures count toward Errors, all 6 calls toward Total.
+	stats := r.ErrorSnapshot()
+	if len(stats) != 1 {
+		t.Fatalf("ErrorSnapshot len = %d, want 1", len(stats))
+	}
+	if stats[0].Errors != 5 || stats[0].Total != 6 {
+		t.Fatalf("ErrorSnapshot[0] = %+v, want Errors=5 Total=6", stats[0])
+	}
+
+	// But ReasonSnapshot lets a dashboard separate the 3 confirmed-down
+	// fast-fails from the 2 ordinary per-call failures -- which is exactly
+	// the distinction that's invisible from ErrorSnapshot/ErrorRate alone.
+	if got, want := r.ReasonCount("mt", "gpt-4o", "circuit_open"), int64(3); got != want {
+		t.Fatalf("ReasonCount(circuit_open) = %d, want %d", got, want)
+	}
+
+	reasons := r.ReasonSnapshot()
+	if len(reasons) != 1 {
+		t.Fatalf("ReasonSnapshot len = %d, want 1, got %+v", len(reasons), reasons)
+	}
+	rs := reasons[0]
+	if rs.Stage != "mt" || rs.Vendor != "gpt-4o" || rs.Reason != "circuit_open" || rs.Count != 3 {
+		t.Errorf("ReasonSnapshot[0] = %+v, want {mt gpt-4o circuit_open 3}", rs)
+	}
+}
+
+func TestReasonSnapshotSortedAndIsolated(t *testing.T) {
+	r := NewLatencyRecorder()
+	r.RecordErrorReason("tts", "elevenlabs", "circuit_open")
+	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+	r.RecordErrorReason("mt", "gpt-4o", "timeout")
+	// A different vendor/stage combination is tracked independently and
+	// plain RecordError never leaks into the reason breakdown.
+	r.RecordError("mt", "gpt-4o")
+
+	snap := r.ReasonSnapshot()
+	if len(snap) != 3 {
+		t.Fatalf("ReasonSnapshot len = %d, want 3, got %+v", len(snap), snap)
+	}
+	// Sorted by stage, then vendor, then reason:
+	// mt/gpt-4o/circuit_open, mt/gpt-4o/timeout, tts/elevenlabs/circuit_open
+	if snap[0].Stage != "mt" || snap[0].Vendor != "gpt-4o" || snap[0].Reason != "circuit_open" {
+		t.Errorf("snap[0] = %+v, want mt/gpt-4o/circuit_open", snap[0])
+	}
+	if snap[1].Stage != "mt" || snap[1].Vendor != "gpt-4o" || snap[1].Reason != "timeout" {
+		t.Errorf("snap[1] = %+v, want mt/gpt-4o/timeout", snap[1])
+	}
+	if snap[2].Stage != "tts" || snap[2].Vendor != "elevenlabs" || snap[2].Reason != "circuit_open" {
+		t.Errorf("snap[2] = %+v, want tts/elevenlabs/circuit_open", snap[2])
+	}
+}
+
+func TestReasonCountUnknownIsZero(t *testing.T) {
+	r := NewLatencyRecorder()
+	if got := r.ReasonCount("nonexistent", "nobody", "circuit_open"); got != 0 {
+		t.Errorf("ReasonCount for unknown triple = %d, want 0", got)
+	}
+}
+
+func TestWriteTextIncludesReasonMetric(t *testing.T) {
+	r := NewLatencyRecorder()
+	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+	r.RecordError("mt", "gpt-4o")
+
+	var buf bytes.Buffer
+	if err := r.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		"langstream_stage_error_reason_total",
+		`langstream_stage_error_reason_total{stage="mt",vendor="gpt-4o",reason="circuit_open"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("WriteText output missing %q\noutput:\n%s", want, out)
+		}
+	}
+}
+
+func TestConcurrentRecordErrorReason(t *testing.T) {
+	r := NewLatencyRecorder()
+	const goroutines = 10
+	const perGoroutine = 100
+
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perGoroutine; j++ {
+				r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+			}
+		}()
+	}
+	wg.Wait()
+
+	want := int64(goroutines * perGoroutine)
+	if got := r.ReasonCount("mt", "gpt-4o", "circuit_open"); got != want {
+		t.Fatalf("ReasonCount after concurrent writes = %d, want %d", got, want)
+	}
+	if got := r.ErrorCount("mt", "gpt-4o"); got != want {
+		t.Fatalf("ErrorCount after concurrent writes = %d, want %d", got, want)
+	}
+}

@@ -149,6 +149,27 @@ func placeholderPCM() []byte {
 //   - hinglish_two_insertions_confirmation_repeat:                   WER 2/5   (2 insertions / 5 words)
 //   - hinglish_acronym_ivr_homophone_substitution:                   WER 1/7   (1 substitution / 7 words)
 //   - hinglish_long_utterance_two_deletions_kyc_document_submission: WER 2/20  (2 deletions / 20 words)
+//
+// Sprint 2026-07-16 (QA) adds five further entries covering categories the
+// corpus still didn't exercise: a third acronym/homophone substitution
+// ("EMI" misheard as "emmy", alongside the existing KYC/IVR cases), a
+// digit-duplication insertion (the insertion-side counterpart to the
+// existing digit-sequence deletion entry -- this corpus had no digit
+// insertion case), an insertion positioned at the very end of the
+// utterance rather than the start/middle (every prior insertion entry
+// duplicates an internal word), a long (24-word) utterance mixing two
+// different error types in one entry (a substitution and a deletion
+// together -- every existing long entry is homogeneous, only
+// substitutions or only deletions), and a long (21-word) utterance with
+// two insertions (the long-utterance counterpart to the existing short
+// two-insertion entry, the same way the corpus already has long
+// counterparts for two-substitution and two-deletion entries):
+//
+//   - hinglish_acronym_emi_homophone_substitution:                                 WER 1/8   (1 substitution / 8 words)
+//   - hinglish_digit_duplication_insertion_registered_mobile_number:               WER 1/10  (1 insertion / 10 words)
+//   - hinglish_insertion_trailing_word_repeat_call_end:                            WER 1/5   (1 insertion / 5 words)
+//   - hinglish_long_utterance_substitution_and_deletion_mixed_complaint_escalation: WER 2/24  (1 substitution + 1 deletion / 24 words)
+//   - hinglish_long_utterance_two_insertions_delivery_confirmation:                WER 2/21  (2 insertions / 21 words)
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -592,6 +613,87 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir aapko apna KYC document branch mein ja kar submit karna hoga varna aapka account temporarily block ho sakta hai",
 			Hypothesis: "sir aapko apna KYC document branch mein submit karna hoga varna aapka account temporarily block ho sakta hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// "EMI" (Equated Monthly Installment, routine in Indian
+			// banking/lending support calls) misheard as the
+			// phonetically similar "emmy" -- a third acronym/homophone
+			// substitution alongside
+			// hinglish_acronym_kyc_homophone_substitution and
+			// hinglish_acronym_ivr_homophone_substitution, the same
+			// realistic ASR confusion category (short, low-context
+			// acronyms) applied to a different acronym.
+			Name:       "hinglish_acronym_emi_homophone_substitution",
+			Language:   "hi",
+			Reference:  "sir aapka EMI is month process ho jayega",
+			Hypothesis: "sir aapka emmy is month process ho jayega",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A registered-mobile-number readout, digit-by-digit in
+			// English words, where the fake ASR duplicates one digit
+			// ("two") rather than dropping or mishearing it -- the
+			// insertion-side counterpart to
+			// hinglish_digit_sequence_deletion_account_number (which
+			// drops a digit from a similar sequence); this corpus had no
+			// digit-duplication insertion case before this entry.
+			Name:       "hinglish_digit_duplication_insertion_registered_mobile_number",
+			Language:   "hi",
+			Reference:  "sir aapka registered mobile number one two three four hai",
+			Hypothesis: "sir aapka registered mobile number one two two three four hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A short call-closing courtesy line where the fake ASR
+			// duplicates the very last word, "dhanyavaad" ("thank you") --
+			// every existing insertion entry in this corpus duplicates a
+			// word in the middle or at the start of the sentence; this is
+			// the first insertion positioned at the trailing edge of the
+			// utterance, checking WER alignment handles a duplicated
+			// final token as cleanly as an internal one.
+			Name:       "hinglish_insertion_trailing_word_repeat_call_end",
+			Language:   "hi",
+			Reference:  "sir call ke liye dhanyavaad",
+			Hypothesis: "sir call ke liye dhanyavaad dhanyavaad",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A long (24-word) complaint-escalation sentence combining
+			// *two different* error types in one entry: the fake ASR
+			// drops "abhi" entirely (a deletion) and separately mishears
+			// "resolution" as "solution" (a substitution). Every existing
+			// long (18-25 word) entry in this corpus is homogeneous --
+			// only deletions, or only substitutions -- this is the first
+			// long utterance mixing error types, checking WER alignment
+			// correctly isolates two independent, non-adjacent edits of
+			// different kinds rather than miscounting when they don't
+			// share a shape.
+			Name:       "hinglish_long_utterance_substitution_and_deletion_mixed_complaint_escalation",
+			Language:   "hi",
+			Reference:  "sir maine already do baar complaint register karwaya hai lekin abhi tak koi resolution nahi mila hai isliye main ise escalate karna chahta hoon",
+			Hypothesis: "sir maine already do baar complaint register karwaya hai lekin tak koi solution nahi mila hai isliye main ise escalate karna chahta hoon",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A long (21-word) delivery/payment confirmation with *two*
+			// stutter/repeat insertions ("ho" duplicated early, "hai"
+			// duplicated later) -- this corpus's existing two-insertion
+			// entry (hinglish_two_insertions_confirmation_repeat) is only
+			// five words; this is the long-utterance counterpart, the
+			// same way hinglish_long_utterance_two_substitutions_refund_status
+			// and hinglish_long_utterance_two_deletions_kyc_document_submission
+			// are the long-utterance counterparts to their short
+			// two-substitution/two-deletion siblings.
+			Name:       "hinglish_long_utterance_two_insertions_delivery_confirmation",
+			Language:   "hi",
+			Reference:  "sir aapka order successfully deliver ho gaya hai aur payment bhi successfully complete ho chuka hai dhanyavaad aapka time ke liye",
+			Hypothesis: "sir aapka order successfully deliver ho ho gaya hai aur payment bhi successfully complete ho chuka hai hai dhanyavaad aapka time ke liye",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

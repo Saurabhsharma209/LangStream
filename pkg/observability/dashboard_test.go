@@ -233,3 +233,94 @@ func TestDashboardServerEndToEnd(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }
+
+func TestBuildDashboardDataIncludesReasons(t *testing.T) {
+	r := newSampleRecorder()
+	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+
+	data := BuildDashboardData(r)
+	if len(data.Reasons) != 1 {
+		t.Fatalf("Reasons len = %d, want 1, got %+v", len(data.Reasons), data.Reasons)
+	}
+	rs := data.Reasons[0]
+	if rs.Stage != "mt" || rs.Vendor != "gpt-4o" || rs.Reason != "circuit_open" || rs.Count != 2 {
+		t.Errorf("Reasons[0] = %+v, want {mt gpt-4o circuit_open 2}", rs)
+	}
+}
+
+func TestBuildDashboardDataEmptyHasNoReasons(t *testing.T) {
+	r := NewLatencyRecorder()
+	data := BuildDashboardData(r)
+	if len(data.Reasons) != 0 {
+		t.Fatalf("expected no Reasons for fresh recorder, got %+v", data.Reasons)
+	}
+}
+
+func TestDashboardHandlerHTMLShowsReasons(t *testing.T) {
+	r := newSampleRecorder()
+	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+	handler := NewDashboardHandler(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Error reasons",
+		"circuit_open",
+		"gpt-4o",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("HTML body missing expected substring %q\nbody:\n%s", want, body)
+		}
+	}
+}
+
+func TestDashboardHandlerHTMLEmptyRecorderShowsNoReasonsMessage(t *testing.T) {
+	r := NewLatencyRecorder()
+	handler := NewDashboardHandler(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "No classified error reasons recorded yet") {
+		t.Errorf("HTML body missing empty-state reasons message\nbody:\n%s", body)
+	}
+}
+
+func TestDashboardHandlerJSONIncludesReasons(t *testing.T) {
+	r := newSampleRecorder()
+	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+	handler := NewDashboardHandler(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard.json", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var data DashboardData
+	if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
+		t.Fatalf("failed to unmarshal JSON body: %v\nbody:\n%s", err, rec.Body.String())
+	}
+	if len(data.Reasons) != 1 {
+		t.Errorf("decoded Reasons len = %d, want 1", len(data.Reasons))
+	}
+}
+
+func TestDashboardHandlerMetricsIncludesReasonMetric(t *testing.T) {
+	r := newSampleRecorder()
+	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")
+	handler := NewDashboardHandler(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "langstream_stage_error_reason_total") {
+		t.Errorf("/metrics body missing langstream_stage_error_reason_total\nbody:\n%s", body)
+	}
+}

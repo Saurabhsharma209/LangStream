@@ -97,6 +97,7 @@ type CartesiaSynthesizer struct {
 	sampleRate  int
 	dialTimeout time.Duration
 	metrics     *observability.LatencyRecorder
+	breaker     *circuitBreaker
 }
 
 // Option configures a CartesiaSynthesizer at construction time.
@@ -146,6 +147,11 @@ func WithMetrics(m *observability.LatencyRecorder) Option {
 	return func(c *CartesiaSynthesizer) { c.metrics = m }
 }
 
+// WithCircuitBreaker overrides breaker threshold/cooldown; non-positive values fall back to defaults.
+func WithCircuitBreaker(threshold int, cooldown time.Duration) Option {
+	return func(c *CartesiaSynthesizer) { c.breaker = newCircuitBreaker(threshold, cooldown) }
+}
+
 // NewCartesiaSynthesizer constructs a CartesiaSynthesizer, reading the API
 // key from the CARTESIA_API_KEY environment variable. It returns an error
 // if that variable is unset or empty, since every Cartesia call requires
@@ -163,6 +169,7 @@ func NewCartesiaSynthesizer(opts ...Option) (*CartesiaSynthesizer, error) {
 		modelID:     cartesiaDefaultModel,
 		sampleRate:  cartesiaDefaultSampleRate,
 		dialTimeout: cartesiaDefaultDialTimeout,
+		breaker:     newCircuitBreaker(0, 0),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -303,6 +310,19 @@ func (c *CartesiaSynthesizer) SynthesizeStream(ctx context.Context, text string,
 		return nil, fmt.Errorf("tts/cartesia: unsupported language %q", lang)
 	}
 
+	if !c.breaker.allow() {
+		if c.metrics != nil {
+			c.metrics.RecordErrorReason("tts", c.Name(), "circuit_open")
+		}
+		return nil, fmt.Errorf("tts/cartesia: %w", errCircuitOpen)
+	}
+	breakerSettled := false
+	defer func() {
+		if !breakerSettled {
+			c.breaker.abort()
+		}
+	}()
+
 	header := http.Header{}
 	header.Set("X-API-Key", c.apiKey)
 	header.Set("Cartesia-Version", c.apiVersion)
@@ -356,9 +376,16 @@ func (c *CartesiaSynthesizer) SynthesizeStream(ctx context.Context, text string,
 			return nil, ctx.Err()
 		}
 		if !isRetryableDialErr(lastErr) || attempt == cartesiaMaxAttempts-1 {
+			if isRetryableDialErr(lastErr) {
+				c.breaker.recordFailure()
+				breakerSettled = true
+			}
 			return nil, lastErr
 		}
 	}
+
+	c.breaker.recordSuccess()
+	breakerSettled = true
 
 	// Cartesia bills per character of input text once it has accepted
 	// the generation request, regardless of whether the subsequent audio

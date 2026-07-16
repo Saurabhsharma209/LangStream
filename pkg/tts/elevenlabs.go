@@ -116,6 +116,7 @@ type ElevenLabsSynthesizer struct {
 	dialTimeout time.Duration
 	httpClient  *http.Client
 	metrics     *observability.LatencyRecorder
+	breaker     *circuitBreaker
 }
 
 // ElevenLabsOption configures an ElevenLabsSynthesizer at construction
@@ -163,6 +164,11 @@ func WithElevenLabsMetrics(m *observability.LatencyRecorder) ElevenLabsOption {
 	return func(e *ElevenLabsSynthesizer) { e.metrics = m }
 }
 
+// WithElevenLabsCircuitBreaker overrides breaker threshold/cooldown; non-positive values fall back to defaults.
+func WithElevenLabsCircuitBreaker(threshold int, cooldown time.Duration) ElevenLabsOption {
+	return func(e *ElevenLabsSynthesizer) { e.breaker = newCircuitBreaker(threshold, cooldown) }
+}
+
 // NewElevenLabsSynthesizer constructs an ElevenLabsSynthesizer, reading
 // the API key from the ELEVENLABS_API_KEY environment variable. It
 // returns an error if that variable is unset or empty, since every
@@ -179,6 +185,7 @@ func NewElevenLabsSynthesizer(opts ...ElevenLabsOption) (*ElevenLabsSynthesizer,
 		modelID:     elevenlabsDefaultModel,
 		sampleRate:  elevenlabsDefaultSampleRate,
 		dialTimeout: elevenlabsDefaultDialTimeout,
+		breaker:     newCircuitBreaker(0, 0),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -323,6 +330,19 @@ func (e *ElevenLabsSynthesizer) SynthesizeStream(ctx context.Context, text strin
 		return nil, fmt.Errorf("tts/elevenlabs: unsupported language %q", lang)
 	}
 
+	if !e.breaker.allow() {
+		if e.metrics != nil {
+			e.metrics.RecordErrorReason("tts", e.Name(), "circuit_open")
+		}
+		return nil, fmt.Errorf("tts/elevenlabs: %w", errCircuitOpen)
+	}
+	breakerSettled := false
+	defer func() {
+		if !breakerSettled {
+			e.breaker.abort()
+		}
+	}()
+
 	reqBody := elevenlabsRequest{
 		Text:    text,
 		ModelID: e.modelID,
@@ -365,9 +385,16 @@ func (e *ElevenLabsSynthesizer) SynthesizeStream(ctx context.Context, text strin
 			return nil, ctx.Err()
 		}
 		if !isRetryableElevenLabsErr(lastErr) || attempt == elevenlabsMaxAttempts-1 {
+			if isRetryableElevenLabsErr(lastErr) {
+				e.breaker.recordFailure()
+				breakerSettled = true
+			}
 			return nil, lastErr
 		}
 	}
+
+	e.breaker.recordSuccess()
+	breakerSettled = true
 
 	// ElevenLabs bills per character of input text once it has accepted
 	// the request (HTTP 200), regardless of whether the subsequent audio

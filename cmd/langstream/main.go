@@ -164,13 +164,16 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "    --suppressor (ClearStream noise-suppressor backend, default %q).\n", defaultSuppressorBackend)
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "webrtc [--backend NAME] [--addr ADDR] [--caller-lang LANG] [--agent-lang LANG] [--stun URLS]")
+	fmt.Fprintln(os.Stderr, "       [--turn-username USER] [--turn-credential CRED]")
 	fmt.Fprintln(os.Stderr, "    Start a real, two-user, browser-facing test harness (same backend selection")
 	fmt.Fprintln(os.Stderr, "    as demo/serve/duplex): serves a static page and a WebSocket signaling")
 	fmt.Fprintln(os.Stderr, "    endpoint on ADDR (default \""+defaultWebRTCAddr+"\"). Two people each open the page,")
 	fmt.Fprintln(os.Stderr, "    join the same room with opposite roles (\"caller\"/\"agent\"), grant mic access, and")
 	fmt.Fprintln(os.Stderr, "    talk to each other live through real ASR->MT->TTS -- no telephony/RTP")
 	fmt.Fprintln(os.Stderr, "    infrastructure involved (see pkg/webrtcgw). --stun sets the ICE STUN/TURN")
-	fmt.Fprintf(os.Stderr, "    server list (comma-separated, default %q).\n", defaultSTUNServer)
+	fmt.Fprintf(os.Stderr, "    server list (comma-separated, default %q). --turn-username/--turn-credential\n", defaultSTUNServer)
+	fmt.Fprintln(os.Stderr, "    supply long-term-credential auth (RFC 5766) for any turn:/turns: URL in that")
+	fmt.Fprintln(os.Stderr, "    list -- ignored by stun:/stuns: URLs, and a no-op unless both are set.")
 
 }
 

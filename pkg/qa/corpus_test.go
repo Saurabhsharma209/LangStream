@@ -78,6 +78,13 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // and a second long-utterance entry with a multi-word deletion) — see
 // FixedCorpus's doc comment for each entry's reasoning and hand-computed
 // WER.
+//
+// Sprint 2026-07-16 (QA): includes five further entries (a third
+// acronym/homophone substitution, a digit-duplication insertion, a
+// trailing-position insertion, a long utterance mixing a substitution and
+// a deletion together, and a long utterance with two insertions) — see
+// FixedCorpus's doc comment for each entry's reasoning and hand-computed
+// WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -119,6 +126,14 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_two_insertions_confirmation_repeat":                   2.0 / 5.0,
 		"hinglish_acronym_ivr_homophone_substitution":                   1.0 / 7.0,
 		"hinglish_long_utterance_two_deletions_kyc_document_submission": 2.0 / 20.0,
+
+		// Sprint 2026-07-16 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_acronym_emi_homophone_substitution":                                  1.0 / 8.0,
+		"hinglish_digit_duplication_insertion_registered_mobile_number":                1.0 / 10.0,
+		"hinglish_insertion_trailing_word_repeat_call_end":                             1.0 / 5.0,
+		"hinglish_long_utterance_substitution_and_deletion_mixed_complaint_escalation": 2.0 / 24.0,
+		"hinglish_long_utterance_two_insertions_delivery_confirmation":                 2.0 / 21.0,
 	}
 
 	entries := FixedCorpus()

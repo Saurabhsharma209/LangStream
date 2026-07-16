@@ -234,6 +234,22 @@ side of the bug being fixed). See DEVLOG.md's 2026-07-15 entry. Week 4
 still cannot meaningfully start until Saurabh decides on anchor customers
 / live traffic.
 
+**2026-07-16 note:** still genuinely blocked on Saurabh's anchor-customer/
+live-traffic decision, so today's scheduled run (Sprint 10) again did
+hardening across all four workstreams rather than inventing roadmap
+scope: added a circuit-breaker/fail-fast layer on top of the retry/backoff
+added 2026-07-15 (GPT-4o, Cartesia, ElevenLabs), added TURN server
+credential support to `pkg/webrtcgw`/`cmd/langstream webrtc` (closing a
+gap flagged 2026-07-14), added the GPT-4o/Cartesia/ElevenLabs
+cost-recording integration test flagged as a follow-up in Sprint 9, and
+grew the WER corpus (30→35). One real regression was found and fixed
+during integration (a circuit breaker that could get permanently stuck
+open if a probe call's context was cancelled or hit a permanent error —
+see DEVLOG.md's 2026-07-16 entry) and one dashboard-visibility gap was
+found and closed (circuit-open fast-fails were indistinguishable from
+ordinary errors on the dashboard). Week 4 still cannot meaningfully start
+until Saurabh decides on anchor customers / live traffic.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

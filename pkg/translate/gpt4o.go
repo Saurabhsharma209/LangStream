@@ -83,6 +83,7 @@ type GPT4oTranslator struct {
 	httpClient *http.Client
 	pairs      [][2]Language
 	metrics    *observability.LatencyRecorder
+	breaker    *circuitBreaker
 }
 
 // Option configures a GPT4oTranslator at construction time.
@@ -138,6 +139,11 @@ func WithSupportedPairs(pairs ...[2]Language) Option {
 	}
 }
 
+// WithCircuitBreaker overrides breaker threshold/cooldown; non-positive values fall back to defaults.
+func WithCircuitBreaker(threshold int, cooldown time.Duration) Option {
+	return func(g *GPT4oTranslator) { g.breaker = newCircuitBreaker(threshold, cooldown) }
+}
+
 // NewGPT4oTranslator constructs a GPT4oTranslator. The API key is read from
 // the OPENAI_API_KEY environment variable unless overridden with
 // WithAPIKey. It returns an error if no API key is available, since every
@@ -152,6 +158,7 @@ func NewGPT4oTranslator(opts ...Option) (*GPT4oTranslator, error) {
 			{"hi", "en"},
 			{"en", "hi"},
 		},
+		breaker: newCircuitBreaker(0, 0),
 	}
 	for _, opt := range opts {
 		opt(g)
@@ -295,6 +302,9 @@ func isRetryableTranslateErr(err error) bool {
 // failures (unsupported pair, bad auth/bad request, malformed responses)
 // fail fast on the first attempt. ctx cancellation/deadline is always
 // respected immediately rather than being masked by a retry.
+// A circuit breaker (see circuitbreaker.go) also tracks consecutive
+// full-retry-exhaustion failures; once tripped, calls fail immediately
+// until a cooldown elapses, then exactly one probe call is allowed.
 func (g *GPT4oTranslator) Translate(ctx context.Context, text string, source, target Language, isFinal bool) (Chunk, error) {
 	select {
 	case <-ctx.Done():
@@ -305,6 +315,19 @@ func (g *GPT4oTranslator) Translate(ctx context.Context, text string, source, ta
 	if !g.supports(source, target) {
 		return Chunk{}, fmt.Errorf("translate/gpt4o: unsupported pair %q->%q", source, target)
 	}
+
+	if !g.breaker.allow() {
+		if g.metrics != nil {
+			g.metrics.RecordErrorReason("translate", g.Name(), "circuit_open")
+		}
+		return Chunk{}, fmt.Errorf("translate/gpt4o: %w", errCircuitOpen)
+	}
+	breakerSettled := false
+	defer func() {
+		if !breakerSettled {
+			g.breaker.abort()
+		}
+	}()
 
 	var lastErr error
 	for attempt := 0; attempt < gpt4oMaxAttempts; attempt++ {
@@ -321,6 +344,8 @@ func (g *GPT4oTranslator) Translate(ctx context.Context, text string, source, ta
 
 		translated, usage, err := g.translateOnce(ctx, text, source, target)
 		if err == nil {
+			g.breaker.recordSuccess()
+			breakerSettled = true
 			g.recordCost(text, translated, usage)
 			return Chunk{
 				Text:       translated,
@@ -339,6 +364,10 @@ func (g *GPT4oTranslator) Translate(ctx context.Context, text string, source, ta
 
 		lastErr = err
 		if !isRetryableTranslateErr(err) || attempt == gpt4oMaxAttempts-1 {
+			if isRetryableTranslateErr(err) {
+				g.breaker.recordFailure()
+				breakerSettled = true
+			}
 			return Chunk{}, err
 		}
 	}

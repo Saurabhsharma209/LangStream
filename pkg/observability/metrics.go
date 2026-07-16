@@ -9,6 +9,14 @@
 // per-vendor cost tracking (RecordCost/CostTotal/CostPerMinute) on top of
 // the existing latency Recorder, plus a minimal human-readable dashboard
 // (see dashboard.go) that renders all three alongside each other.
+//
+// Sprint 10 adds RecordErrorReason/ReasonSnapshot: an optional, backward-
+// compatible way to tag *why* an error happened (e.g. reason="circuit_open"
+// for a circuit-breaker fast-fail that never attempted the vendor, vs. an
+// ordinary per-call vendor error recorded via plain RecordError). This
+// exists so the dashboard can distinguish "the vendor is confirmed down
+// and we're protecting latency" from "we had one flaky request" -- two
+// situations that otherwise produce identical-looking ErrorStats.
 package observability
 
 import (
@@ -44,16 +52,29 @@ type LatencyRecorder struct {
 	// keyed by vendor.
 	costTotals map[string]float64
 	costEvents map[string]int64
+
+	// reasonEvents backs RecordErrorReason/ReasonSnapshot: an optional,
+	// finer-grained breakdown of *why* an error was recorded, e.g.
+	// distinguishing a circuit-breaker fast-fail ("circuit_open") from an
+	// ordinary per-call vendor error. It is keyed separately from
+	// errorEvents/totalEvents above (which stay reason-agnostic) so
+	// existing ErrorRate/ErrorSnapshot semantics are completely unchanged
+	// by this field: reason tracking is strictly additive. Only non-empty
+	// reasons are recorded here; RecordError (reason "") never populates
+	// it, which is what keeps it backward compatible with every existing
+	// caller.
+	reasonEvents map[reasonKey]int64
 }
 
 // NewLatencyRecorder returns a ready-to-use LatencyRecorder.
 func NewLatencyRecorder() *LatencyRecorder {
 	return &LatencyRecorder{
-		samples:     make(map[string][]float64),
-		errorEvents: make(map[errorKey]int64),
-		totalEvents: make(map[errorKey]int64),
-		costTotals:  make(map[string]float64),
-		costEvents:  make(map[string]int64),
+		samples:      make(map[string][]float64),
+		errorEvents:  make(map[errorKey]int64),
+		totalEvents:  make(map[errorKey]int64),
+		costTotals:   make(map[string]float64),
+		costEvents:   make(map[string]int64),
+		reasonEvents: make(map[reasonKey]int64),
 	}
 }
 
@@ -170,6 +191,32 @@ type ErrorStats struct {
 	Rate float64
 }
 
+// reasonKey identifies a (pipeline stage, vendor, reason) triple for the
+// optional finer-grained error classification backed by
+// RecordErrorReason/ReasonSnapshot, e.g. {"mt", "gpt-4o", "circuit_open"}.
+type reasonKey struct {
+	Stage  string
+	Vendor string
+	Reason string
+}
+
+// ReasonStats is a point-in-time snapshot of how many times a specific,
+// caller-supplied reason (see RecordErrorReason) was recorded for a
+// single (stage, vendor) pair. It is a strict subset/breakdown of the
+// Errors count in the corresponding ErrorStats: every RecordErrorReason
+// call also counts toward ErrorStats via the same mechanism RecordError
+// uses, so Reasons never need to be summed into Errors/Rate separately --
+// they're already there. Reasons exists purely so a dashboard/alerting
+// layer can tell *why* a stage/vendor is erroring, most importantly
+// separating "circuit breaker open, fast-failing to protect latency"
+// from an ordinary per-call vendor error.
+type ReasonStats struct {
+	Stage  string
+	Vendor string
+	Reason string
+	Count  int64
+}
+
 // CostStats is a point-in-time snapshot of running cost totals for a single
 // vendor.
 type CostStats struct {
@@ -192,12 +239,39 @@ func (r *LatencyRecorder) RecordEvent(stage, vendor string) {
 // vendor, e.g. RecordError("asr_first_chunk", "deepgram") when a vendor call
 // errors out. It counts toward both the error total and the overall event
 // total (do not also call RecordEvent for the same occurrence).
+//
+// RecordError is exactly equivalent to RecordErrorReason(stage, vendor,
+// ""): a plain "an error happened" with no further classification.
+// Callers that can distinguish *why* the call failed -- most importantly,
+// a circuit breaker rejecting a call outright without even attempting the
+// vendor (see e.g. pkg/translate/circuitbreaker.go,
+// pkg/tts/circuitbreaker.go) versus an ordinary per-call vendor failure --
+// should call RecordErrorReason instead, so the dashboard can tell "the
+// vendor is confirmed down and we're protecting latency" apart from "we
+// had one flaky request" (see ReasonSnapshot). Every existing call site
+// that only calls RecordError keeps working completely unchanged.
 func (r *LatencyRecorder) RecordError(stage, vendor string) {
+	r.RecordErrorReason(stage, vendor, "")
+}
+
+// RecordErrorReason records one failed event for the given pipeline stage
+// and vendor, same as RecordError, and additionally tags it with reason: a
+// short, low-cardinality label describing *why* the call failed (e.g.
+// "circuit_open" for a circuit-breaker fast-fail that never attempted the
+// vendor, as opposed to an ordinary transient per-call error). An empty
+// reason behaves identically to RecordError and is not tracked in
+// ReasonSnapshot -- only non-empty reasons show up there -- which is what
+// makes this fully backward compatible: ErrorRate/ErrorSnapshot's totals
+// are completely unaffected by reason tracking either way.
+func (r *LatencyRecorder) RecordErrorReason(stage, vendor, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	key := errorKey{Stage: stage, Vendor: vendor}
 	r.errorEvents[key]++
 	r.totalEvents[key]++
+	if reason != "" {
+		r.reasonEvents[reasonKey{Stage: stage, Vendor: vendor, Reason: reason}]++
+	}
 }
 
 // ErrorRate returns the error rate for a (stage, vendor) pair, defined as
@@ -260,6 +334,50 @@ func (r *LatencyRecorder) ErrorSnapshot() []ErrorStats {
 			return out[i].Stage < out[j].Stage
 		}
 		return out[i].Vendor < out[j].Vendor
+	})
+	return out
+}
+
+// ReasonCount returns the number of RecordErrorReason calls recorded for a
+// (stage, vendor, reason) triple. It always returns 0 for reason "" (see
+// RecordErrorReason's doc comment on why plain RecordError calls are
+// intentionally not tracked here).
+func (r *LatencyRecorder) ReasonCount(stage, vendor, reason string) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reasonEvents[reasonKey{Stage: stage, Vendor: vendor, Reason: reason}]
+}
+
+// ReasonSnapshot returns a point-in-time list of ReasonStats for every
+// (stage, vendor, reason) triple that has recorded at least one
+// RecordErrorReason call with a non-empty reason, sorted by stage, then
+// vendor, then reason. This is the surface a dashboard/alerting layer can
+// use to separate "the circuit breaker is open and we're fast-failing to
+// protect latency" from an ordinary error captured by plain RecordError --
+// both still count toward ErrorSnapshot's Errors/Total/Rate for that
+// (stage, vendor), but only classified errors show up here, broken out by
+// reason.
+func (r *LatencyRecorder) ReasonSnapshot() []ReasonStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	out := make([]ReasonStats, 0, len(r.reasonEvents))
+	for key, count := range r.reasonEvents {
+		out = append(out, ReasonStats{
+			Stage:  key.Stage,
+			Vendor: key.Vendor,
+			Reason: key.Reason,
+			Count:  count,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Stage != out[j].Stage {
+			return out[i].Stage < out[j].Stage
+		}
+		if out[i].Vendor != out[j].Vendor {
+			return out[i].Vendor < out[j].Vendor
+		}
+		return out[i].Reason < out[j].Reason
 	})
 	return out
 }
@@ -394,6 +512,14 @@ func (r *LatencyRecorder) WriteText(w io.Writer) error {
 	b.WriteString("# TYPE langstream_stage_error_rate gauge\n")
 	for _, es := range errorSnap {
 		fmt.Fprintf(&b, "langstream_stage_error_rate{stage=%q,vendor=%q} %s\n", es.Stage, es.Vendor, formatFloat(es.Rate))
+	}
+
+	reasonSnap := r.ReasonSnapshot()
+
+	b.WriteString("# HELP langstream_stage_error_reason_total Total error events recorded per stage/vendor/reason (e.g. reason=\"circuit_open\" for circuit-breaker fast-fails that never attempted the vendor), a finer-grained breakdown of langstream_stage_errors_total.\n")
+	b.WriteString("# TYPE langstream_stage_error_reason_total counter\n")
+	for _, rs := range reasonSnap {
+		fmt.Fprintf(&b, "langstream_stage_error_reason_total{stage=%q,vendor=%q,reason=%q} %d\n", rs.Stage, rs.Vendor, rs.Reason, rs.Count)
 	}
 
 	costSnap := r.CostSnapshot()

@@ -27,6 +27,7 @@ type DashboardData struct {
 	GeneratedAt time.Time
 	Latency     []StageLatencySummary
 	Errors      []ErrorStats
+	Reasons     []ReasonStats
 	Costs       []CostStats
 }
 
@@ -36,6 +37,7 @@ func BuildDashboardData(r *LatencyRecorder) DashboardData {
 	data := DashboardData{
 		GeneratedAt: time.Now().UTC(),
 		Errors:      r.ErrorSnapshot(),
+		Reasons:     r.ReasonSnapshot(),
 		Costs:       r.CostSnapshot(),
 	}
 
@@ -101,6 +103,18 @@ caption { text-align: left; color: #666; font-size: 0.8rem; margin-bottom: 0.3re
 </table>
 {{ else }}
 <p class="empty">No error/event data recorded yet.</p>
+{{ end }}
+
+<h2>Error reasons (e.g. circuit-breaker fast-fails)</h2>
+{{ if .Reasons }}
+<table>
+<tr><th>Stage</th><th>Vendor</th><th>Reason</th><th>Count</th></tr>
+{{ range .Reasons }}
+<tr><td>{{ .Stage }}</td><td>{{ .Vendor }}</td><td>{{ .Reason }}</td><td>{{ .Count }}</td></tr>
+{{ end }}
+</table>
+{{ else }}
+<p class="empty">No classified error reasons recorded yet (all errors so far are untagged -- see RecordErrorReason).</p>
 {{ end }}
 
 <h2>Per-vendor cost</h2>

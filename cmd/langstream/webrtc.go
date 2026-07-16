@@ -43,8 +43,52 @@ const defaultWebRTCAddr = ":8081"
 // no-registration-required default suitable for local/developer testing
 // (both participants are typically on the same machine or the same LAN
 // during a test, so a TURN relay is not needed); a real deployment behind
-// restrictive NATs might need to add a TURN server via --stun.
+// restrictive NATs might need to add a TURN server via --stun, plus
+// --turn-username/--turn-credential below if that server requires
+// authentication (real TURN servers, unlike STUN, almost always do --
+// see buildICEServers).
 const defaultSTUNServer = "stun:stun.l.google.com:19302"
+
+// iceServerForURL builds the webrtc.ICEServer for a single STUN/TURN URL.
+// Username/Credential are attached only when u's scheme is turn: or
+// turns: (case-insensitive) and both turnUsername and turnCredential are
+// non-empty -- STUN doesn't take credentials at all (RFC 5389), and a
+// half-supplied username/credential pair (e.g. only one flag set) is
+// treated as "not configured" rather than sent partially, since a TURN
+// server would just reject an incomplete credential anyway.
+//
+// STUN/TURN URLs are not hierarchical (RFC 7064/7065 -- there's no "//"
+// after the scheme, e.g. "turn:example.com:3478"), so net/url.Parse
+// doesn't reliably extract the scheme the way it would for an http(s) URL;
+// a simple prefix check is used instead.
+func iceServerForURL(u, turnUsername, turnCredential string) webrtc.ICEServer {
+	server := webrtc.ICEServer{URLs: []string{u}}
+	lower := strings.ToLower(u)
+	isTURN := strings.HasPrefix(lower, "turn:") || strings.HasPrefix(lower, "turns:")
+	if isTURN && turnUsername != "" && turnCredential != "" {
+		server.Username = turnUsername
+		server.Credential = turnCredential
+	}
+	return server
+}
+
+// buildICEServers splits the comma-separated stunServers list and builds
+// one webrtc.ICEServer per non-empty entry, attaching turnUsername/
+// turnCredential to turn:/turns: entries only (see iceServerForURL).
+// stun:/stuns: entries, and turn:/turns: entries when no credential flags
+// were supplied, are left exactly as before this function existed --
+// anonymous, URL-only ICEServer entries.
+func buildICEServers(stunServers, turnUsername, turnCredential string) []webrtc.ICEServer {
+	var iceServers []webrtc.ICEServer
+	for _, u := range strings.Split(stunServers, ",") {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		iceServers = append(iceServers, iceServerForURL(u, turnUsername, turnCredential))
+	}
+	return iceServers
+}
 
 func runWebRTC(args []string) error {
 	fs := flag.NewFlagSet("webrtc", flag.ContinueOnError)
@@ -53,6 +97,8 @@ func runWebRTC(args []string) error {
 	callerLang := fs.String("caller-lang", "hi", "language the \"caller\" role speaks and hears")
 	agentLang := fs.String("agent-lang", "en", "language the \"agent\" role speaks and hears")
 	stunServers := fs.String("stun", defaultSTUNServer, "comma-separated STUN/TURN server URLs for ICE (empty to disable)")
+	turnUsername := fs.String("turn-username", "", "username for any turn:/turns: URL in --stun that requires long-term-credential auth (RFC 5766); ignored by stun:/stuns: URLs")
+	turnCredential := fs.String("turn-credential", "", "credential/password paired with --turn-username; both must be set for either to take effect")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -61,14 +107,7 @@ func runWebRTC(args []string) error {
 	mtName := resolveBackend(*backend, envMTBackend)
 	ttsName := resolveBackend(*backend, envTTSBackend)
 
-	var iceServers []webrtc.ICEServer
-	for _, u := range strings.Split(*stunServers, ",") {
-		u = strings.TrimSpace(u)
-		if u == "" {
-			continue
-		}
-		iceServers = append(iceServers, webrtc.ICEServer{URLs: []string{u}})
-	}
+	iceServers := buildICEServers(*stunServers, *turnUsername, *turnCredential)
 
 	mgr := webrtcgw.NewManager(func(ctx context.Context) (*langstream.Session, error) {
 		return newSession(ctx, asrName, mtName, ttsName, langstream.Language(*callerLang), langstream.Language(*agentLang))
