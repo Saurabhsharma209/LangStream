@@ -170,6 +170,64 @@ func placeholderPCM() []byte {
 //   - hinglish_insertion_trailing_word_repeat_call_end:                            WER 1/5   (1 insertion / 5 words)
 //   - hinglish_long_utterance_substitution_and_deletion_mixed_complaint_escalation: WER 2/24  (1 substitution + 1 deletion / 24 words)
 //   - hinglish_long_utterance_two_insertions_delivery_confirmation:                WER 2/21  (2 insertions / 21 words)
+//
+// Sprint 2026-07-17 (QA) adds six further entries covering error shapes
+// the corpus still didn't exercise, found while auditing existing
+// coverage against wer.go's own documented behaviors and edge cases
+// (see wer.go's package/function doc comments):
+//
+//   - an isolated leading-position insertion (every existing insertion
+//     entry duplicates an internal or trailing word;
+//     hinglish_insertion_trailing_word_repeat_call_end covers the
+//     trailing edge, but nothing isolates a duplicate at the very start
+//     of the utterance on its own -- hinglish_two_insertions_confirmation_repeat
+//     has a leading duplicate too, but paired with a second, unrelated
+//     mid-sentence insertion, not isolated);
+//
+//   - a word-splitting case, where the fake ASR splits a single
+//     reference word into two hypothesis words ("helpline" ->
+//     "help line") -- the corpus had substitutions, deletions, and
+//     stutter/hallucination insertions, but no compound-word-splitting
+//     shape, which costs one substitution plus one insertion under
+//     WordErrorRate's edit-distance alignment;
+//
+//   - a word-merging case, the reverse of the above: two adjacent
+//     reference words merged into one hypothesis word ("up date" ->
+//     "update"), costing one deletion plus one substitution;
+//
+//   - an adjacent-word transposition/swap, where the fake ASR reports
+//     two adjacent words in reverse order -- WordErrorRate has no "swap"
+//     edit operation, so this costs two substitutions under the
+//     standard Levenshtein alignment, a shape distinct from this
+//     corpus's existing (non-adjacent) two-substitution entries;
+//
+//   - a case-sensitivity mismatch, directly exercising the caveat
+//     documented on WordErrorRate itself ("no punctuation stripping or
+//     case-folding is performed, so 'Hello,' and 'hello' are different
+//     tokens"): a sentence-initial capitalized word transcribed in
+//     lowercase counts as a full substitution even though it is the same
+//     word semantically -- no existing entry demonstrates this
+//     documented limitation concretely;
+//
+//   - a severe-hallucination case demonstrating WordErrorRate's
+//     documented WER > 1.0 behavior ("WordErrorRate can exceed 1.0 when
+//     hypothesis has many more words than reference") -- every existing
+//     corpus entry has WER <= 1.0 (the highest so far is 2/5 = 0.4); this
+//     entry's fake ASR hallucinates enough extra, distinct words around
+//     a short real utterance that the edit distance (5) exceeds the
+//     reference word count (3), giving WER = 5/3.
+//
+//   - hinglish_insertion_leading_word_repeat_call_open:              WER 1/6  (1 insertion / 6 words)
+//
+//   - hinglish_word_splitting_helpline_compound:                     WER 2/6  (1 substitution + 1 insertion / 6 words)
+//
+//   - hinglish_word_merging_update_profile_request:                  WER 2/7  (1 deletion + 1 substitution / 7 words)
+//
+//   - hinglish_adjacent_word_transposition_balance_check:            WER 2/6  (2 substitutions / 6 words)
+//
+//   - hinglish_case_sensitivity_capitalized_sir_mismatch:            WER 1/6  (1 substitution / 6 words)
+//
+//   - hinglish_severe_hallucination_wer_exceeds_one_listen_request:  WER 5/3  (5 insertions / 3 words, WER > 1.0)
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -694,6 +752,115 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir aapka order successfully deliver ho gaya hai aur payment bhi successfully complete ho chuka hai dhanyavaad aapka time ke liye",
 			Hypothesis: "sir aapka order successfully deliver ho ho gaya hai aur payment bhi successfully complete ho chuka hai hai dhanyavaad aapka time ke liye",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-07-17 (QA) additions below: six more entries per
+		// the doc comment above (an isolated leading-position insertion, a
+		// word-splitting case, a word-merging case, an adjacent-word
+		// transposition, a case-sensitivity mismatch, and a
+		// severe-hallucination WER>1.0 case).
+
+		{
+			// A call-connection confirmation where the fake ASR
+			// duplicates the very first word, "sir" -- the leading-edge
+			// counterpart to hinglish_insertion_trailing_word_repeat_call_end
+			// (which duplicates the last word). This corpus's other
+			// leading-duplicate shape
+			// (hinglish_two_insertions_confirmation_repeat) always pairs
+			// it with a second, unrelated mid-sentence insertion; this
+			// entry isolates a duplicated leading word as the sentence's
+			// only error.
+			Name:       "hinglish_insertion_leading_word_repeat_call_open",
+			Language:   "hi",
+			Reference:  "sir aapka call connect ho gaya",
+			Hypothesis: "sir sir aapka call connect ho gaya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A customer-care sentence where the fake ASR splits the
+			// single compound word "helpline" into two separate words,
+			// "help line" -- a word-splitting failure mode this corpus
+			// hadn't covered (distinct from every existing substitution/
+			// deletion/insertion entry, none of which change the total
+			// word-to-token mapping this way). Under WordErrorRate's
+			// edit-distance alignment this costs one substitution
+			// ("helpline" -> "help") plus one insertion ("line").
+			Name:       "hinglish_word_splitting_helpline_compound",
+			Language:   "hi",
+			Reference:  "customer care helpline number yeh hai",
+			Hypothesis: "customer care help line number yeh hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The reverse of the word-splitting case above: a profile-
+			// update request where the fake ASR merges the two reference
+			// words "up date" into the single hypothesis word "update" --
+			// a word-merging failure mode, also not previously covered.
+			// This costs one deletion (of one of the two source words)
+			// plus one substitution (turning the other into "update").
+			Name:       "hinglish_word_merging_update_profile_request",
+			Language:   "hi",
+			Reference:  "sir apna profile up date kar lijiye",
+			Hypothesis: "sir apna profile update kar lijiye",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A balance-check request where the fake ASR reports two
+			// adjacent words, "balance" and "check", in swapped order.
+			// WordErrorRate's standard Levenshtein alignment has no
+			// "transposition" operation, so a pure adjacent-word swap
+			// costs two substitutions -- a distinct shape from this
+			// corpus's existing two-substitution entries
+			// (hinglish_account_block_query_two_substitutions,
+			// hinglish_long_utterance_two_substitutions_refund_status),
+			// which each mishear two different, non-adjacent word pairs
+			// rather than reordering one adjacent pair.
+			Name:       "hinglish_adjacent_word_transposition_balance_check",
+			Language:   "hi",
+			Reference:  "sir pehle mera balance check kijiye",
+			Hypothesis: "sir pehle mera check balance kijiye",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// Directly exercises the case-sensitivity caveat documented
+			// on WordErrorRate itself: no case-folding is performed, so
+			// the same word in different casing counts as a full
+			// substitution. Here, the fake ASR transcribes the
+			// sentence-initial "Sir" (capitalized, as a real transcript
+			// might render the start of a sentence) as lowercase "sir" --
+			// semantically identical, but WordErrorRate correctly (per
+			// its own documented behavior) counts it as one substitution.
+			// No existing corpus entry demonstrates this documented
+			// limitation concretely.
+			Name:       "hinglish_case_sensitivity_capitalized_sir_mismatch",
+			Language:   "hi",
+			Reference:  "Sir aapka order confirm ho gaya",
+			Hypothesis: "sir aapka order confirm ho gaya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// Demonstrates WordErrorRate's documented WER > 1.0 behavior
+			// ("WordErrorRate can exceed 1.0 when hypothesis has many
+			// more words than reference") -- every existing corpus entry
+			// has WER <= 1.0 (the highest so far is 2/5 = 0.4). Here a
+			// short, real three-word request ("sir suniye please" -- "sir,
+			// please listen") is surrounded by enough fake-ASR
+			// hallucinated, distinct extra words (modeling a severely
+			// noisy/cross-talking line) that the minimal edit distance
+			// (5, all insertions since every reference word still
+			// appears, in order, as a subsequence of the hypothesis)
+			// exceeds the 3-word reference length, giving WER = 5/3.
+			Name:       "hinglish_severe_hallucination_wer_exceeds_one_listen_request",
+			Language:   "hi",
+			Reference:  "sir suniye please",
+			Hypothesis: "haan sir thoda suniye na please theek hai",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

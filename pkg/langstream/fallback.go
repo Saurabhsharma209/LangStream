@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/exotel/langstream/pkg/observability"
+	"github.com/exotel/langstream/pkg/translate"
 	"github.com/exotel/langstream/pkg/tts"
 )
 
@@ -336,6 +337,30 @@ func recordFallback(rec *observability.LatencyRecorder, stage, vendor string) {
 		vendor = "unknown"
 	}
 	rec.RecordError(stage, vendor)
+}
+
+// recordFallbackErr behaves like recordFallback, but additionally tags
+// the event with reason "circuit_open" (via RecordErrorReason) when err
+// indicates the vendor client's own circuit breaker rejected the call
+// locally (translate.ErrCircuitOpen / tts.ErrCircuitOpen, or an error
+// wrapping either -- see errors.Is), rather than an ordinary per-request
+// failure. Every other kind of err (including nil, which shouldn't
+// normally happen here but is handled defensively) still records with
+// the same empty reason recordFallback would have used, so this is a
+// strict superset of recordFallback's behavior for non-circuit-open
+// failures.
+func recordFallbackErr(rec *observability.LatencyRecorder, stage, vendor string, err error) {
+	if rec == nil {
+		return
+	}
+	if vendor == "" {
+		vendor = "unknown"
+	}
+	reason := ""
+	if errors.Is(err, translate.ErrCircuitOpen) || errors.Is(err, tts.ErrCircuitOpen) {
+		reason = "circuit_open"
+	}
+	rec.RecordErrorReason(stage, vendor, reason)
 }
 
 // recordSuccessMetric calls rec.RecordEvent(stage, vendor) if rec is

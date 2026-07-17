@@ -1,5 +1,158 @@
 # LangStream Dev Log
 
+## 2026-07-17 (Sprint 11: circuit-open reason propagated to orchestrator, race-pattern audit, WER corpus growth) — scheduled run
+
+### Agents run
+PE, Tech (coordinated pair), QA (three agents, in parallel). SRE not
+needed today -- no scoped SRE-owned gap was found during planning (CI/
+Docker/observability all clean since Sprint 10's audit). Week 3 remains 5
+of 6 done (real-PSTN jitter tuning still needs live traffic) and Week 4 is
+still entirely gated on Saurabh's anchor-customer/live-traffic decision --
+unchanged since Sprint 8, neither closeable by agent automation today. Per
+Sprint 10's own "Tomorrow" list, today closed out item #2 exactly
+(tagging circuit-open failures with `RecordErrorReason(..., "circuit_open")`
+at the `pkg/langstream` orchestrator level, not just the vendor-client
+level Sprint 10 already covered), plus continued the standing
+race-pattern-audit and WER-corpus-growth follow-ups from Sprint 8/9/10.
+
+### Repo health at start
+Clean: `go build ./...`, `go vet ./...`, `go test ./... -race` (all 12
+packages), `gofmt -l .` clean, before any changes. ClearStream checked
+(`git ls-remote --tags`): still only `v0.1.0` tagged, no coordination
+action needed (today's scope never touched `pkg/rtp`/duplex-RTP).
+
+### Sandbox note (environment, not a code bug)
+Same recurring class of issue as Sprints 8-10, worse this run: `/sessions`
+(where `$HOME` lives) was at 100% (0 bytes free) for the *entire* run --
+literally could not write a single byte to `$HOME`, not even before
+starting. Additionally, unlike prior runs, `/tmp` itself is a persistent,
+multi-tenant scratch area that carries over **across scheduled runs, not
+just within a session** -- found 60+ leftover directories/files from prior
+runs (some from this repo's own past sprints, e.g. `/tmp/langstream_run`,
+`/tmp/ls-em-work`, `/tmp/mywork`, `/tmp/mygo`, several hundred MB each),
+almost all sticky-bit/other-UID protected so this run's user could not
+delete them even with `rm -rf` (no `sudo` available either -- confirmed,
+`sudo` itself refuses to run in this container). Root filesystem (`/`) was
+at 96-97% full (record low: 387-434MB free) for this entire run purely
+from that accumulated cruft, not from this run's own usage. Workaround:
+same pattern as Sprint 9/10 -- did the entire run's work in a fresh,
+uniquely-named own-user-owned directory (`/tmp/ls-work/LangStream`) rather
+than fighting for space in already-occupied shared paths, and reused a
+pre-existing extracted go1.22.5 toolchain already sitting (read-only, but
+executable) at `/tmp/gohome/go` instead of extracting a fresh copy from
+`/tmp/go.tar.gz` (saves ~250-300MB of the very tight budget). This makes
+4 consecutive scheduled runs (Sprint 8, 9, 10, 11) hitting variations of
+this same disk-pressure problem, and it is visibly getting worse each
+time (Sprint 8: 96-99% full; Sprint 9-10: `/sessions` fully out; Sprint
+11: `/` itself now also down to <400MB free from accumulated `/tmp`
+cruft this run's own user can't clean up). Flagging again, more urgently:
+this now looks like it needs a fix outside this repo (e.g. the
+automation's sandbox should either start from a genuinely clean image
+each run, or run a privileged/owner-level cleanup of stale `/tmp` state
+between runs) rather than each run continuing to route around a shared
+resource that never gets reclaimed.
+
+### Changes
+
+**PE -- exported circuit-breaker sentinel errors
+(`pkg/translate/circuitbreaker.go`, `pkg/tts/circuitbreaker.go`)**
+Previously-unexported `errCircuitOpen` in both packages renamed to
+exported `ErrCircuitOpen` (identical message, zero behavior change) --
+`pkg/translate/gpt4o.go`, `pkg/tts/cartesia.go`, `pkg/tts/elevenlabs.go`
+updated to the new name. This is what makes a circuit-open rejection
+distinguishable via `errors.Is` from any other package, which is exactly
+what Tech's change (below) needed. 3 new tests
+(`TestCircuitBreaker_OpenErrorIsErrCircuitOpen` and its Cartesia/
+ElevenLabs counterparts) confirm `errors.Is(err, ErrCircuitOpen)` holds on
+the real wrapped fail-fast error each vendor client returns.
+
+**Tech -- circuit-open reason now tagged at the orchestrator level too
+(`pkg/langstream/fallback.go`, `pkg/langstream/session.go`)**
+Sprint 10 made circuit-open failures visible on the dashboard, but only
+at the vendor-client layer (`pkg/tts/cartesia.go` etc. calling
+`RecordErrorReason(..., "circuit_open")` directly) -- `pkg/langstream/
+fallback.go`'s `recordFallback` helper, called from `session.go`'s
+translate-error and TTS-synthesize-error paths, always recorded a plain,
+reason-less `RecordError`, so the orchestrator layer itself couldn't tell
+"my own circuit breaker just rejected this" from any other failure even
+though the returned `err` carried that information. Added
+`recordFallbackErr(rec, stage, vendor, err)` alongside the existing
+`recordFallback`: checks `errors.Is(err, translate.ErrCircuitOpen) ||
+errors.Is(err, tts.ErrCircuitOpen)` and tags `"circuit_open"` when true,
+plain/empty reason otherwise -- byte-for-byte the same recording as
+before for every non-circuit-open failure. Wired into the two `session.go`
+call sites that actually have an `err` in scope (translate-error, TTS-
+synthesize-error); the TTS-stall branch (no underlying `err`, a timeout
+condition) and ASR-confidence/leg-degraded branches are unchanged, still
+plain `recordFallback`. 8 new tests in `fallback_test.go` cover both
+circuit-open cases, both ordinary-error regression cases (proving old
+behavior is unchanged), plus nil-recorder/empty-vendor/nil-err edges.
+Coordinated cleanly with PE in parallel -- confirmed via `git diff --stat`
+that file sets never overlapped, and the PE-owned exported symbols were
+already present (no wait/retry needed) by the time Tech's build ran.
+
+**QA -- race-pattern audit (no fix needed, real negative result) + WER
+corpus growth (35 -> 41)**
+Per Sprint 8's outstanding "Tomorrow" item, audited every `*_test.go` in
+the repo for the same test-synchronization race class found and fixed
+that day (asserting state immediately after a background goroutine's
+channel send, without accounting for that goroutine's own subsequent
+"then update this other state" step). Examined ~20 candidate files;
+everything else was already correctly synchronized (mutex/WaitGroup/
+channel-close, or reads only the value actually delivered by the
+send/callback itself, nothing "downstream" of it). One structurally
+similar case was found -- `dashboard_latency_integration_test.go`'s two
+tests, which read HTTP dashboard state immediately after
+`drainUntilFinal` on the same `forwardAudio` goroutine the original bug
+involved -- but 500+ `-race` runs (`-count=20/30/100`, varied `-cpu=1,2,4,8`)
+came back clean every time, likely because the real httptest.Server
+round-trip between the channel receive and the assertion adds enough real
+wall-clock delay to close the original race window. Correctly not
+"fixed" (nothing to fix), flagged here for visibility rather than left
+silent. WER corpus grew 35 -> 41 with 6 new entries covering shapes not
+previously represented: word-splitting ("helpline" -> "help line"),
+word-merging ("up date" -> "update"), adjacent-word transposition,
+case-sensitivity mismatch, and the corpus's first WER > 1.0 case (a
+severe hallucination where the hypothesis is longer than the reference).
+`corpus_test.go` and root `wer_measurement_test.go` updated in sync
+(count guards, `want`/`wantWER` maps, fatal-message name lists).
+
+### Bugs found/fixed
+None this run -- all three workstreams' changes were additive/well-scoped
+and verified clean on the first integration pass; the QA audit's one real
+finding (above) was a negative result (test proven safe), not a bug.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+- `go test ./... -race -count=3` -- all 12 packages pass, no flakes
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- Real-condition jitter-buffer tuning against live PSTN traces -- still
+  needs live/pilot call traffic (Week 4). Unchanged.
+- Week 4 (live pilot, real WER/latency/CSAT, go/no-go) still cannot start
+  without Saurabh's decision on anchor customer(s) / live traffic --
+  unchanged.
+- Docker-build verification, legal review of `docs/compliance.md` -- both
+  unchanged, still need a human.
+- The recurring sandbox disk-pressure pattern (now 4 scheduled runs in a
+  row, visibly worsening) -- see "Sandbox note" above. Flagging again,
+  more urgently, as something that likely needs a fix outside this repo.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that supersedes everything below.
+2. Absent that: `dashboard_latency_integration_test.go`'s two tests
+   (flagged above) are a latent-but-unconfirmed race -- not urgent (500+
+   clean runs), but worth an occasional re-check if the repo's real HTTP
+   round-trip timing ever changes (e.g. if `httptest.Server` is ever
+   swapped for something faster/in-process).
+3. Continue opportunistic hardening (WER corpus, jitter stress tests) if
+   no higher-priority item exists.
+4. The sandbox disk-pressure pattern (see above) has now recurred and
+   worsened across 4 consecutive runs -- worth raising directly with
+   Saurabh rather than continuing to silently route around it each time.
+
 ## 2026-07-16 (Sprint 10: vendor circuit breakers, TURN credential support, cost-recording test + WER growth) — scheduled run
 
 ### Agents run

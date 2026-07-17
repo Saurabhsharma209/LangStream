@@ -2,6 +2,7 @@ package translate
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,6 +70,42 @@ func TestCircuitBreaker_OpensAfterConsecutiveFullExhaustions(t *testing.T) {
 	}
 	if elapsed >= gpt4oRetryBaseDelay {
 		t.Errorf("elapsed = %v while breaker open, want well under one backoff delay (%v) since no retries should happen", elapsed, gpt4oRetryBaseDelay)
+	}
+}
+
+// TestCircuitBreaker_OpenErrorIsErrCircuitOpen confirms that the error
+// returned when the breaker rejects a call satisfies errors.Is against
+// the exported ErrCircuitOpen sentinel, even though Translate wraps it
+// with vendor-specific context (see gpt4o.go). Callers outside this
+// package (e.g. the orchestrator in pkg/langstream) rely on this to
+// distinguish "our own circuit breaker just rejected this call" from any
+// other Translate failure.
+func TestCircuitBreaker_OpenErrorIsErrCircuitOpen(t *testing.T) {
+	srv, _ := alwaysFailServer(t)
+	defer srv.Close()
+
+	const threshold = 1
+	tr, err := NewGPT4oTranslator(
+		WithBaseURL(srv.URL), WithAPIKey("test-api-key"),
+		WithCircuitBreaker(threshold, 10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewGPT4oTranslator: %v", err)
+	}
+
+	// Trip the breaker.
+	if _, err := tr.Translate(context.Background(), "namaste", "hi", "en", true); err == nil {
+		t.Fatal("expected the first call to fail (persistent 500s), got nil")
+	}
+
+	// The next call should be rejected by the (now open) breaker with an
+	// error that wraps ErrCircuitOpen.
+	_, err = tr.Translate(context.Background(), "namaste", "hi", "en", true)
+	if err == nil {
+		t.Fatal("expected an error while the breaker is open, got nil")
+	}
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Errorf("errors.Is(err, ErrCircuitOpen) = false for err = %v, want true", err)
 	}
 }
 

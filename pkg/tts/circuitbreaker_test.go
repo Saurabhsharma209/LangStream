@@ -2,6 +2,7 @@ package tts
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,6 +127,39 @@ func TestCartesiaCircuitBreaker_OpensAfterConsecutiveFullExhaustions(t *testing.
 	}
 	if elapsed >= cartesiaRetryBaseDelay {
 		t.Errorf("elapsed = %v while breaker open, want well under one backoff delay (%v)", elapsed, cartesiaRetryBaseDelay)
+	}
+}
+
+// TestCartesiaCircuitBreaker_OpenErrorIsErrCircuitOpen confirms that the
+// error returned when Cartesia's breaker rejects a call satisfies
+// errors.Is against the exported ErrCircuitOpen sentinel, even though
+// SynthesizeStream wraps it with vendor-specific context (see
+// cartesia.go). Callers outside this package (e.g. the orchestrator in
+// pkg/langstream) rely on this to distinguish "our own circuit breaker
+// just rejected this call" from any other SynthesizeStream failure.
+func TestCartesiaCircuitBreaker_OpenErrorIsErrCircuitOpen(t *testing.T) {
+	var failing int32 = 1
+	srv := newToggleCartesiaServer(t, &failing)
+	defer srv.Close()
+
+	t.Setenv("CARTESIA_API_KEY", "test-key")
+	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
+	const threshold = 1
+	c, err := NewCartesiaSynthesizer(WithBaseURL(wsURL), WithDialTimeout(2*time.Second), WithCircuitBreaker(threshold, 10*time.Second))
+	if err != nil {
+		t.Fatalf("NewCartesiaSynthesizer: %v", err)
+	}
+
+	if _, err := c.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish}); err == nil {
+		t.Fatal("expected the first call to fail, got nil")
+	}
+
+	_, err = c.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err == nil {
+		t.Fatal("expected an error while the breaker is open, got nil")
+	}
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Errorf("errors.Is(err, ErrCircuitOpen) = false for err = %v, want true", err)
 	}
 }
 
@@ -301,6 +335,36 @@ func TestElevenLabsCircuitBreaker_OpensAfterConsecutiveFullExhaustions(t *testin
 	}
 	if elapsed >= elevenlabsRetryBaseDelay {
 		t.Errorf("elapsed = %v while breaker open, want well under one backoff delay (%v)", elapsed, elevenlabsRetryBaseDelay)
+	}
+}
+
+// TestElevenLabsCircuitBreaker_OpenErrorIsErrCircuitOpen confirms that
+// the error returned when ElevenLabs's breaker rejects a call satisfies
+// errors.Is against the exported ErrCircuitOpen sentinel, even though
+// SynthesizeStream wraps it with vendor-specific context (see
+// elevenlabs.go).
+func TestElevenLabsCircuitBreaker_OpenErrorIsErrCircuitOpen(t *testing.T) {
+	var failing int32 = 1
+	srv := newToggleElevenLabsServer(t, &failing, []byte{1, 2, 3, 4})
+	defer srv.Close()
+
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	const threshold = 1
+	e, err := NewElevenLabsSynthesizer(WithElevenLabsBaseURL(srv.URL), WithElevenLabsDialTimeout(2*time.Second), WithElevenLabsCircuitBreaker(threshold, 10*time.Second))
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+
+	if _, err := e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish}); err == nil {
+		t.Fatal("expected the first call to fail, got nil")
+	}
+
+	_, err = e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if err == nil {
+		t.Fatal("expected an error while the breaker is open, got nil")
+	}
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Errorf("errors.Is(err, ErrCircuitOpen) = false for err = %v, want true", err)
 	}
 }
 

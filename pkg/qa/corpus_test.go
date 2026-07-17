@@ -85,6 +85,12 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // a deletion together, and a long utterance with two insertions) — see
 // FixedCorpus's doc comment for each entry's reasoning and hand-computed
 // WER.
+//
+// Sprint 2026-07-17 (QA): includes six further entries (an isolated
+// leading-position insertion, a word-splitting case, a word-merging case,
+// an adjacent-word transposition, a case-sensitivity mismatch, and a
+// severe-hallucination case demonstrating WER > 1.0) — see FixedCorpus's
+// doc comment for each entry's reasoning and hand-computed WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -134,6 +140,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_insertion_trailing_word_repeat_call_end":                             1.0 / 5.0,
 		"hinglish_long_utterance_substitution_and_deletion_mixed_complaint_escalation": 2.0 / 24.0,
 		"hinglish_long_utterance_two_insertions_delivery_confirmation":                 2.0 / 21.0,
+
+		// Sprint 2026-07-17 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_insertion_leading_word_repeat_call_open":             1.0 / 6.0,
+		"hinglish_word_splitting_helpline_compound":                    2.0 / 6.0,
+		"hinglish_word_merging_update_profile_request":                 2.0 / 7.0,
+		"hinglish_adjacent_word_transposition_balance_check":           2.0 / 6.0,
+		"hinglish_case_sensitivity_capitalized_sir_mismatch":           1.0 / 6.0,
+		"hinglish_severe_hallucination_wer_exceeds_one_listen_request": 5.0 / 3.0,
 	}
 
 	entries := FixedCorpus()

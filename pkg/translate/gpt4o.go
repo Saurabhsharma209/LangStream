@@ -320,7 +320,7 @@ func (g *GPT4oTranslator) Translate(ctx context.Context, text string, source, ta
 		if g.metrics != nil {
 			g.metrics.RecordErrorReason("translate", g.Name(), "circuit_open")
 		}
-		return Chunk{}, fmt.Errorf("translate/gpt4o: %w", errCircuitOpen)
+		return Chunk{}, fmt.Errorf("translate/gpt4o: %w", ErrCircuitOpen)
 	}
 	breakerSettled := false
 	defer func() {

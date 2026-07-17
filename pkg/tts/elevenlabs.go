@@ -334,7 +334,7 @@ func (e *ElevenLabsSynthesizer) SynthesizeStream(ctx context.Context, text strin
 		if e.metrics != nil {
 			e.metrics.RecordErrorReason("tts", e.Name(), "circuit_open")
 		}
-		return nil, fmt.Errorf("tts/elevenlabs: %w", errCircuitOpen)
+		return nil, fmt.Errorf("tts/elevenlabs: %w", ErrCircuitOpen)
 	}
 	breakerSettled := false
 	defer func() {

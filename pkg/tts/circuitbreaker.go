@@ -21,10 +21,10 @@ const (
 	defaultBreakerCooldown         = 10 * time.Second
 )
 
-// errCircuitOpen is wrapped (with vendor-specific context) and returned
+// ErrCircuitOpen is wrapped (with vendor-specific context) and returned
 // by SynthesizeStream when a call is rejected because its circuit
 // breaker is open.
-var errCircuitOpen = fmt.Errorf("circuit breaker open: too many consecutive failures, cooling down")
+var ErrCircuitOpen = fmt.Errorf("circuit breaker open: too many consecutive failures, cooling down")
 
 // circuitBreaker is a small, thread-safe fail-fast breaker layered on
 // top of SynthesizeStream's retry-with-backoff logic (see backoff.go).

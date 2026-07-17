@@ -314,7 +314,7 @@ func (c *CartesiaSynthesizer) SynthesizeStream(ctx context.Context, text string,
 		if c.metrics != nil {
 			c.metrics.RecordErrorReason("tts", c.Name(), "circuit_open")
 		}
-		return nil, fmt.Errorf("tts/cartesia: %w", errCircuitOpen)
+		return nil, fmt.Errorf("tts/cartesia: %w", ErrCircuitOpen)
 	}
 	breakerSettled := false
 	defer func() {

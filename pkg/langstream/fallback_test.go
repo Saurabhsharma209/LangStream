@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/exotel/langstream/pkg/observability"
+	"github.com/exotel/langstream/pkg/translate"
 	"github.com/exotel/langstream/pkg/tts"
 )
 
@@ -370,5 +371,100 @@ func TestRecordFallbackEmptyVendorFallsBackToUnknown(t *testing.T) {
 	recordFallback(rec, stageLegDegraded, "")
 	if got := rec.ErrorCount(stageLegDegraded, "unknown"); got != 1 {
 		t.Fatalf("ErrorCount(unknown) = %d, want 1", got)
+	}
+}
+
+// --- recordFallbackErr: like recordFallback, but additionally tags
+// "circuit_open" (via RecordErrorReason) when the given err indicates the
+// vendor client's own circuit breaker rejected the call locally
+// (translate.ErrCircuitOpen / tts.ErrCircuitOpen, or an error wrapping
+// either).
+
+func TestRecordFallbackErrTranslateCircuitOpenRecordsReason(t *testing.T) {
+	rec := observability.NewLatencyRecorder()
+	err := fmt.Errorf("translate/gpt4o: %w", translate.ErrCircuitOpen)
+
+	recordFallbackErr(rec, stageTranslate, "gpt4o", err)
+
+	if got := rec.ReasonCount(stageTranslate, "gpt4o", "circuit_open"); got != 1 {
+		t.Fatalf("ReasonCount(circuit_open) = %d, want 1", got)
+	}
+	// A RecordErrorReason call must still count as an ordinary error too
+	// (see ReasonStats's doc comment: Reasons is a breakdown of Errors,
+	// not tracked separately).
+	if got := rec.ErrorCount(stageTranslate, "gpt4o"); got != 1 {
+		t.Fatalf("ErrorCount = %d, want 1", got)
+	}
+}
+
+func TestRecordFallbackErrTTSCircuitOpenRecordsReason(t *testing.T) {
+	rec := observability.NewLatencyRecorder()
+	err := fmt.Errorf("tts/cartesia: %w", tts.ErrCircuitOpen)
+
+	recordFallbackErr(rec, stageTTS, "cartesia", err)
+
+	if got := rec.ReasonCount(stageTTS, "cartesia", "circuit_open"); got != 1 {
+		t.Fatalf("ReasonCount(circuit_open) = %d, want 1", got)
+	}
+	if got := rec.ErrorCount(stageTTS, "cartesia"); got != 1 {
+		t.Fatalf("ErrorCount = %d, want 1", got)
+	}
+}
+
+func TestRecordFallbackErrOrdinaryErrorRecordsNoReason(t *testing.T) {
+	rec := observability.NewLatencyRecorder()
+
+	recordFallbackErr(rec, stageTranslate, "gpt4o", errors.New("some transient network blip"))
+
+	if got := rec.ReasonCount(stageTranslate, "gpt4o", "circuit_open"); got != 0 {
+		t.Fatalf("ReasonCount(circuit_open) = %d, want 0 for an ordinary error", got)
+	}
+	// The plain empty-reason count (recorded via RecordErrorReason(...,
+	// "")) is intentionally not tracked in ReasonSnapshot/ReasonCount --
+	// see RecordErrorReason's doc comment -- but the failure must still
+	// show up as an ordinary ErrorCount/EventCount, identical to what
+	// recordFallback would have produced.
+	if got := rec.ErrorCount(stageTranslate, "gpt4o"); got != 1 {
+		t.Fatalf("ErrorCount = %d, want 1", got)
+	}
+	if got := rec.ReasonCount(stageTranslate, "gpt4o", ""); got != 0 {
+		t.Fatalf("ReasonCount(\"\") = %d, want 0 (empty reason never tracked)", got)
+	}
+}
+
+func TestRecordFallbackErrOrdinaryTTSErrorRecordsNoReason(t *testing.T) {
+	rec := observability.NewLatencyRecorder()
+
+	recordFallbackErr(rec, stageTTS, "elevenlabs", errors.New("connection reset"))
+
+	if got := rec.ReasonCount(stageTTS, "elevenlabs", "circuit_open"); got != 0 {
+		t.Fatalf("ReasonCount(circuit_open) = %d, want 0 for an ordinary error", got)
+	}
+	if got := rec.ErrorCount(stageTTS, "elevenlabs"); got != 1 {
+		t.Fatalf("ErrorCount = %d, want 1", got)
+	}
+}
+
+func TestRecordFallbackErrNilRecorderIsNoop(t *testing.T) {
+	// Must not panic when no recorder is configured.
+	recordFallbackErr(nil, stageTranslate, "gpt4o", translate.ErrCircuitOpen)
+}
+
+func TestRecordFallbackErrEmptyVendorFallsBackToUnknown(t *testing.T) {
+	rec := observability.NewLatencyRecorder()
+	recordFallbackErr(rec, stageTranslate, "", translate.ErrCircuitOpen)
+	if got := rec.ReasonCount(stageTranslate, "unknown", "circuit_open"); got != 1 {
+		t.Fatalf("ReasonCount(unknown, circuit_open) = %d, want 1", got)
+	}
+}
+
+func TestRecordFallbackErrNilErrRecordsNoReason(t *testing.T) {
+	rec := observability.NewLatencyRecorder()
+	recordFallbackErr(rec, stageTranslate, "gpt4o", nil)
+	if got := rec.ReasonCount(stageTranslate, "gpt4o", "circuit_open"); got != 0 {
+		t.Fatalf("ReasonCount(circuit_open) = %d, want 0 for a nil error", got)
+	}
+	if got := rec.ErrorCount(stageTranslate, "gpt4o"); got != 1 {
+		t.Fatalf("ErrorCount = %d, want 1", got)
 	}
 }

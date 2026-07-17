@@ -250,6 +250,30 @@ found and closed (circuit-open fast-fails were indistinguishable from
 ordinary errors on the dashboard). Week 4 still cannot meaningfully start
 until Saurabh decides on anchor customers / live traffic.
 
+**2026-07-17 note:** still genuinely blocked on Saurabh's anchor-customer/
+live-traffic decision (unchanged since Sprint 8) -- Week 3's one open item
+(real-PSTN jitter tuning) and all of Week 4 need live/pilot traffic that
+doesn't exist yet, so today's scheduled run (Sprint 11) again did
+hardening rather than inventing roadmap scope, this time closing out
+Sprint 10's own "Tomorrow" list: (1) PE exported `translate.ErrCircuitOpen`/
+`tts.ErrCircuitOpen` sentinel errors (previously unexported) so a
+circuit-open rejection is distinguishable from any other vendor error
+outside those packages; (2) Tech wired that signal into
+`pkg/langstream/fallback.go`'s orchestrator-level error-reason recording,
+so a circuit-open failure is now tagged `"circuit_open"` on the dashboard
+at both the vendor-client layer (Sprint 10) and the orchestrator layer
+(today) -- closing Sprint 10's Tomorrow item #2 exactly; (3) QA audited
+the whole test suite for the "assert immediately after a background
+goroutine's channel send" race pattern flagged in Sprint 8's Tomorrow list
+-- found one structurally-similar-but-empirically-safe case
+(`dashboard_latency_integration_test.go`, 500+ clean `-race` runs across
+varied `-cpu` settings) and nothing else; no fix needed, a real negative
+result; and (4) grew the WER corpus 35→41 with genuinely new error shapes
+(word-splitting, word-merging, adjacent transposition, case-sensitivity,
+first WER>1.0 hallucination case). No new bugs found this run. Week 4
+still cannot meaningfully start until Saurabh decides on anchor customers
+/ live traffic.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

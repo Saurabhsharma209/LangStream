@@ -454,7 +454,7 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 			mtCancel()
 			recordLatency(s.metrics, stageMT, msSince(mtStart))
 			if err != nil {
-				recordFallback(s.metrics, stageTranslate, s.cfg.Translator.Name())
+				recordFallbackErr(s.metrics, stageTranslate, s.cfg.Translator.Name(), err)
 				if leg.recordFailure(isFatal(err), s.fallback.MaxConsecutiveFailures) {
 					recordFallback(s.metrics, stageLegDegraded, leg.name)
 				}
@@ -475,7 +475,7 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 			audio, err := s.cfg.TTS.SynthesizeStream(ttsCtx, chunk.Text, persona)
 			if err != nil {
 				ttsCancel()
-				recordFallback(s.metrics, stageTTS, s.cfg.TTS.Name())
+				recordFallbackErr(s.metrics, stageTTS, s.cfg.TTS.Name(), err)
 				if leg.recordFailure(isFatal(err), s.fallback.MaxConsecutiveFailures) {
 					recordFallback(s.metrics, stageLegDegraded, leg.name)
 				}
