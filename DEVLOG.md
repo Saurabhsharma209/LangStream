@@ -1,5 +1,131 @@
 # LangStream Dev Log
 
+## 2026-07-18 (Sprint 12: sandbox disk exhaustion — partial health check only, no code shipped) — scheduled run
+
+### Agents run
+None. No PE/Tech/SRE/QA workstream agents were spawned this run — see
+below for why spawning them would have been irresponsible today.
+
+### Repo health at start
+Partial, and that partial result is itself the finding. ClearStream
+checked (`git ls-remote --tags`): still only `v0.1.0`, no coordination
+action needed (today's scope never touched `pkg/rtp`/duplex-RTP either
+way).
+
+**What was verified clean:** `pkg/asr`, `pkg/translate`, `pkg/tts`,
+`pkg/rtp`, `pkg/observability`, `pkg/qa`, `pkg/langstream` — all seven
+build, `go vet` clean, `gofmt -l` clean, and `go test` passes for each
+(no `-race`, see below on why not).
+
+**What could not be verified at all this run:** `pkg/webrtcgw`,
+`cmd/langstream`, and the root-level `package langstream_test`
+integration suite (`fallback_integration_test.go`,
+`integration_vendor_test.go`, and by extension anything importing
+`cmd/langstream`) — these pull in the `pion/webrtc` dependency tree
+(dtls, ice, sctp, srtp, turn, mdns, etc.), and this run's sandbox ran out
+of disk space partway through compiling that tree, twice, even after
+every space-saving measure below. This is an infrastructure ceiling, not
+a code problem — nothing in this entry implies those packages are broken,
+only that this sandbox could not build them today to check.
+
+### Sandbox disk crisis — now a hard blocker, not just a warning
+Sprints 8 through 11 each flagged worsening disk pressure in this same
+sandbox and routed around it. Today the workarounds stopped being enough:
+
+- `$HOME` (`/sessions/...`) was at **100% full, 0 bytes free**, for the
+  entire run, exactly as in Sprints 9-11 — could not write a single byte
+  there.
+- The **root filesystem itself started at 97% full (359MB free)** and
+  dropped to as low as **85MB free** partway through just building the
+  seven packages listed above as healthy — this is worse than every prior
+  sprint's recorded low (Sprint 11: ~387-434MB).
+- `/tmp` is confirmed (again) to be a persistent, multi-tenant scratch
+  area that survives across scheduled runs, not just within one — found
+  60+ leftover directories from past sprints and apparently other
+  unrelated sessions entirely (e.g. `/tmp/qa15` contained `slide-*.jpg`
+  files, nothing to do with this repo), almost all owned by `nobody`/
+  other UIDs this run's user cannot delete (`rm -rf` fails with
+  `Permission denied` file-by-file; `sudo` itself refuses to run in this
+  container — confirmed, same as prior sprints).
+- The Cowork outputs-mounted folder (`bindfs`) has ~4.4GB free but was
+  confirmed **unusable even as scratch space**, separate from the
+  documented git-index-lock issue: files written there cannot be deleted
+  at all (`rm` returns `Operation not permitted` on a file this run's own
+  user just created seconds earlier). One small, harmless test file/dir
+  (`.lsbuild_test/`, a few bytes) was accidentally left behind there as a
+  result and could not be cleaned up — flagging it here rather than
+  hiding it; it is trivial and can be deleted by a human with the right
+  permissions, or ignored.
+- Workaround applied: reused a pre-existing, already-extracted Go 1.22.5
+  toolchain sitting read+execute-only at `/tmp/gohome/go` (saved ~250MB
+  versus extracting a fresh copy from `/tmp/go.tar.gz`, same trick as
+  Sprint 11) and did all work in a fresh, uniquely-named,
+  this-run-owned directory (`/tmp/lsbuild`) rather than fighting for
+  space in already-occupied shared paths.
+- Even with both of those savings, `go build ./...` across the *entire*
+  repo (i.e. including `pkg/webrtcgw`/`cmd/langstream`'s pion/webrtc
+  dependency tree) twice ran the root filesystem down to under 100MB free
+  mid-compile and failed with `no space left on device` on dozens of
+  packages simultaneously. Only after narrowing the build to the seven
+  non-webrtcgw packages did a clean `build`/`vet`/`gofmt`/`test` pass
+  become possible at all.
+
+**Decision:** rather than force a full-repo build/test by further
+shrinking scope (e.g. deleting the module cache the moment it's used,
+package by package — fragile and still not guaranteed to fit), or push
+any change without being able to run the full verification Step 5/6 of
+this automation's own process requires (`go build ./...`, full
+`go test ./... -race`, fresh-clone-from-GitHub rebuild), this run did
+**not** spawn workstream agents and did **not** commit or push any code
+change. Shipping unverified changes to compensate for a broken sandbox
+would be a worse outcome than skipping a sprint. This DEVLOG entry itself
+is the only change this run makes, and it needs no build to be safe to
+push.
+
+### Bugs found/fixed
+None — no code was touched this run.
+
+### Verified
+- `pkg/asr`, `pkg/translate`, `pkg/tts`, `pkg/rtp`, `pkg/observability`,
+  `pkg/qa`, `pkg/langstream`: `go build`, `go vet`, `gofmt -l` clean;
+  `go test` passes (single run, no `-race` — the repeated/`-race` runs
+  Step 5 normally requires were skipped to conserve the little disk
+  headroom left for even this partial check).
+- `pkg/webrtcgw`, `cmd/langstream`, root-level `langstream_test`
+  integration suite: **not verified this run** (disk exhaustion, see
+  above). No reason to believe they're broken — nothing touched them —
+  but that's an inference from Sprint 11's clean state, not a
+  measurement taken today.
+- ClearStream: still tagged only `v0.1.0`, unchanged; `VERSIONING.md`'s
+  pin is still accurate, no update needed.
+
+### Blocked
+- Everything Sprint 11 already listed as blocked (real-condition
+  jitter-buffer tuning, Week 4, Docker-build verification, legal review
+  of `docs/compliance.md`) — all unchanged, still need either live
+  traffic or a human decision.
+- **The sandbox disk-pressure pattern has now crossed from "annoying but
+  routable-around" to "blocks a full verification pass outright."** Five
+  consecutive scheduled runs (Sprints 8-12) have hit this, worsening each
+  time. This is the top priority for whoever owns this automation's
+  sandbox environment — not something the next scheduled run can keep
+  absorbing by finding a cleverer workaround.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that supersedes everything below (unchanged from Sprint 11).
+2. **Before any more feature work:** the sandbox needs either a genuinely
+   clean disk per run, or a privileged cleanup of the accumulated
+   `/tmp`/`/sessions` cruft from past runs/sessions between runs. Until
+   that happens, any scheduled run touching `pkg/webrtcgw`/
+   `cmd/langstream` (or anything importing them) risks the same partial
+   verification this run hit — worth confirming fixed before trusting a
+   future "full repo green" report at face value.
+3. Absent an infra fix, the next run should retry the full-repo build
+   early (before spending its time budget on anything else) to see
+   whether the situation has improved, stayed the same, or worsened
+   further, and report that delta explicitly.
+
 ## 2026-07-17 (Sprint 11: circuit-open reason propagated to orchestrator, race-pattern audit, WER corpus growth) — scheduled run
 
 ### Agents run
