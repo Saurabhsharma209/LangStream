@@ -91,6 +91,14 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // an adjacent-word transposition, a case-sensitivity mismatch, and a
 // severe-hallucination case demonstrating WER > 1.0) — see FixedCorpus's
 // doc comment for each entry's reasoning and hand-computed WER.
+//
+// Sprint 2026-07-20 (QA): includes six further entries (a punctuation-only
+// mismatch, a three-error-type mix in one sentence, a currency-symbol-vs-
+// spelled-out-words mismatch, a total-substitution-failure case with
+// WER == 1.0 via pure substitution, a short common-word homophone
+// substitution, and three non-adjacent deletions in one sentence) — see
+// FixedCorpus's doc comment for each entry's reasoning and hand-computed
+// WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -149,6 +157,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_adjacent_word_transposition_balance_check":           2.0 / 6.0,
 		"hinglish_case_sensitivity_capitalized_sir_mismatch":           1.0 / 6.0,
 		"hinglish_severe_hallucination_wer_exceeds_one_listen_request": 5.0 / 3.0,
+
+		// Sprint 2026-07-20 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_punctuation_only_mismatch_confirm_query":          1.0 / 5.0,
+		"hinglish_three_error_types_mixed_appointment_reschedule":   3.0 / 11.0,
+		"hinglish_currency_symbol_vs_words_bill_amount":             2.0 / 5.0,
+		"hinglish_total_substitution_failure_balance_request":       5.0 / 5.0,
+		"hinglish_homophone_to_too_confirmation_query":              1.0 / 6.0,
+		"hinglish_three_nonadjacent_deletions_complaint_resolution": 3.0 / 16.0,
 	}
 
 	entries := FixedCorpus()

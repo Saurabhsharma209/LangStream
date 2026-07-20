@@ -864,5 +864,161 @@ func FixedCorpus() []CorpusEntry {
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},
+
+		// --- Sprint 2026-07-20 (QA) additions below: six more entries
+		// covering error shapes the corpus still didn't exercise, found
+		// while auditing wer.go's documented caveats/behaviors
+		// (punctuation stripping, not just case-folding) and this
+		// corpus's own existing entries for untested combinations
+		// (single-type-only edits, two-token-max error counts, and
+		// single-shape-only errors):
+		//
+		//   - a punctuation-only mismatch, directly exercising wer.go's
+		//     "no punctuation stripping" caveat (the corpus already
+		//     exercises the neighboring "no case-folding" caveat via
+		//     hinglish_case_sensitivity_capitalized_sir_mismatch, but
+		//     nothing isolates punctuation on its own);
+		//
+		//   - a single entry mixing all *three* error types at once
+		//     (substitution + deletion + insertion together) --
+		//     hinglish_long_utterance_substitution_and_deletion_mixed_complaint_escalation
+		//     mixes two types (substitution + deletion), but no entry
+		//     combines all three;
+		//
+		//   - a currency-symbol-vs-spelled-out-words mismatch ("₹500"
+		//     as one token vs "500 rupees" as two), a token-count-
+		//     changing shape distinct from
+		//     hinglish_number_word_vs_digit_substitution (a 1:1 token
+		//     substitution with no token-count change);
+		//
+		//   - a total-substitution-failure entry where every single
+		//     reference word is replaced (WER = 1.0 via pure
+		//     substitution, S=N) -- distinct from
+		//     hinglish_severe_hallucination_wer_exceeds_one_listen_request's
+		//     WER > 1.0 (driven by insertions around a still-present
+		//     reference subsequence): here none of the reference words
+		//     survive at all, only every existing entry's WER <= 1.0
+		//     with S < N;
+		//
+		//   - a short, common-word homophone substitution ("to"
+		//     misheard as "too") -- distinct from this corpus's existing
+		//     acronym/homophone entries (KYC/IVR/EMI), which are all
+		//     multi-letter acronyms, not ordinary short function words;
+		//
+		//   - three non-adjacent single-word deletions in one sentence
+		//     -- every existing multi-deletion entry
+		//     (hinglish_two_word_deletion_travel_booking_confirmation,
+		//     hinglish_long_utterance_two_deletions_kyc_document_submission)
+		//     tops out at two deletions.
+		//
+		//   - hinglish_punctuation_only_mismatch_confirm_query:            WER 1/5   (1 substitution / 5 words)
+		//   - hinglish_three_error_types_mixed_appointment_reschedule:     WER 3/11  (1 substitution + 1 deletion + 1 insertion / 11 words)
+		//   - hinglish_currency_symbol_vs_words_bill_amount:               WER 2/5   (1 substitution + 1 insertion / 5 words)
+		//   - hinglish_total_substitution_failure_balance_request:         WER 5/5   (5 substitutions / 5 words, WER == 1.0)
+		//   - hinglish_homophone_to_too_confirmation_query:                WER 1/6   (1 substitution / 6 words)
+		//   - hinglish_three_nonadjacent_deletions_complaint_resolution:   WER 3/16  (3 deletions / 16 words)
+		{
+			// The fake ASR attaches a trailing "?" to the final word
+			// ("hai" -> "hai?") that was never actually spoken as
+			// punctuation (real speech carries no literal question
+			// mark) -- directly exercising wer.go's documented "no
+			// punctuation stripping" caveat in isolation, the sibling
+			// caveat to the case-folding one
+			// hinglish_case_sensitivity_capitalized_sir_mismatch already
+			// covers.
+			Name:       "hinglish_punctuation_only_mismatch_confirm_query",
+			Language:   "hi",
+			Reference:  "sir kya yeh sahi hai",
+			Hypothesis: "sir kya yeh sahi hai?",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// An appointment-reschedule sentence combining all three
+			// edit types in one entry: the fake ASR drops "kal"
+			// ("tomorrow") entirely (a deletion), mishears the Hindi
+			// number word "nau" (nine) as "das" (ten) (a substitution),
+			// and duplicates "ho" (an insertion) -- every existing
+			// multi-error entry in this corpus mixes at most two of the
+			// three edit types; this is the first to combine all three.
+			Name:       "hinglish_three_error_types_mixed_appointment_reschedule",
+			Language:   "hi",
+			Reference:  "sir aapka appointment kal subah nau baje reschedule ho gaya hai",
+			Hypothesis: "sir aapka appointment subah das baje reschedule ho ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A billing sentence where the reference uses the rupee
+			// symbol directly against the digits ("₹500", one token)
+			// and the fake ASR instead transcribes it as the spelled-out
+			// two-token form "500 rupees" -- a token-count-changing
+			// currency mismatch, distinct from
+			// hinglish_number_word_vs_digit_substitution's 1:1
+			// word-to-digit substitution (no token-count change there).
+			// Costs one substitution ("₹500" -> "500") plus one
+			// insertion ("rupees").
+			Name:       "hinglish_currency_symbol_vs_words_bill_amount",
+			Language:   "hi",
+			Reference:  "sir aapka bill ₹500 hai",
+			Hypothesis: "sir aapka bill 500 rupees hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// Every word in this short balance-check request is
+			// mistranscribed as a completely unrelated word -- a total
+			// substitution failure (S == N, WER == 1.0 exactly) modeling
+			// a severely garbled or wrong-audio-routed line. Distinct
+			// from
+			// hinglish_severe_hallucination_wer_exceeds_one_listen_request's
+			// WER > 1.0 (driven by extra hallucinated insertions around
+			// an otherwise-intact reference subsequence): here none of
+			// the original words survive at all, and the word count
+			// matches exactly (S=5, D=0, I=0), a shape no existing entry
+			// demonstrates.
+			Name:       "hinglish_total_substitution_failure_balance_request",
+			Language:   "hi",
+			Reference:  "sir mera balance batao please",
+			Hypothesis: "yeh voh network dikhao dhanyavaad",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The English function word "to" misheard as its common
+			// homophone "too" -- a short, ordinary-word homophone
+			// confusion, distinct from this corpus's existing acronym/
+			// homophone entries
+			// (hinglish_acronym_kyc_homophone_substitution,
+			// hinglish_acronym_ivr_homophone_substitution,
+			// hinglish_acronym_emi_homophone_substitution), all of which
+			// are multi-letter acronyms rather than everyday short
+			// function words. "to"/"too" is one of the single most
+			// common homophone pairs in English ASR output.
+			Name:       "hinglish_homophone_to_too_confirmation_query",
+			Language:   "hi",
+			Reference:  "sir yeh sahi hai to bataiye",
+			Hypothesis: "sir yeh sahi hai too bataiye",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A long (16-word) complaint-resolution sentence where the
+			// fake ASR drops three separate, non-adjacent words
+			// ("aapka", "aur", "hi") entirely -- every existing
+			// multi-deletion entry in this corpus
+			// (hinglish_two_word_deletion_travel_booking_confirmation,
+			// hinglish_long_utterance_two_deletions_kyc_document_submission)
+			// tops out at two deletions; this is the first with three,
+			// checking WER alignment still isolates exactly three
+			// independent single-word deletions scattered across a long
+			// sentence rather than miscounting or conflating them.
+			Name:       "hinglish_three_nonadjacent_deletions_complaint_resolution",
+			Language:   "hi",
+			Reference:  "sir aapka complaint register ho gaya hai aur hum jald hi ise resolve kar denge dhanyavaad",
+			Hypothesis: "sir complaint register ho gaya hai hum jald ise resolve kar denge dhanyavaad",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
 	}
 }

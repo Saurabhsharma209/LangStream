@@ -1,5 +1,190 @@
 # LangStream Dev Log
 
+## 2026-07-20 (Sprint 13: ASR circuit breakers + permanent-ASR-failure leg visibility, WER corpus growth) — scheduled run
+
+### Agents run
+PE, Tech, QA -- three agents in parallel. SRE not needed (no scoped
+SRE-owned gap found during planning; CI/Docker/observability infra
+unchanged from prior audits). Week 3's one open item (real-PSTN jitter
+tuning) and all of Week 4 remain gated on Saurabh's anchor-customer/
+live-traffic decision, unchanged since Sprint 8 -- today again did
+opportunistic hardening rather than inventing roadmap scope.
+
+### Repo health at start
+Clean, on the very first try: `go build ./...`, `go vet ./...`,
+`go test ./...` (single run and `-race -count=3`), `gofmt -l .` all
+passed clean for the *entire* repo including `pkg/webrtcgw`/
+`cmd/langstream` (the packages Sprint 12 could not verify at all).
+ClearStream not checked this run (today's scope never touched
+`pkg/rtp`/duplex-RTP; VERSIONING.md's pin is unchanged from 2026-07-12).
+
+### Sandbox note: Sprint 12's disk-exhaustion blocker is resolved
+`$HOME` (`/sessions/...`) was still at 100% full, 0 bytes free, for this
+entire run -- same as every prior sprint -- but this time it didn't
+matter: all work was done from the start in `/tmp/LangStream` (cloned
+directly there, never attempted under `$HOME`) using a freshly
+downloaded go1.22.5 toolchain extracted to `/tmp/gotools` (no leftover
+cruft found in `/tmp` this run, unlike Sprints 11-12's 60+ stale
+directories from past sessions). One real environment gotcha found and
+worked around: this sandbox's `$TMPDIR` env var defaults to
+`/sessions/.../tmp` (the full filesystem), which made `go build`/`go
+test` fail immediately with "no space left on device" (creating its
+scratch workdir) even though `/tmp` itself (the actual filesystem `go
+build` should use) had 3+GB free the whole run -- fixed by exporting
+`TMPDIR=/tmp/mytmp` before every Go command. Root filesystem (`/`) held
+steady at 2.7-3.4GB free throughout the entire run, including three
+parallel subagents each compiling/testing concurrently -- no repeat of
+Sprints 8-12's worsening disk-pressure pattern today. Worth noting for
+whoever owns this automation's sandbox environment: today's clean run
+suggests the pattern may be sandbox-instance-specific (a fresh instance
+each run) rather than a truly persistent, ever-worsening shared-state
+problem as Sprints 8-12 assumed -- but that's an inference from one good
+day, not a confirmed fix; the next run hitting disk pressure again would
+be the real signal either way.
+
+### Changes
+
+**PE -- circuit breakers for `pkg/asr` (Deepgram, Sarvam)
+(`pkg/asr/circuitbreaker.go`, new; `pkg/asr/deepgram.go`,
+`pkg/asr/sarvam.go`)**
+`pkg/translate` (GPT-4o) and `pkg/tts` (Cartesia, ElevenLabs) each got a
+circuit breaker in Sprint 10; `pkg/asr` never did, despite having the
+same "sustained vendor outage means every new call pays a full
+dial-and-backoff cost" problem those breakers solve. Ported the same
+design (5 consecutive-failure threshold, 10s cooldown, single-probe
+recovery) to Deepgram/Sarvam, scoped correctly for ASR's very different,
+long-lived-streaming-connection shape: the breaker gates `StartStream`
+(fails fast with a wrapped `ErrCircuitOpen`, zero dial attempts, when
+open) and is settled -- success, failure, or abort -- only by a
+session's very *first* connect attempt; `pkg/asr/backoff.go`'s existing
+mid-stream `reconnectBackoff` reconnects (a session that connected fine
+once, then drops and reconnects later) are completely untouched and
+never interact with the breaker, by design (verified by a dedicated
+test: a mid-stream reconnect failure does not move `breaker.open`/
+`consecutiveFails` at all). `WithCircuitBreaker`/`WithSarvamCircuitBreaker`
+functional options added, matching each package's existing
+naming convention; circuit-open rejections tagged via the existing
+`RecordErrorReason("asr_connect", vendor, "circuit_open")` API, reusing
+each recognizer's existing `WithMetrics` recorder (no second metrics
+field added). 10 new tests across `pkg/asr/circuitbreaker_test.go`
+(breaker unit tests, including a stuck-probe regression mirroring
+`pkg/translate`'s) and `deepgram_test.go`/`sarvam_test.go` (5 scenarios
+each: trips after N consecutive initial-connect failures and fails fast
+with zero new dial attempts; dashboard tagging; probe-after-cooldown
+recovery; mid-stream reconnects don't touch the breaker; default breaker
+active without the option).
+
+**Tech -- permanent ASR failure no longer silently kills a leg
+(`pkg/langstream/session.go`, `pkg/langstream/fallback.go`)**
+`fallback.go`'s own doc comment carved out the ASR socket as "not this
+file's problem... today's ASR backends already reconnect/retry
+internally" -- true for transient blips, but not for the case an ASR
+`StreamSession`'s `Transcripts()` channel closes *permanently* (e.g.
+Deepgram's `failAndClose` after exhausting `maxReconnectAttempts`).
+`runLeg`'s `case tr, ok := <-transcripts: if !ok { return }` branch
+handled that identically to a deliberate `Session.Close()` shutdown --
+silently returning, with `CallerLegDegraded()`/`AgentLegDegraded()`
+never reflecting it and whatever raw audio was mid-utterance in
+`leg.audio` dropped, unlike every *other* fallback trigger in this same
+function (low confidence, MT error/timeout, TTS error/timeout, repeated
+MT/TTS failure). Fixed with a new `Session.closing atomic.Bool`, set as
+the first step of `Close()` before either ASR stream is closed, so
+`runLeg` can tell "the whole Session is shutting down on purpose"
+(`closing == true`: unchanged, just return) apart from "the backend
+itself gave up mid-call" (`closing == false`: now marks the leg
+permanently degraded via the existing `legState.recordFailure`
+machinery, records a new `"asr_stream_closed"` reason via a
+`recordFallbackReason` helper mirroring `recordFallbackErr`'s existing
+`"circuit_open"` pattern, and forwards whatever was buffered in
+`leg.audio` as one final passthrough chunk before returning).
+**Deliberately not attempted:** keeping the leg "alive" for audio pushed
+*after* this point -- `runLeg` is the only consumer that ever drains
+`leg.audio`, so once it returns, future `Push{Caller,Agent}Audio` calls
+still succeed (buffering into the ring buffer per existing behavior) but
+nothing forwards that audio again until `Session.Close()`. Documented
+explicitly as a known, honest gap for a future sprint rather than
+silently left unaddressed. 2 new tests in `session_test.go` (permanent
+closure degrades the leg, records the reason, and forwards buffered
+audio; a normal `Close()` does *not* trigger any of that).
+
+**QA -- integration coverage for both fixes, one expected test update,
+WER corpus growth (41 -> 47)**
+Two new root-level integration test files:
+`asr_circuit_breaker_integration_test.go` (drives PE's real
+`DeepgramRecognizer`/`SarvamRecognizer` against a dead fake WebSocket
+server to prime the breaker open, then confirms `langstream.NewSession`
+fails in under 200ms with an error wrapping `asr.ErrCircuitOpen` for
+both vendors -- proving the fast-fail path, not just a unit-level
+check) and `asr_permanent_failure_integration_test.go` (drives a real
+`*langstream.Session` with a local fake `asr.StreamSession` whose
+`Transcripts()` channel is closed directly; confirms both legs degrade,
+buffered audio is forwarded, and `-race -count=3` plus a 20-iteration
+goroutine-leak check come back clean). Both were tested against PE's
+and Tech's *real*, finished implementations, not fallback local fakes --
+their work had landed on disk by the time QA reached those steps.
+
+One **expected** test breakage, found and fixed (QA-owned file, not a
+new bug): `integration_vendor_test.go`'s pre-existing
+`TestVendorRoundTrip_ASRFatalErrorDoesNotHangSession` asserted "no audio
+ever reaches the listening party" after a fatal ASR error -- exactly the
+behavior Tech's fix corrects. Updated to assert the new, correct
+contract (leg degrades, buffered audio arrives as passthrough, `Close()`
+still doesn't hang).
+
+WER corpus grew 41 -> 47 with 6 new, hand-verified error shapes not
+previously represented: punctuation-only mismatch, a single entry mixing
+all three edit types together, a currency-symbol-vs-spelled-out-words
+mismatch, a pure-substitution WER==1.0 case (distinct from the existing
+WER>1.0 hallucination case), a short common-word homophone ("to"/"too"),
+and three non-adjacent deletions in one long sentence (previous max was
+two). `corpus_test.go` and `wer_measurement_test.go` updated in sync.
+
+`-race -count=10` flakiness audit on the root package, `pkg/qa`,
+`pkg/asr`, and `pkg/langstream`: clean, no flakes found.
+
+### Bugs found/fixed
+One, described above under QA: `integration_vendor_test.go` asserted the
+exact old (now-fixed) behavior Tech's change replaces. Not a new defect
+-- an expected test update following an intentional, correct behavior
+change. No other bugs found this run.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+- `go test ./... -race -count=3` -- all 11 buildable packages pass
+  (`examples/backend_selection`, `tools/latency_benchmark` have no test
+  files), no flakes, including `pkg/webrtcgw`/`cmd/langstream` (verified
+  today for the first time since Sprint 11 -- Sprint 12 could not reach
+  them at all)
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- Real-condition jitter-buffer tuning against live PSTN traces -- still
+  needs live/pilot call traffic (Week 4). Unchanged.
+- Week 4 (live pilot, real WER/latency/CSAT, go/no-go) still cannot start
+  without Saurabh's decision on anchor customer(s) / live traffic --
+  unchanged.
+- Docker-build verification, legal review of `docs/compliance.md` -- both
+  unchanged, still need a human.
+- The intentional, documented gap this run's Tech fix leaves behind
+  (audio pushed to a permanently-dead leg after the fact still buffers
+  but is never forwarded) -- not urgent, flagged for a future sprint, not
+  a regression.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that supersedes everything below.
+2. Absent that: consider whether the leg-death gap Tech's fix
+   intentionally left open (audio pushed after a leg permanently dies
+   still isn't forwarded) is worth closing -- would need a redesign
+   (a replacement consumer for `leg.audio` once `runLeg` exits), not
+   urgent today.
+3. Continue opportunistic hardening (WER corpus, race-pattern audits) if
+   no higher-priority item exists.
+4. Keep an eye on whether today's clean disk situation holds on the next
+   run or whether Sprints 8-12's pressure pattern resumes -- one clean
+   run doesn't yet prove the underlying cause is gone.
+
+
 ## 2026-07-18 (Sprint 12: sandbox disk exhaustion — partial health check only, no code shipped) — scheduled run
 
 ### Agents run

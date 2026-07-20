@@ -69,6 +69,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -148,9 +149,22 @@ func WithSarvamDialer(d *websocket.Dialer) SarvamOption {
 // sarvamCostPerMinuteUSD. Optional -- a nil/unset recorder (the default)
 // makes cost recording a no-op, matching this package's existing
 // functional-options convention (WithSarvamBaseURL, WithSarvamDialer,
-// ...).
+// ...). This same recorder is reused (not duplicated) to tag
+// circuit-breaker rejections; see WithSarvamCircuitBreaker.
 func WithSarvamMetrics(m *observability.LatencyRecorder) SarvamOption {
 	return func(r *SarvamRecognizer) { r.metrics = m }
+}
+
+// WithSarvamCircuitBreaker overrides this recognizer's circuit-breaker
+// threshold/cooldown; non-positive values fall back to this package's
+// defaults (see circuitbreaker.go). The breaker trips after `threshold`
+// consecutive sessions whose very first connect attempt never
+// succeeded, then fails fast (StartStream returns an error wrapping
+// ErrCircuitOpen, with zero dial attempts) for `cooldown` before letting
+// exactly one probe session through. A circuit breaker is always active,
+// even without this option (see NewSarvamRecognizer's default).
+func WithSarvamCircuitBreaker(threshold int, cooldown time.Duration) SarvamOption {
+	return func(r *SarvamRecognizer) { r.breaker = newCircuitBreaker(threshold, cooldown) }
 }
 
 // SarvamRecognizer is a real, code-switching-aware streaming ASR backend for
@@ -163,6 +177,7 @@ type SarvamRecognizer struct {
 	maxReconnectAttempts int
 	dialer               *websocket.Dialer
 	metrics              *observability.LatencyRecorder
+	breaker              *circuitBreaker
 }
 
 // NewSarvamRecognizer builds a Sarvam-backed Recognizer. It reads the API
@@ -179,6 +194,7 @@ func NewSarvamRecognizer(opts ...SarvamOption) (*SarvamRecognizer, error) {
 		model:                defaultSarvamModel,
 		maxReconnectAttempts: 3,
 		dialer:               websocket.DefaultDialer,
+		breaker:              newCircuitBreaker(0, 0),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -207,6 +223,18 @@ func (r *SarvamRecognizer) StartStream(ctx context.Context, languageHint Languag
 	code, ok := sarvamLanguageCodes[lang]
 	if !ok {
 		return nil, fmt.Errorf("asr/sarvam: unsupported language %q", lang)
+	}
+
+	// Circuit breaker gate: if too many consecutive sessions have failed
+	// to ever establish their initial connection, fail fast here with
+	// zero dial attempts rather than constructing a session that would
+	// only pay the full ensureConnected dial-and-backoff cost before
+	// failing anyway. See circuitbreaker.go.
+	if !r.breaker.allow() {
+		if r.metrics != nil {
+			r.metrics.RecordErrorReason("asr_connect", r.Name(), "circuit_open")
+		}
+		return nil, fmt.Errorf("asr/sarvam: %w", ErrCircuitOpen)
 	}
 
 	sessCtx, cancel := context.WithCancel(ctx)
@@ -245,6 +273,11 @@ type sarvamSession struct {
 	reconnectAttempts int
 	fatalErr          error
 	totalMS           int64 // cumulative pushed-audio duration; see assumption (4) above.
+
+	// connectedOnce/breakerSettled track this session's relationship with
+	// r.breaker (see circuitbreaker.go); see settleBreaker's doc comment.
+	connectedOnce  bool
+	breakerSettled bool
 
 	writeMu sync.Mutex
 
@@ -375,11 +408,52 @@ func (s *sarvamSession) ensureConnected(sampleRate int) error {
 	s.sampleRate = sampleRate
 	s.gen++
 	gen := s.gen
+	firstConnect := !s.connectedOnce && !s.breakerSettled
+	if firstConnect {
+		s.connectedOnce = true
+		s.breakerSettled = true
+	}
 	s.mu.Unlock()
+
+	if firstConnect {
+		s.r.breaker.recordSuccess()
+	}
 
 	s.workerWG.Add(1)
 	go s.readLoop(conn, gen)
 	return nil
+}
+
+// settleBreaker reports this session's initial-connect outcome to
+// r.breaker exactly once (idempotent via breakerSettled): recordFailure
+// if this session never managed to connect and the given err is a
+// genuine give-up (not a ctx cancellation), abort if the session never
+// connected but ended without a definitive vendor-health verdict (ctx
+// cancelled, or torn down gracefully before ever attempting to connect),
+// or a no-op if the session already connected at least once (that
+// outcome was already reported as a success in ensureConnected, and any
+// later mid-stream failure/close is not the breaker's concern). Called
+// from both failAndClose and Close so it fires exactly once regardless
+// of which teardown path actually runs for a given session (the other is
+// always a no-op once s.closed is set).
+func (s *sarvamSession) settleBreaker(err error) {
+	s.mu.Lock()
+	if s.breakerSettled {
+		s.mu.Unlock()
+		return
+	}
+	s.breakerSettled = true
+	connectedOnce := s.connectedOnce
+	s.mu.Unlock()
+
+	if connectedOnce {
+		return
+	}
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		s.r.breaker.abort()
+		return
+	}
+	s.r.breaker.recordFailure()
 }
 
 func (s *sarvamSession) buildURL(sampleRate int) (string, error) {
@@ -600,6 +674,8 @@ func (s *sarvamSession) failAndClose(err error) {
 	s.conn = nil
 	s.mu.Unlock()
 
+	s.settleBreaker(err)
+
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -632,6 +708,8 @@ func (s *sarvamSession) Close() error {
 	conn := s.conn
 	s.conn = nil
 	s.mu.Unlock()
+
+	s.settleBreaker(nil)
 
 	if conn != nil {
 		// Best-effort flush; see assumption (2) in the package doc comment.

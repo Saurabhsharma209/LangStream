@@ -33,6 +33,7 @@ package asr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -101,8 +102,22 @@ func WithDialer(d *websocket.Dialer) DeepgramOption {
 // deepgramCostPerMinuteUSD. Optional -- a nil/unset recorder (the
 // default) makes cost recording a no-op, matching this package's
 // existing functional-options convention (WithBaseURL, WithDialer, ...).
+// This same recorder is reused (not duplicated) to tag circuit-breaker
+// rejections; see WithCircuitBreaker.
 func WithMetrics(m *observability.LatencyRecorder) DeepgramOption {
 	return func(r *DeepgramRecognizer) { r.metrics = m }
+}
+
+// WithCircuitBreaker overrides this recognizer's circuit-breaker
+// threshold/cooldown; non-positive values fall back to this package's
+// defaults (see circuitbreaker.go). The breaker trips after `threshold`
+// consecutive sessions whose very first connect attempt never
+// succeeded, then fails fast (StartStream returns an error wrapping
+// ErrCircuitOpen, with zero dial attempts) for `cooldown` before letting
+// exactly one probe session through. A circuit breaker is always active,
+// even without this option (see NewDeepgramRecognizer's default).
+func WithCircuitBreaker(threshold int, cooldown time.Duration) DeepgramOption {
+	return func(r *DeepgramRecognizer) { r.breaker = newCircuitBreaker(threshold, cooldown) }
 }
 
 // DeepgramRecognizer is a real, English-only streaming ASR backend backed by
@@ -114,6 +129,7 @@ type DeepgramRecognizer struct {
 	maxReconnectAttempts int
 	dialer               *websocket.Dialer
 	metrics              *observability.LatencyRecorder
+	breaker              *circuitBreaker
 }
 
 // NewDeepgramRecognizer builds a Deepgram-backed Recognizer. It reads the
@@ -131,6 +147,7 @@ func NewDeepgramRecognizer(opts ...DeepgramOption) (*DeepgramRecognizer, error) 
 		model:                defaultDeepgramModel,
 		maxReconnectAttempts: 3,
 		dialer:               websocket.DefaultDialer,
+		breaker:              newCircuitBreaker(0, 0),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -158,6 +175,18 @@ func (r *DeepgramRecognizer) StartStream(ctx context.Context, languageHint Langu
 	}
 	if lang != "en" {
 		return nil, fmt.Errorf("asr/deepgram: unsupported language %q (this backend is English-only)", lang)
+	}
+
+	// Circuit breaker gate: if too many consecutive sessions have failed
+	// to ever establish their initial connection, fail fast here with
+	// zero dial attempts rather than constructing a session that would
+	// only pay the full ensureConnected dial-and-backoff cost before
+	// failing anyway. See circuitbreaker.go.
+	if !r.breaker.allow() {
+		if r.metrics != nil {
+			r.metrics.RecordErrorReason("asr_connect", r.Name(), "circuit_open")
+		}
+		return nil, fmt.Errorf("asr/deepgram: %w", ErrCircuitOpen)
 	}
 
 	sessCtx, cancel := context.WithCancel(ctx)
@@ -199,6 +228,20 @@ type deepgramSession struct {
 	closed            bool
 	reconnectAttempts int
 	fatalErr          error
+
+	// connectedOnce/breakerSettled track this session's relationship with
+	// r.breaker (see circuitbreaker.go). connectedOnce becomes true the
+	// first time this session establishes a live connection; once true,
+	// this session never touches the breaker again (mid-stream drops and
+	// reconnects via the reconnectBackoff path are not the breaker's
+	// concern). breakerSettled becomes true exactly once, when this
+	// session's initial-connect outcome (success, failure, or an
+	// unresolved abort at teardown) has been reported to the breaker via
+	// recordSuccess/recordFailure/abort -- it guards against
+	// double-reporting from concurrent teardown paths (failAndClose vs.
+	// Close).
+	connectedOnce  bool
+	breakerSettled bool
 
 	writeMu sync.Mutex
 
@@ -318,12 +361,59 @@ func (s *deepgramSession) ensureConnected(sampleRate int) error {
 	s.sampleRate = sampleRate
 	s.gen++
 	gen := s.gen
+	// This is the session's very first successful connection iff it has
+	// never connected before and the breaker outcome for this session
+	// hasn't already been reported (guards against a narrow race with a
+	// concurrent Close()/failAndClose() settling the breaker first; see
+	// settleBreaker). Mid-stream reconnects (connectedOnce already true)
+	// never touch the breaker.
+	firstConnect := !s.connectedOnce && !s.breakerSettled
+	if firstConnect {
+		s.connectedOnce = true
+		s.breakerSettled = true
+	}
 	s.mu.Unlock()
+
+	if firstConnect {
+		s.r.breaker.recordSuccess()
+	}
 
 	s.workerWG.Add(2)
 	go s.readLoop(conn, gen)
 	go s.keepAliveLoop(conn, gen)
 	return nil
+}
+
+// settleBreaker reports this session's initial-connect outcome to
+// r.breaker exactly once (idempotent via breakerSettled): recordFailure
+// if this session never managed to connect and the given err is a
+// genuine give-up (not a ctx cancellation), abort if the session never
+// connected but ended without a definitive vendor-health verdict (ctx
+// cancelled, or torn down gracefully before ever attempting to connect),
+// or a no-op if the session already connected at least once (that
+// outcome was already reported as a success by ensureConnected, and any
+// later mid-stream failure/close is not the breaker's concern). Called
+// from both failAndClose and Close so it fires exactly once regardless
+// of which teardown path actually runs for a given session (the other is
+// always a no-op once s.closed is set).
+func (s *deepgramSession) settleBreaker(err error) {
+	s.mu.Lock()
+	if s.breakerSettled {
+		s.mu.Unlock()
+		return
+	}
+	s.breakerSettled = true
+	connectedOnce := s.connectedOnce
+	s.mu.Unlock()
+
+	if connectedOnce {
+		return
+	}
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		s.r.breaker.abort()
+		return
+	}
+	s.r.breaker.recordFailure()
 }
 
 func (s *deepgramSession) buildURL(sampleRate int) (string, error) {
@@ -509,6 +599,8 @@ func (s *deepgramSession) failAndClose(err error) {
 	s.conn = nil
 	s.mu.Unlock()
 
+	s.settleBreaker(err)
+
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -541,6 +633,8 @@ func (s *deepgramSession) Close() error {
 	conn := s.conn
 	s.conn = nil
 	s.mu.Unlock()
+
+	s.settleBreaker(nil)
 
 	if conn != nil {
 		// Best-effort: ask Deepgram to flush remaining audio and return

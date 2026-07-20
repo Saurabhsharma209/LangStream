@@ -388,12 +388,30 @@ drain:
 // responds to the caller's audio with a fatal error frame instead of a
 // transcript (exactly what pkg/asr/sarvam_test.go's
 // TestSarvamRecognizer_VendorErrorClosesSession exercises at the ASR-package
-// level). This test instead asserts the *orchestrator's* behavior on top
-// of that real failure mode: no audio is ever delivered to the agent leg,
-// and critically, Session.Close() returns promptly rather than hanging -
-// go test's -race build also makes this a background check for data races
-// in the shutdown path when a leg's Transcripts() channel closes on error
-// rather than via the normal Close()-triggered flush.
+// level, which closes the real sarvamSession's Transcripts() channel on its
+// own, mid-call). This test asserts the *orchestrator's* behavior on top of
+// that real failure mode, and critically, that Session.Close() returns
+// promptly rather than hanging - go test's -race build also makes this a
+// background check for data races in the shutdown path when a leg's
+// Transcripts() channel closes on error rather than via the normal
+// Close()-triggered flush.
+//
+// Updated 2026-07-20 (QA) for Tech's same-day ASR-permanent-failure leg-
+// visibility fix (pkg/langstream/session.go's runLeg + fallback.go's
+// reasonASRStreamClosed - see pkg/langstream/session_test.go's
+// TestSessionASRStreamPermanentClosureDegradesLegAndForwardsBufferedAudio
+// and this repo's root-level asr_permanent_failure_integration_test.go for
+// the equivalent coverage against a local fake). Before that fix, this
+// exact scenario (a real vendor's StreamSession dying mid-call) made
+// runLeg silently drop the buffered caller audio and return with no
+// observable signal - which is what this test used to assert as the
+// expected behavior ("no audio is ever delivered to the agent leg"). That
+// was the bug, not a feature: this test now asserts the *fixed* contract
+// instead - the caller leg is marked permanently degraded, and the
+// buffered caller audio it already had in flight is forwarded to the
+// agent as a passthrough chunk (preceded by the degrade tone, per
+// FallbackConfig.DegradeToneEnabled's default) rather than silently
+// dropped - while Close() must still never hang.
 func TestVendorRoundTrip_ASRFatalErrorDoesNotHangSession(t *testing.T) {
 	sarvamSrv, sarvamURL := newFakeSarvamErrorServer(t)
 	defer sarvamSrv.Close()
@@ -411,22 +429,35 @@ func TestVendorRoundTrip_ASRFatalErrorDoesNotHangSession(t *testing.T) {
 
 	sess := newVendorSession(t, ctx, sarvamURL, gpt4oSrv.URL, wsURL(cartesiaSrv))
 
-	if err := sess.PushCallerAudio(asr.AudioFrame{PCM: make([]byte, 320), SampleRate: 16000}); err != nil {
+	frame := asr.AudioFrame{PCM: make([]byte, 320), SampleRate: 16000}
+	if err := sess.PushCallerAudio(frame); err != nil {
 		t.Fatalf("PushCallerAudio should succeed - the vendor error arrives asynchronously after this frame is sent: %v", err)
 	}
 
-	// Nothing should ever arrive on AgentHearsAudio(): the ASR leg dies
-	// before producing a transcript to translate/synthesize.
-	select {
-	case chunk, ok := <-sess.AgentHearsAudio():
-		if ok {
-			t.Fatalf("expected no synthesized audio after a fatal ASR vendor error, got %+v", chunk)
+	// The buffered caller audio must be forwarded to the agent as a final
+	// passthrough chunk once the caller leg's real Sarvam ASR stream dies
+	// on the fatal vendor error, instead of being silently dropped.
+	var sawOriginal, sawFinal bool
+	deadline := time.After(5 * time.Second)
+	for !sawFinal {
+		select {
+		case chunk, ok := <-sess.AgentHearsAudio():
+			if !ok {
+				t.Fatal("AgentHearsAudio closed unexpectedly before the passthrough chunk arrived")
+			}
+			if string(chunk.PCM) == string(frame.PCM) {
+				sawOriginal = true
+			}
+			sawFinal = chunk.IsFinal
+		case <-deadline:
+			t.Fatal("timed out waiting for the buffered caller audio to be forwarded as passthrough after the fatal ASR vendor error")
 		}
-		// ok == false (channel closed) is also acceptable here: Close()
-		// below is what this test actually bounds.
-	case <-time.After(2 * time.Second):
-		// Also fine: the leg goroutine may still be unwinding; nothing
-		// should ever arrive regardless, and Close() below must not hang.
+	}
+	if !sawOriginal {
+		t.Fatal("expected the buffered original caller audio to be forwarded as a passthrough chunk after the fatal ASR vendor error, but it never appeared on AgentHearsAudio()")
+	}
+	if !sess.CallerLegDegraded() {
+		t.Fatal("expected CallerLegDegraded() to be true after the caller leg's real Sarvam ASR stream died on a fatal vendor error")
 	}
 
 	closeDone := make(chan error, 1)

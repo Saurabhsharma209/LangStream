@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -451,5 +453,280 @@ func TestSarvamRecognizer_NoMetricsConfiguredNoOp(t *testing.T) {
 	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 16000}
 	if err := sess.PushAudio(context.Background(), frame); err != nil {
 		t.Fatalf("PushAudio: %v", err)
+	}
+}
+
+// --- Circuit breaker wiring: SarvamRecognizer -----------------------------
+
+// newRefusingSarvamServer starts an httptest server that never upgrades the
+// WebSocket handshake -- every connection attempt gets a plain 500 -- so
+// every ensureConnected dial against it fails. attempts counts how many
+// times the handler ran (i.e. how many dial attempts were actually made).
+func newRefusingSarvamServer(t *testing.T) (*httptest.Server, string, *int32) {
+	t.Helper()
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/speech-to-text/ws"
+	return srv, wsURL, &attempts
+}
+
+// TestSarvamRecognizer_CircuitBreaker_TripsAndFailsFast covers (a) and (b)
+// from the ASR circuit-breaker task: N consecutive sessions that each fail
+// to ever establish their initial connection trip the breaker, and the
+// next StartStream call after that is rejected immediately with an error
+// wrapping ErrCircuitOpen, making zero dial attempts.
+func TestSarvamRecognizer_CircuitBreaker_TripsAndFailsFast(t *testing.T) {
+	srv, wsURL, attempts := newRefusingSarvamServer(t)
+	defer srv.Close()
+
+	os.Setenv("SARVAM_API_KEY", "unit-test-key")
+	const threshold = 2
+	r, err := NewSarvamRecognizer(
+		WithSarvamBaseURL(wsURL),
+		WithSarvamMaxReconnectAttempts(1),
+		WithSarvamCircuitBreaker(threshold, 10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewSarvamRecognizer: %v", err)
+	}
+
+	for i := 0; i < threshold; i++ {
+		sess, err := r.StartStream(context.Background(), "hi")
+		if err != nil {
+			t.Fatalf("session %d: StartStream should succeed while breaker is closed, got: %v", i, err)
+		}
+		frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+		if err := sess.PushAudio(context.Background(), frame); err == nil {
+			t.Fatalf("session %d: expected PushAudio to fail (vendor refuses every connect)", i)
+		}
+		_ = sess.Close()
+	}
+	attemptsAfterTrips := atomic.LoadInt32(attempts)
+	if attemptsAfterTrips == 0 {
+		t.Fatal("expected at least one real dial attempt across the failing sessions")
+	}
+
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err == nil {
+		t.Fatal("expected StartStream to fail while the breaker is open")
+	}
+	if sess != nil {
+		t.Error("expected a nil session when the breaker rejects StartStream")
+	}
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Errorf("errors.Is(err, ErrCircuitOpen) = false for err = %v, want true", err)
+	}
+	if got := atomic.LoadInt32(attempts); got != attemptsAfterTrips {
+		t.Errorf("dial attempts after breaker-rejected StartStream = %d, want unchanged %d (zero dial attempts)", got, attemptsAfterTrips)
+	}
+}
+
+// TestSarvamRecognizer_CircuitBreaker_RecordsErrorReason verifies that a
+// circuit-open rejection is tagged via RecordErrorReason(stage="asr_connect",
+// vendor="sarvam", reason="circuit_open") when a metrics recorder is
+// configured, reusing the same WithSarvamMetrics recorder already used for
+// cost.
+func TestSarvamRecognizer_CircuitBreaker_RecordsErrorReason(t *testing.T) {
+	srv, wsURL, _ := newRefusingSarvamServer(t)
+	defer srv.Close()
+
+	os.Setenv("SARVAM_API_KEY", "unit-test-key")
+	metrics := observability.NewLatencyRecorder()
+	r, err := NewSarvamRecognizer(
+		WithSarvamBaseURL(wsURL),
+		WithSarvamMaxReconnectAttempts(1),
+		WithSarvamCircuitBreaker(1, 10*time.Second),
+		WithSarvamMetrics(metrics),
+	)
+	if err != nil {
+		t.Fatalf("NewSarvamRecognizer: %v", err)
+	}
+
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err == nil {
+		t.Fatal("expected PushAudio to fail (vendor refuses every connect)")
+	}
+	_ = sess.Close()
+
+	if _, err := r.StartStream(context.Background(), "hi"); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("expected the second StartStream to be rejected by the (now open) breaker, got: %v", err)
+	}
+
+	if got := metrics.ReasonCount("asr_connect", "sarvam", "circuit_open"); got != 1 {
+		t.Errorf("ReasonCount(asr_connect, sarvam, circuit_open) = %d, want 1", got)
+	}
+}
+
+// TestSarvamRecognizer_CircuitBreaker_ProbeAfterCooldownSucceeds covers (c):
+// after the cooldown elapses, exactly one probe StartStream is let
+// through, and a successful initial connect on that probe session closes
+// the breaker.
+func TestSarvamRecognizer_CircuitBreaker_ProbeAfterCooldownSucceeds(t *testing.T) {
+	var down int32 = 1 // 1 = refuse every connect, 0 = accept
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		if atomic.LoadInt32(&down) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("fake sarvam server: upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/speech-to-text/ws"
+
+	os.Setenv("SARVAM_API_KEY", "unit-test-key")
+	const cooldown = 40 * time.Millisecond
+	r, err := NewSarvamRecognizer(
+		WithSarvamBaseURL(wsURL),
+		WithSarvamMaxReconnectAttempts(1),
+		WithSarvamCircuitBreaker(1, cooldown),
+	)
+	if err != nil {
+		t.Fatalf("NewSarvamRecognizer: %v", err)
+	}
+
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err == nil {
+		t.Fatal("expected PushAudio to fail (vendor refuses every connect)")
+	}
+	_ = sess.Close()
+
+	attemptsBeforeProbe := atomic.LoadInt32(&attempts)
+	if _, err := r.StartStream(context.Background(), "hi"); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("expected StartStream to be rejected while cooling down, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != attemptsBeforeProbe {
+		t.Errorf("dial attempts while cooling down = %d, want unchanged %d", got, attemptsBeforeProbe)
+	}
+
+	time.Sleep(cooldown + 30*time.Millisecond)
+	atomic.StoreInt32(&down, 0)
+
+	probeSess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("expected the post-cooldown probe StartStream to be let through, got: %v", err)
+	}
+	if err := probeSess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("expected the probe session's initial connect to succeed, got: %v", err)
+	}
+	defer probeSess.Close()
+
+	atomic.StoreInt32(&down, 1)
+	attemptsBeforeNext := atomic.LoadInt32(&attempts)
+	nextSess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream after breaker closed: %v", err)
+	}
+	if err := nextSess.PushAudio(context.Background(), frame); err == nil {
+		t.Fatal("expected PushAudio to fail against the now-down vendor")
+	}
+	if got := atomic.LoadInt32(&attempts) - attemptsBeforeNext; got == 0 {
+		t.Error("expected a real dial attempt after the breaker closed, got none (still fail-fast)")
+	}
+}
+
+// TestSarvamRecognizer_CircuitBreaker_MidStreamReconnectDoesNotTrip covers
+// (d): a session that connects successfully at least once, then later
+// drops and reconnects mid-stream via the existing reconnectBackoff path,
+// must never trip or otherwise interact with the circuit breaker -- even
+// if that later mid-stream reconnect itself fails.
+func TestSarvamRecognizer_CircuitBreaker_MidStreamReconnectDoesNotTrip(t *testing.T) {
+	var connNum int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&connNum, 1)
+		if n >= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("fake sarvam server: upgrade: %v", err)
+			return
+		}
+		_, _, _ = conn.ReadMessage()
+		conn.Close()
+	}))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/speech-to-text/ws"
+
+	os.Setenv("SARVAM_API_KEY", "unit-test-key")
+	r, err := NewSarvamRecognizer(
+		WithSarvamBaseURL(wsURL),
+		WithSarvamMaxReconnectAttempts(1),
+		WithSarvamCircuitBreaker(1, 10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewSarvamRecognizer: %v", err)
+	}
+
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("first PushAudio (initial connect) should succeed, got: %v", err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	if err := sess.PushAudio(context.Background(), frame); err == nil {
+		t.Fatal("expected the mid-stream reconnect to fail (vendor refuses every reconnect)")
+	}
+	_ = sess.Close()
+
+	if r.breaker.open {
+		t.Error("breaker should not be open after only a mid-stream reconnect failure (post initial-connect)")
+	}
+	if r.breaker.consecutiveFails != 0 {
+		t.Errorf("breaker.consecutiveFails = %d, want 0 (mid-stream reconnects must not touch the breaker)", r.breaker.consecutiveFails)
+	}
+
+	if _, err := r.StartStream(context.Background(), "hi"); err != nil {
+		t.Errorf("expected a fresh StartStream to still succeed (breaker untouched), got: %v", err)
+	}
+}
+
+// TestSarvamRecognizer_CircuitBreaker_DefaultEnabledWithoutOption verifies a
+// default breaker is always active, matching pkg/translate and pkg/tts's
+// convention.
+func TestSarvamRecognizer_CircuitBreaker_DefaultEnabledWithoutOption(t *testing.T) {
+	os.Setenv("SARVAM_API_KEY", "unit-test-key")
+	r, err := NewSarvamRecognizer()
+	if err != nil {
+		t.Fatalf("NewSarvamRecognizer: %v", err)
+	}
+	if r.breaker == nil {
+		t.Fatal("expected a non-nil default circuit breaker when WithSarvamCircuitBreaker is not used")
+	}
+	if r.breaker.threshold != defaultBreakerFailureThreshold {
+		t.Errorf("default threshold = %d, want %d", r.breaker.threshold, defaultBreakerFailureThreshold)
+	}
+	if r.breaker.cooldown != defaultBreakerCooldown {
+		t.Errorf("default cooldown = %v, want %v", r.breaker.cooldown, defaultBreakerCooldown)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/exotel/langstream/pkg/asr"
@@ -155,6 +156,17 @@ type Session struct {
 
 	wg sync.WaitGroup
 
+	// closing is set to true as the very first step of Close, before
+	// either ASR stream is closed. runLeg's transcripts-channel-closed
+	// branch reads it to tell apart two very different reasons a leg's
+	// asr.StreamSession.Transcripts() channel can close: Session.Close()
+	// deliberately closing it (closing == true: normal, expected shutdown,
+	// no degrade/passthrough needed since the whole Session is ending
+	// anyway) versus the backend itself closing it unprompted mid-call
+	// (closing == false: a permanent ASR failure -- see runLeg's doc
+	// comment and fallback.go's package doc comment).
+	closing atomic.Bool
+
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -252,9 +264,17 @@ func (s *Session) Metrics() *observability.LatencyRecorder {
 
 // CallerLegDegraded reports whether the caller leg (caller audio -> ASR ->
 // Translator -> TTS -> agent hears it) has been marked permanently
-// degraded (see FallbackConfig.MaxConsecutiveFailures and FatalError).
-// Once true it stays true for the rest of the Session's life: raw caller
-// audio is passed through to the agent instead of being translated.
+// degraded. This happens either because the leg's MT/TTS pipeline
+// accumulated FallbackConfig.MaxConsecutiveFailures consecutive failures
+// (or hit a single FatalError), or because the leg's underlying ASR
+// StreamSession's Transcripts() channel closed on its own mid-call rather
+// than as part of Session.Close() -- a permanent ASR failure (see runLeg's
+// doc comment and fallback.go's package doc comment). Once true it stays
+// true for the rest of the Session's life: in the MT/TTS case, raw caller
+// audio keeps being passed through to the agent instead of translated; in
+// the ASR-failure case, the leg's goroutine has already exited and no
+// further audio for it will ever be forwarded (see runLeg's doc comment)
+// -- true here means "this leg is dead", not just "still degraded".
 func (s *Session) CallerLegDegraded() bool {
 	return s.callerLeg.isDegraded()
 }
@@ -326,6 +346,12 @@ func (s *Session) CallerHearsAudio() <-chan tts.AudioChunk {
 // end-of-stream, so this ordering matters beyond the mock.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
+		// Set before closing either ASR stream, so runLeg's
+		// transcripts-channel-closed branch can tell this deliberate,
+		// expected shutdown apart from a spontaneous permanent ASR
+		// failure mid-call (see the closing field's doc comment).
+		s.closing.Store(true)
+
 		var errs []error
 		if err := s.callerASR.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("closing caller ASR stream: %w", err))
@@ -384,6 +410,21 @@ func (s *Session) Close() error {
 // FallbackConfig.ConfidenceThreshold, the Translator errors or times out,
 // or the Synthesizer errors or stalls. Repeated MT/TTS failures (or a
 // single FatalError) permanently degrade the leg via leg.recordFailure.
+//
+// stream.Transcripts() closing is handled the same way, but only when it
+// happens on its own, mid-call (a permanent ASR failure -- see this
+// function's `tr, ok := <-transcripts` case and fallback.go's package doc
+// comment) rather than because Session.Close() deliberately closed the
+// stream (s.closing; normal shutdown, nothing to degrade). In the
+// permanent-failure case, once this function returns, the leg is gone for
+// good: it is the only consumer that ever drains leg.audio or reads
+// stream.Transcripts(), so any Push{Caller,Agent}Audio call after that
+// point still succeeds (the frame is simply buffered into leg.audio's
+// ring buffer) but nothing will ever forward that audio anywhere again
+// until Session.Close() runs. Keeping the leg "alive" across its own ASR
+// stream permanently dying would require a much deeper redesign (a
+// replacement consumer for leg.audio with no ASR stream feeding it) and is
+// intentionally out of scope here.
 func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLang Language, out chan<- tts.AudioChunk) {
 	defer s.wg.Done()
 
@@ -394,6 +435,50 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 			return
 		case tr, ok := <-transcripts:
 			if !ok {
+				// The ASR backend's Transcripts() channel closed. If
+				// Session.Close() is the reason (s.closing is set as the
+				// very first step of Close, before either ASR stream is
+				// closed -- see the closing field's doc comment), this is
+				// normal, expected shutdown: the whole Session is ending
+				// anyway, so there is nothing to degrade or pass through.
+				if s.closing.Load() {
+					return
+				}
+
+				// Otherwise the backend itself closed the channel
+				// unprompted, mid-call: a *permanent* ASR failure (e.g.
+				// Deepgram's failAndClose after exhausting
+				// maxReconnectAttempts, see pkg/asr/backoff.go), as
+				// opposed to the transient reconnects fallback.go's
+				// package doc comment says today's backends already
+				// handle internally. This leg is completely dead, not
+				// merely quiet, so -- exactly like every other fallback
+				// trigger in this function -- mark it permanently
+				// degraded, record why on the dashboard, and forward
+				// whatever raw audio was still buffered for the
+				// in-flight utterance as one last passthrough chunk
+				// instead of silently dropping it.
+				leg.recordFailure(true, 0)
+				recordFallbackReason(s.metrics, stageLegDegraded, leg.name, reasonASRStreamClosed)
+
+				utteranceStart := leg.audio.utteranceStart()
+				frames := leg.audio.drain()
+				s.emitPassthroughTimed(frames, out, utteranceStart)
+
+				// Deliberately NOT attempting to keep this leg "alive"
+				// for audio pushed after this point: doing so would need
+				// a live consumer to keep draining leg.audio, but runLeg
+				// (this goroutine) is the only consumer and is about to
+				// return -- there would be nothing left to drain future
+				// pushes until Session.Close() runs. Future
+				// Push{Caller,Agent}Audio calls will still succeed (the
+				// frame is simply buffered into leg.audio's ring buffer,
+				// per its existing behavior) but nothing will ever
+				// drain/forward that audio again. That is a real,
+				// documented gap -- not silently pretended away -- left
+				// for a future sprint; today's fix only stops dropping
+				// the audio that was already in flight at the moment the
+				// leg died.
 				return
 			}
 			if !tr.IsFinal {

@@ -32,6 +32,24 @@
 // (mock, Deepgram, Sarvam, GPT-4o, Cartesia) implement it yet, so in
 // practice MaxConsecutiveFailures is what actually detects "permanently
 // unavailable" backends right now — that's expected and fine.
+//
+// The "not this file's problem" carve-out for the underlying ASR socket
+// above is correct for *transient* reconnects (a backend that drops and
+// re-establishes its own socket mid-stream, transparently to Session), but
+// not for a *permanent* ASR failure: if a StreamSession's Transcripts()
+// channel closes on its own (e.g. Deepgram's failAndClose after
+// exhausting maxReconnectAttempts, or any future backend doing the
+// equivalent) rather than because Session.Close() deliberately closed it,
+// that leg is completely dead, not merely quiet. session.go's runLeg
+// handles that case the same way as every other trigger above: it marks
+// the leg permanently degraded (leg.recordFailure), records a
+// stageLegDegraded event tagged with reason reasonASRStreamClosed (see
+// recordFallbackReason) so a dashboard can tell *why* the leg went dark,
+// and forwards whatever raw audio was still buffered for the in-flight
+// utterance as one last passthrough chunk instead of silently dropping
+// it. See runLeg's doc comment for the one thing that case explicitly
+// does NOT attempt to do (keep the leg alive for audio pushed after it
+// dies).
 package langstream
 
 import (
@@ -273,9 +291,14 @@ func newLegState(name string, bufferFrames int) *legState {
 	return &legState{name: name, audio: newAudioRingBuffer(bufferFrames)}
 }
 
-// recordFailure records one MT/TTS failure for the leg and reports whether
-// this call caused the leg to become newly (permanently) degraded: either
-// fatal is true, or the leg has now accumulated maxConsecutive consecutive
+// recordFailure records one permanent-degradation trigger for the leg —
+// either an MT/TTS failure (fatal is false, contributing to the
+// consecutive-failure count) or an unconditionally fatal event such as a
+// FatalError or the leg's ASR StreamSession permanently closing (fatal is
+// true, e.g. runLeg's `leg.recordFailure(true, 0)` call when
+// stream.Transcripts() closes on its own) — and reports whether this call
+// caused the leg to become newly (permanently) degraded: either fatal is
+// true, or the leg has now accumulated maxConsecutive consecutive
 // failures.
 func (ls *legState) recordFailure(fatal bool, maxConsecutive int) bool {
 	if fatal {
@@ -359,6 +382,33 @@ func recordFallbackErr(rec *observability.LatencyRecorder, stage, vendor string,
 	reason := ""
 	if errors.Is(err, translate.ErrCircuitOpen) || errors.Is(err, tts.ErrCircuitOpen) {
 		reason = "circuit_open"
+	}
+	rec.RecordErrorReason(stage, vendor, reason)
+}
+
+// reasonASRStreamClosed tags a stageLegDegraded event (via
+// recordFallbackReason) recorded when a leg's underlying ASR
+// StreamSession's Transcripts() channel closes permanently mid-call
+// (rather than because Session.Close() deliberately closed it) — see
+// session.go's runLeg and this file's package doc comment. Named the same
+// way recordFallbackErr's "circuit_open" reason is: a short, stable,
+// dashboard-facing string distinguishing *why* the leg died, not just
+// that it did.
+const reasonASRStreamClosed = "asr_stream_closed"
+
+// recordFallbackReason behaves like recordFallback, but additionally tags
+// the event with an explicit reason via RecordErrorReason, following the
+// exact pattern recordFallbackErr already uses for MT/TTS's "circuit_open"
+// reason. It exists separately from recordFallbackErr because some
+// triggers (e.g. reasonASRStreamClosed) aren't derived from a
+// Translator/Synthesizer error value at all, so there is no err to
+// inspect.
+func recordFallbackReason(rec *observability.LatencyRecorder, stage, vendor, reason string) {
+	if rec == nil {
+		return
+	}
+	if vendor == "" {
+		vendor = "unknown"
 	}
 	rec.RecordErrorReason(stage, vendor, reason)
 }

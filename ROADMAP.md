@@ -274,6 +274,41 @@ first WER>1.0 hallucination case). No new bugs found this run. Week 4
 still cannot meaningfully start until Saurabh decides on anchor customers
 / live traffic.
 
+**2026-07-18 note:** Sprint 12 hit a hard sandbox disk-exhaustion wall
+(`$HOME`/`/sessions` at 100% full all run, root filesystem down to
+<100MB free mid-build) that made a full `go build ./...` (specifically
+the `pion/webrtc`-dependent `pkg/webrtcgw`/`cmd/langstream` tree)
+impossible to verify. Per this automation's own rules, no workstream
+agents were spawned and no code was committed or pushed that day rather
+than ship an unverified change -- see DEVLOG.md's 2026-07-18 entry. No
+roadmap items closed or attempted.
+
+**2026-07-20 note:** the Sprint 12 disk-exhaustion problem is resolved
+this run -- root filesystem had 3+GB free throughout, full `go build
+./...`/`go vet ./...`/`go test ./... -race -count=3`/`gofmt -l .` all
+passed clean on the very first try, including `pkg/webrtcgw`/
+`cmd/langstream`. Still genuinely blocked on Saurabh's anchor-customer/
+live-traffic decision for Week 3's one open item and all of Week 4, so
+today (Sprint 13) again did opportunistic hardening: found and closed a
+real gap where `pkg/asr` (Deepgram, Sarvam) had retry/reconnect logic but,
+unlike `pkg/translate`/`pkg/tts`, no circuit breaker -- a sustained vendor
+outage made every new call pay a full dial-and-backoff cost instead of
+failing fast (PE, now fixed, `asr.ErrCircuitOpen` exported, tagged
+`"circuit_open"` on the dashboard, mid-stream reconnects deliberately left
+untouched). Also found and fixed a real, previously-silent gap in
+`pkg/langstream/session.go`: a *permanent* ASR backend failure (as opposed
+to Deepgram/Sarvam's existing transient mid-stream reconnect) silently
+ended a leg's goroutine with no dashboard visibility and dropped whatever
+audio was mid-utterance, unlike every other fallback trigger in that file
+(Tech, now fixed: leg marks itself degraded, `"asr_stream_closed"` reason
+recorded, buffered audio forwarded as a final passthrough chunk -- see
+DEVLOG.md for the documented, intentional limitation this fix does not
+attempt to solve). QA added integration coverage for both fixes, updated
+one root-level integration test whose old assertion the Tech fix
+correctly invalidated, and grew the WER corpus 41->47 with new error
+shapes. No other bugs found. Week 4 still cannot meaningfully start
+without Saurabh's decision.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

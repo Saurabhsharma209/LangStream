@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/exotel/langstream/pkg/asr"
+	"github.com/exotel/langstream/pkg/observability"
 	"github.com/exotel/langstream/pkg/translate"
 	"github.com/exotel/langstream/pkg/tts"
 )
@@ -643,6 +644,138 @@ func TestSessionTTSStallFallsBackToPassthrough(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timed out waiting for passthrough after a TTS stall (session may be hanging)")
 		}
+	}
+}
+
+// TestSessionASRStreamPermanentClosureDegradesLegAndForwardsBufferedAudio
+// exercises the gap fixed in runLeg's `tr, ok := <-transcripts` case: a
+// leg's ASR StreamSession's Transcripts() channel closing on its own,
+// mid-call (e.g. Deepgram's failAndClose after exhausting its own
+// reconnect/retry budget, see pkg/asr/backoff.go) -- as opposed to
+// Session.Close() deliberately closing it -- is a permanent failure that
+// must be visible (CallerLegDegraded/AgentLegDegraded, and a dashboard
+// event tagged reasonASRStreamClosed) and must not silently drop whatever
+// raw audio was still buffered for the in-flight utterance.
+func TestSessionASRStreamPermanentClosureDegradesLegAndForwardsBufferedAudio(t *testing.T) {
+	rec := &fakeRecognizer{
+		// Neither leg's fakeStreamSession ever emits a scripted
+		// transcript: this test drives the caller leg's permanent-failure
+		// path purely by closing its Transcripts() channel directly,
+		// simulating a backend that has exhausted its own internal
+		// reconnect/retry budget mid-utterance.
+		scripts: [][]asr.Transcript{{}, {}},
+	}
+	metrics := observability.NewLatencyRecorder()
+
+	cfg := validConfig()
+	cfg.ASR = rec
+	cfg.Fallback = FallbackConfig{Metrics: metrics}
+
+	sess, err := NewSession(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer sess.Close()
+
+	frame := asr.AudioFrame{PCM: []byte{11, 22, 33, 44}, SampleRate: 8000}
+	if err := sess.PushCallerAudio(frame); err != nil {
+		t.Fatalf("PushCallerAudio: %v", err)
+	}
+
+	if len(rec.sessions) == 0 {
+		t.Fatal("expected fakeRecognizer to have started at least one stream")
+	}
+	callerStream := rec.sessions[0]
+
+	// Simulate the ASR backend permanently failing mid-call: its
+	// Transcripts() channel closes on its own, independent of
+	// Session.Close ever being called.
+	if err := callerStream.Close(); err != nil {
+		t.Fatalf("closing fake caller ASR stream: %v", err)
+	}
+
+	// The buffered audio for the in-flight utterance must still reach the
+	// agent as a final passthrough chunk, instead of being silently
+	// dropped.
+	var sawOriginal, sawFinal bool
+	deadline := time.After(2 * time.Second)
+	for !sawFinal {
+		select {
+		case chunk, ok := <-sess.AgentHearsAudio():
+			if !ok {
+				t.Fatal("AgentHearsAudio closed unexpectedly")
+			}
+			if string(chunk.PCM) == string(frame.PCM) {
+				sawOriginal = true
+			}
+			sawFinal = chunk.IsFinal
+		case <-deadline:
+			t.Fatal("timed out waiting for passthrough audio after the ASR stream closed")
+		}
+	}
+	if !sawOriginal {
+		t.Fatal("expected the buffered original audio to be forwarded as passthrough after the ASR stream closed")
+	}
+
+	if !sess.CallerLegDegraded() {
+		t.Fatal("expected the caller leg to be marked permanently degraded once its ASR stream closed")
+	}
+	if sess.AgentLegDegraded() {
+		t.Fatal("the agent leg's ASR stream never closed; it must not be affected")
+	}
+
+	if got := metrics.ReasonCount(stageLegDegraded, "caller", reasonASRStreamClosed); got != 1 {
+		t.Fatalf("ReasonCount(leg_degraded, caller, asr_stream_closed) = %d, want 1", got)
+	}
+
+	// Close must still shut the session down cleanly afterward: the
+	// caller leg's goroutine has already exited on its own (proven
+	// above), and the agent leg's goroutine must still exit normally once
+	// Close closes its (still-live) ASR stream -- proving no goroutine
+	// leak, no panic, and no hang.
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	if _, ok := <-sess.AgentHearsAudio(); ok {
+		t.Fatal("AgentHearsAudio not closed after Close")
+	}
+	if _, ok := <-sess.CallerHearsAudio(); ok {
+		t.Fatal("CallerHearsAudio not closed after Close")
+	}
+}
+
+// TestSessionCloseDoesNotTriggerASRStreamClosedFallback exercises the
+// other side of the same change: Session.Close() itself closes both ASR
+// streams as part of normal shutdown (see Close's doc comment), and that
+// must NOT be misread as a permanent ASR failure -- no leg should be
+// marked degraded, and no reasonASRStreamClosed event should be recorded,
+// purely because the call ended normally.
+func TestSessionCloseDoesNotTriggerASRStreamClosedFallback(t *testing.T) {
+	metrics := observability.NewLatencyRecorder()
+
+	cfg := validConfig()
+	cfg.Fallback = FallbackConfig{Metrics: metrics}
+
+	sess, err := NewSession(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if sess.CallerLegDegraded() {
+		t.Fatal("a normal Close() must not mark the caller leg permanently degraded")
+	}
+	if sess.AgentLegDegraded() {
+		t.Fatal("a normal Close() must not mark the agent leg permanently degraded")
+	}
+	if got := metrics.ReasonCount(stageLegDegraded, "caller", reasonASRStreamClosed); got != 0 {
+		t.Fatalf("ReasonCount(leg_degraded, caller, asr_stream_closed) = %d, want 0 after a normal Close()", got)
+	}
+	if got := metrics.ReasonCount(stageLegDegraded, "agent", reasonASRStreamClosed); got != 0 {
+		t.Fatalf("ReasonCount(leg_degraded, agent, asr_stream_closed) = %d, want 0 after a normal Close()", got)
 	}
 }
 
