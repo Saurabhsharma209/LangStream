@@ -711,6 +711,157 @@ func TestSarvamRecognizer_CircuitBreaker_MidStreamReconnectDoesNotTrip(t *testin
 	}
 }
 
+// TestSarvamRecognizer_MidStreamReconnectSucceeds_CostRecordedOncePerPush is
+// part of the 2026-07-21 PE cost-tracking-under-retry/reconnect audit (see
+// DEVLOG.md): it pins invariant (3) from that audit -- a mid-stream
+// reconnect must not cause RecordCost to fire twice (or zero times) for the
+// audio pushed in the PushAudio call that triggered/absorbed the
+// reconnect, and (specific to Sarvam) that s.totalMS is never reset or
+// double-incremented across a reconnect in a way that would change the
+// per-push cost. Unlike
+// TestSarvamRecognizer_CircuitBreaker_MidStreamReconnectDoesNotTrip above
+// (which forces the reconnect to fail, to prove the breaker is untouched),
+// this test forces the reconnect to SUCCEED and continues pushing audio
+// afterward, so it can assert on the resulting cost totals against a real
+// fake server rather than just reading the source.
+func TestSarvamRecognizer_MidStreamReconnectSucceeds_CostRecordedOncePerPush(t *testing.T) {
+	var connNum int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&connNum, 1)
+		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("fake sarvam server: upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+		if n == 1 {
+			// The first connection accepts exactly one audio message, then
+			// drops -- forcing a mid-stream reconnect on the next
+			// PushAudio call.
+			_, _, _ = conn.ReadMessage()
+			return
+		}
+		// The reconnect (and anything after it) stays up and silently
+		// drains whatever audio arrives, so every later PushAudio call
+		// succeeds directly.
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/speech-to-text/ws"
+
+	os.Setenv("SARVAM_API_KEY", "unit-test-key")
+	metrics := observability.NewLatencyRecorder()
+	r, err := NewSarvamRecognizer(
+		WithSarvamBaseURL(wsURL),
+		WithSarvamMaxReconnectAttempts(3),
+		WithSarvamMetrics(metrics),
+	)
+	if err != nil {
+		t.Fatalf("NewSarvamRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	// 320 bytes @ 8kHz/16-bit mono = 160 samples = 20ms of audio.
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio[0] (initial connect): %v", err)
+	}
+
+	// Give the readLoop goroutine time to observe the server's drop of
+	// the first connection before the next PushAudio call, so that call
+	// deterministically takes the mid-stream reconnect path (same
+	// synchronization convention as
+	// TestSarvamRecognizer_CircuitBreaker_MidStreamReconnectDoesNotTrip
+	// above).
+	time.Sleep(150 * time.Millisecond)
+
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio[1] (mid-stream reconnect, should succeed against the new connection): %v", err)
+	}
+
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio[2] (post-reconnect): %v", err)
+	}
+
+	const wantPushes = 3
+	if got := metrics.CostEventCount("sarvam"); got != wantPushes {
+		t.Errorf("CostEventCount(sarvam) = %d, want %d (exactly one RecordCost per successful PushAudio call, even though PushAudio[1] triggered a mid-stream reconnect internally -- a mismatch would mean the reconnect either double-billed or dropped a billing event)", got, wantPushes)
+	}
+	wantMinutes := (0.02 / 60.0) * float64(wantPushes)
+	wantCost := wantMinutes * sarvamCostPerMinuteUSD
+	if got := metrics.CostTotal("sarvam"); got < wantCost*0.999 || got > wantCost*1.001 {
+		t.Errorf("CostTotal(sarvam) = %v, want %v (%d frames' worth of 20ms audio, no double-count introduced by the reconnect, and s.totalMS was not reset/double-incremented across it)", got, wantCost, wantPushes)
+	}
+
+	// s.totalMS (the cumulative pushed-audio duration Sarvam's
+	// handleMessage uses to approximate transcript StartMS/EndMS; see
+	// assumption (4) in this file's package doc comment) must also
+	// reflect exactly 3 frames' worth, not more (no double count from the
+	// reconnect) and not less (no dropped frame).
+	sess.(*sarvamSession).mu.Lock()
+	gotTotalMS := sess.(*sarvamSession).totalMS
+	sess.(*sarvamSession).mu.Unlock()
+	if wantTotalMS := int64(20 * wantPushes); gotTotalMS != wantTotalMS {
+		t.Errorf("sarvamSession.totalMS = %d, want %d (%d frames of 20ms each)", gotTotalMS, wantTotalMS, wantPushes)
+	}
+}
+
+// TestSarvamRecognizer_CircuitBreaker_OpenRejectionNeverRecordsCost is part
+// of the 2026-07-21 PE cost-tracking-under-retry/reconnect audit: it pins
+// invariant (4) -- a call rejected fail-fast by an open circuit breaker
+// (zero dial attempts, zero audio ever sent) must never record a nonzero
+// cost. TestSarvamRecognizer_CircuitBreaker_RecordsErrorReason above
+// already checks the rejection is tagged via RecordErrorReason; this test
+// checks the orthogonal cost-recording seam explicitly, which nothing
+// previously asserted directly.
+func TestSarvamRecognizer_CircuitBreaker_OpenRejectionNeverRecordsCost(t *testing.T) {
+	srv, wsURL, _ := newRefusingSarvamServer(t)
+	defer srv.Close()
+
+	os.Setenv("SARVAM_API_KEY", "unit-test-key")
+	metrics := observability.NewLatencyRecorder()
+	r, err := NewSarvamRecognizer(
+		WithSarvamBaseURL(wsURL),
+		WithSarvamMaxReconnectAttempts(1),
+		WithSarvamCircuitBreaker(1, 10*time.Second),
+		WithSarvamMetrics(metrics),
+	)
+	if err != nil {
+		t.Fatalf("NewSarvamRecognizer: %v", err)
+	}
+
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err == nil {
+		t.Fatal("expected PushAudio to fail (vendor refuses every connect)")
+	}
+	_ = sess.Close()
+
+	if _, err := r.StartStream(context.Background(), "hi"); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("expected the second StartStream to be rejected by the (now open) breaker, got: %v", err)
+	}
+
+	if got := metrics.CostEventCount("sarvam"); got != 0 {
+		t.Errorf("CostEventCount(sarvam) = %d, want 0: a circuit-open rejection must never record cost (no vendor call was ever attempted, no audio was ever sent)", got)
+	}
+	if got := metrics.CostTotal("sarvam"); got != 0 {
+		t.Errorf("CostTotal(sarvam) = %v, want 0 for a circuit-open rejection", got)
+	}
+}
+
 // TestSarvamRecognizer_CircuitBreaker_DefaultEnabledWithoutOption verifies a
 // default breaker is always active, matching pkg/translate and pkg/tts's
 // convention.

@@ -5,12 +5,27 @@ import (
 	"testing"
 )
 
+// emptyHypothesisEntries lists the corpus entries whose Hypothesis is
+// deliberately "" (a genuine total-deletion/silence-timeout shape -- see
+// FixedCorpus's Sprint 2026-07-21 doc comment on
+// hinglish_total_deletion_empty_hypothesis_silence_timeout), so
+// TestFixedCorpus_EntriesAreWellFormed's empty-Hypothesis guard (added to
+// catch the silent-fixture-bug class this repo has been bitten by before)
+// can allow exactly this one intentional exception by name instead of
+// disabling the guard for every entry.
+var emptyHypothesisEntries = map[string]bool{
+	"hinglish_total_deletion_empty_hypothesis_silence_timeout": true,
+}
+
 // TestFixedCorpus_EntriesAreWellFormed guards against the exact class of
 // silent-fixture bug this repo has been bitten by before (an empty/
 // malformed fixture that "passes" trivially): every entry must have a
-// name, language, non-empty reference/hypothesis text, and a non-empty PCM
-// frame, and names must be unique so a future accidental duplicate doesn't
-// silently shadow another entry in test output.
+// name, language, non-empty reference text, and a non-empty PCM frame, and
+// names must be unique so a future accidental duplicate doesn't silently
+// shadow another entry in test output. Hypothesis must also be non-empty,
+// except for the one entry in emptyHypothesisEntries above, whose empty
+// Hypothesis is the deliberate point of that entry (a total-deletion/
+// silence-timeout shape), not a malformed fixture.
 func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 	entries := FixedCorpus()
 	if len(entries) < 3 {
@@ -33,8 +48,11 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 		if e.Reference == "" {
 			t.Errorf("entry %q has empty Reference", e.Name)
 		}
-		if e.Hypothesis == "" {
+		if e.Hypothesis == "" && !emptyHypothesisEntries[e.Name] {
 			t.Errorf("entry %q has empty Hypothesis", e.Name)
+		}
+		if e.Hypothesis != "" && emptyHypothesisEntries[e.Name] {
+			t.Errorf("entry %q is listed in emptyHypothesisEntries but has a non-empty Hypothesis %q -- update emptyHypothesisEntries or this entry", e.Name, e.Hypothesis)
 		}
 		if len(e.PCM) == 0 {
 			t.Errorf("entry %q has empty PCM", e.Name)
@@ -99,6 +117,14 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // substitution, and three non-adjacent deletions in one sentence) — see
 // FixedCorpus's doc comment for each entry's reasoning and hand-computed
 // WER.
+//
+// Sprint 2026-07-21 (QA): includes five further entries (a total-deletion
+// entry via a genuinely empty hypothesis, a combined deletion+insertion
+// entry with no substitution, a contiguous three-word phrase-repeat
+// insertion, a systematic repeated-word substitution, and a trailing
+// contiguous three-word deletion modeling a truncated/cut-off call) —
+// see FixedCorpus's doc comment for each entry's reasoning and
+// hand-computed WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -166,6 +192,14 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_total_substitution_failure_balance_request":       5.0 / 5.0,
 		"hinglish_homophone_to_too_confirmation_query":              1.0 / 6.0,
 		"hinglish_three_nonadjacent_deletions_complaint_resolution": 3.0 / 16.0,
+
+		// Sprint 2026-07-21 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_total_deletion_empty_hypothesis_silence_timeout":               7.0 / 7.0,
+		"hinglish_deletion_and_insertion_no_substitution_order_confirmation":     2.0 / 8.0,
+		"hinglish_three_word_phrase_repeat_insertion_order_confirmation":         3.0 / 7.0,
+		"hinglish_systematic_repeated_word_substitution_hai_hain_verb_agreement": 2.0 / 11.0,
+		"hinglish_trailing_three_word_deletion_call_cutoff_complaint_update":     3.0 / 14.0,
 	}
 
 	entries := FixedCorpus()

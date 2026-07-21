@@ -1020,5 +1020,175 @@ func FixedCorpus() []CorpusEntry {
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},
+
+		// --- Sprint 2026-07-21 (QA) additions below: five more entries
+		// covering error shapes still not represented anywhere in this
+		// corpus, found while auditing every existing entry's
+		// hand-verified error shape (per DEVLOG.md's sprint-by-sprint
+		// history in this file's own doc comment) for gaps rather than
+		// re-treading an already-covered mechanic under a new name:
+		//
+		//   - a total-deletion entry via a genuinely empty hypothesis
+		//     (silence/ASR-timeout: the backend produced no transcript
+		//     text at all) -- distinct from
+		//     hinglish_total_substitution_failure_balance_request's
+		//     WER == 1.0 (S == N, same word count, every word wrong) in
+		//     that this is D == N with zero hypothesis words whatsoever,
+		//     the shape wer.go's own doc comment calls out by name
+		//     ("WordErrorRate(reference, \"\") for a non-empty reference
+		//     returns 1.0"), which no existing entry demonstrates
+		//     concretely. NOTE: unlike this corpus's other entries, this
+		//     one is deliberately NOT wired into the repo-root
+		//     wer_measurement_test.go's fake-ASR-backed pipeline test --
+		//     see that file's own comment next to this entry's absence
+		//     from its wantWER map for why (the real
+		//     asr.SarvamRecognizer client silently drops empty-transcript
+		//     messages, so it can never be observed end-to-end through
+		//     that specific wiring); it is still exercised directly by
+		//     corpus_test.go's precomputed-WER check, which calls
+		//     WordErrorRate itself rather than going through an ASR
+		//     client;
+		//
+		//   - a combined deletion-plus-insertion entry with NO
+		//     substitution at all (one reference word dropped, one
+		//     unrelated word inserted elsewhere, with enough matching
+		//     words in between that the two edits can't collapse into a
+		//     single substitution under minimum-edit alignment) --
+		//     distinct from every existing multi-type entry
+		//     (hinglish_long_utterance_substitution_and_deletion_mixed_complaint_escalation
+		//     mixes substitution+deletion,
+		//     hinglish_three_error_types_mixed_appointment_reschedule
+		//     mixes all three), none of which isolates deletion+insertion
+		//     on their own;
+		//
+		//   - a contiguous multi-word phrase-repeat insertion (the fake
+		//     ASR duplicates a whole three-word leading phrase, not just
+		//     one word) -- every existing insertion entry
+		//     (hinglish_otp_request_insertion,
+		//     hinglish_insertion_hallucinated_filler_word,
+		//     hinglish_digit_duplication_insertion_registered_mobile_number,
+		//     hinglish_insertion_trailing_word_repeat_call_end,
+		//     hinglish_insertion_leading_word_repeat_call_open) inserts
+		//     exactly one word, and
+		//     hinglish_two_insertions_confirmation_repeat/
+		//     hinglish_long_utterance_two_insertions_delivery_confirmation
+		//     insert two words at independent, non-contiguous points --
+		//     none inserts a contiguous multi-word block;
+		//
+		//   - a systematic repeated-word substitution, where the *same*
+		//     reference word ("hai") is mis-heard the *same* way
+		//     ("hain") at two separate, non-adjacent occurrences in one
+		//     sentence -- modeling a consistent dialectal/verb-agreement
+		//     ASR bias rather than two unrelated word errors. Distinct
+		//     from hinglish_account_block_query_two_substitutions (two
+		//     *different* word pairs, each substituted once): every
+		//     existing multi-substitution entry in this corpus involves
+		//     distinct words, none repeats the identical substitution
+		//     pattern at multiple points;
+		//
+		//   - a trailing contiguous multi-word (three-word) deletion
+		//     modeling a truncated/cut-off call (the connection or ASR's
+		//     silence-detection timeout drops the last few words of an
+		//     utterance entirely) -- distinct from
+		//     hinglish_two_word_deletion_travel_booking_confirmation's
+		//     contiguous two-word deletion (mid-sentence, not at the
+		//     trailing edge, and only two words) and from
+		//     hinglish_three_nonadjacent_deletions_complaint_resolution's
+		//     three *non-adjacent* single-word deletions (scattered, not
+		//     one contiguous block): this is the first entry with a
+		//     three-word contiguous deletion specifically anchored at the
+		//     very end of the sentence.
+		//
+		//   - hinglish_total_deletion_empty_hypothesis_silence_timeout:               WER 7/7   (7 deletions / 7 words, WER == 1.0, empty hypothesis)
+		//   - hinglish_deletion_and_insertion_no_substitution_order_confirmation:     WER 2/8   (1 deletion + 1 insertion / 8 words)
+		//   - hinglish_three_word_phrase_repeat_insertion_order_confirmation:         WER 3/7   (3 insertions / 7 words)
+		//   - hinglish_systematic_repeated_word_substitution_hai_hain_verb_agreement: WER 2/11  (2 substitutions / 11 words)
+		//   - hinglish_trailing_three_word_deletion_call_cutoff_complaint_update:     WER 3/14  (3 deletions / 14 words)
+		{
+			// The fake ASR backend produced no transcript text
+			// whatsoever for this utterance (modeling a total silence/
+			// ASR-timeout failure) -- wer.go's own doc comment documents
+			// WordErrorRate(reference, "") returning 1.0 for a non-empty
+			// reference, but no existing entry demonstrates that
+			// concretely with a real (if trivial) reference sentence.
+			// See this block's leading comment for why this entry is
+			// intentionally excluded from wer_measurement_test.go's
+			// fake-ASR-backed pipeline wiring.
+			Name:       "hinglish_total_deletion_empty_hypothesis_silence_timeout",
+			Language:   "hi",
+			Reference:  "sir aapka refund process ho gaya hai",
+			Hypothesis: "",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The fake ASR drops "aapka" entirely (a deletion) and
+			// separately inserts an unrelated word "turant"
+			// ("immediately") after "confirm" (an insertion) -- with two
+			// unrelated matching words ("order", "confirm") in between
+			// the two edit sites, so minimum-edit alignment can't
+			// collapse them into a single substitution: this costs
+			// exactly one deletion plus one insertion, with zero
+			// substitutions, a combination no existing multi-error entry
+			// in this corpus isolates on its own.
+			Name:       "hinglish_deletion_and_insertion_no_substitution_order_confirmation",
+			Language:   "hi",
+			Reference:  "sir aapka order confirm ho gaya hai dhanyavaad",
+			Hypothesis: "sir order confirm turant ho gaya hai dhanyavaad",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The fake ASR duplicates the entire leading three-word
+			// phrase ("sir aapka order") at the very start of the
+			// utterance, rather than repeating a single word the way
+			// every existing insertion entry in this corpus does --
+			// costing three contiguous insertions in one block, a shape
+			// distinct from this corpus's existing single-word and
+			// independent-two-word insertion entries alike.
+			Name:       "hinglish_three_word_phrase_repeat_insertion_order_confirmation",
+			Language:   "hi",
+			Reference:  "sir aapka order confirm ho gaya hai",
+			Hypothesis: "sir aapka order sir aapka order confirm ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// "hai" is mis-heard as "hain" at both of its two separate,
+			// non-adjacent occurrences in this sentence -- the identical
+			// substitution pattern repeated, not two unrelated word
+			// errors the way
+			// hinglish_account_block_query_two_substitutions's two
+			// substitutions are. Models a systematic ASR bias (e.g. a
+			// singular/plural verb-agreement confusion) rather than two
+			// independent mistranscriptions.
+			Name:       "hinglish_systematic_repeated_word_substitution_hai_hain_verb_agreement",
+			Language:   "hi",
+			Reference:  "sir aapka order ready hai aur payment bhi ho gaya hai",
+			Hypothesis: "sir aapka order ready hain aur payment bhi ho gaya hain",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The fake ASR drops the trailing three words ("update
+			// denge dhanyavaad") entirely, modeling a call that cuts off
+			// (or an ASR silence-detection timeout that truncates the
+			// transcript) before the speaker finishes the sentence --
+			// distinct from
+			// hinglish_two_word_deletion_travel_booking_confirmation's
+			// contiguous two-word deletion (mid-sentence, only two
+			// words) and from
+			// hinglish_three_nonadjacent_deletions_complaint_resolution's
+			// three scattered, non-adjacent single-word deletions: this
+			// is the first entry with a three-word contiguous deletion
+			// block anchored specifically at the very end of the
+			// utterance.
+			Name:       "hinglish_trailing_three_word_deletion_call_cutoff_complaint_update",
+			Language:   "hi",
+			Reference:  "sir aapki complaint register ho gayi hai aur hum jald hi update denge dhanyavaad",
+			Hypothesis: "sir aapki complaint register ho gayi hai aur hum jald hi",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
 	}
 }

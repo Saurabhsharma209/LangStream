@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -731,4 +732,175 @@ func TestCartesiaSynthesizer_NoMetricsConfiguredNoOp(t *testing.T) {
 		t.Fatalf("SynthesizeStream: %v", err)
 	}
 	drainChunks(t, ch, 5*time.Second)
+}
+
+// TestCartesiaSynthesizer_RetrySucceeds_RecordsCostExactlyOnce is part of
+// the 2026-07-21 PE cost-tracking-under-retry/reconnect audit (see
+// DEVLOG.md): it strengthens
+// TestCartesiaSynthesizer_RetriesOn429ThenSucceeds's scenario (a transient
+// 429 on the first handshake attempt, success on the retry) with an
+// explicit cost-recording assertion -- pinning invariant (1) from that
+// audit: a retry-then-succeed call must record cost exactly once, using a
+// fresh context_id/attempt each time, not once per handshake attempt.
+func TestCartesiaSynthesizer_RetrySucceeds_RecordsCostExactlyOnce(t *testing.T) {
+	srv, attempts := newCountingCartesiaServer(t, func(attempt int, w http.ResponseWriter, r *http.Request) {
+		if attempt < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("rate limited"))
+			return
+		}
+		acceptCartesiaHandshakeAndFinish(t, w, r)
+	})
+	defer srv.Close()
+
+	t.Setenv("CARTESIA_API_KEY", "test-key")
+	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
+	metrics := observability.NewLatencyRecorder()
+	c, err := NewCartesiaSynthesizer(WithBaseURL(wsURL), WithDialTimeout(2*time.Second), WithMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewCartesiaSynthesizer: %v", err)
+	}
+
+	const text = "hello"
+	ch, err := c.SynthesizeStream(context.Background(), text, Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainChunks(t, ch, 5*time.Second)
+
+	if got := atomic.LoadInt32(attempts); got != 2 {
+		t.Fatalf("attempts = %d, want 2 (1 failure + 1 success)", got)
+	}
+
+	if n := metrics.CostEventCount("cartesia"); n != 1 {
+		t.Errorf("CostEventCount(cartesia) = %d, want exactly 1 for a call whose handshake failed once (429) then succeeded on retry -- a mismatch would mean RecordCost fired once per handshake attempt instead of once per SynthesizeStream call", n)
+	}
+	want := float64(len(text)) * cartesiaCostPerCharUSD
+	if got := metrics.CostTotal("cartesia"); got < want*0.999 || got > want*1.001 {
+		t.Errorf("CostTotal(cartesia) = %v, want %v (one character-based charge, not doubled by the retried handshake)", got, want)
+	}
+}
+
+// TestCartesiaSynthesizer_MidStreamDropAfterAccept_CostStillBilledOnce is
+// part of the 2026-07-21 PE cost-tracking-under-retry/reconnect audit: it
+// specifically targets invariant (2) -- "no cost recorded for content not
+// delivered" -- for Cartesia's design. See cartesiaCostPerCharUSD's doc
+// comment and SynthesizeStream's RecordCost call site: Cartesia bills per
+// character of *accepted* input text once the generation request's
+// handshake succeeds, not per second of audio actually streamed back
+// afterward, because that is how Cartesia's real vendor billing works
+// (the "cost" tracked here is real dollars already owed once Cartesia has
+// accepted the request, independent of whether the resulting audio later
+// reaches the caller). This test drives a real mid-stream connection drop
+// -- the handshake succeeds and the generation request is accepted, but
+// the server then closes the raw connection without ever sending a
+// "chunk" or "done" message -- and confirms this is NOT a cost-tracking
+// bug: the channel closes with no IsFinal=true chunk ever delivered (a
+// failed synthesis by this package's own documented contract; see
+// readLoop's doc comment), while the cost recorded at accept time is
+// still exactly one character-based charge, neither zeroed out nor
+// doubled by the later failure.
+func TestCartesiaSynthesizer_MidStreamDropAfterAccept_CostStillBilledOnce(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tts/websocket", func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijacking unsupported", http.StatusInternalServerError)
+			return
+		}
+		conn, rw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		accept := computeAcceptKey(r.Header.Get("Sec-WebSocket-Key"))
+		resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+			"Upgrade: websocket\r\n" +
+			"Connection: Upgrade\r\n" +
+			"Sec-WebSocket-Accept: " + accept + "\r\n\r\n"
+		if _, err := rw.Writer.WriteString(resp); err != nil {
+			return
+		}
+		if err := rw.Writer.Flush(); err != nil {
+			return
+		}
+
+		// Drain the client's one generation request frame (so
+		// connectAndSend's write succeeds and SynthesizeStream proceeds
+		// to record cost), then close the raw connection immediately
+		// without ever writing a "chunk" or "done" message back --
+		// simulating a real mid-stream drop after Cartesia has already
+		// accepted the request.
+		if _, _, _, err := readWSFrame(rw.Reader); err != nil {
+			return
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("CARTESIA_API_KEY", "test-key")
+	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
+	metrics := observability.NewLatencyRecorder()
+	c, err := NewCartesiaSynthesizer(WithBaseURL(wsURL), WithDialTimeout(2*time.Second), WithMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewCartesiaSynthesizer: %v", err)
+	}
+
+	const text = "namaste, how can I help you today?"
+	ch, err := c.SynthesizeStream(context.Background(), text, Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	chunks := drainChunks(t, ch, 5*time.Second)
+
+	for i, chunk := range chunks {
+		if chunk.IsFinal {
+			t.Errorf("chunk[%d].IsFinal = true, want false: no audio was ever delivered before the connection dropped", i)
+		}
+	}
+
+	want := float64(len(text)) * cartesiaCostPerCharUSD
+	got := metrics.CostTotal("cartesia")
+	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostTotal(cartesia) = %v, want %v (billed once at accept time; unaffected by the later mid-stream drop, per this package's documented per-character-on-accept billing design)", got, want)
+	}
+	if n := metrics.CostEventCount("cartesia"); n != 1 {
+		t.Errorf("CostEventCount(cartesia) = %d, want exactly 1 (recorded once at accept time, neither dropped nor doubled by the later mid-stream failure)", n)
+	}
+}
+
+// TestCartesiaCircuitBreaker_OpenRejectionNeverRecordsCost is part of the
+// 2026-07-21 PE cost-tracking-under-retry/reconnect audit: it pins
+// invariant (4) -- a call rejected fail-fast by an open circuit breaker
+// (zero handshake attempts) must never record a nonzero cost.
+func TestCartesiaCircuitBreaker_OpenRejectionNeverRecordsCost(t *testing.T) {
+	var failing int32 = 1
+	srv := newToggleCartesiaServer(t, &failing)
+	defer srv.Close()
+
+	t.Setenv("CARTESIA_API_KEY", "test-key")
+	wsURL := "ws://" + strings.TrimPrefix(srv.URL, "http://")
+	metrics := observability.NewLatencyRecorder()
+	const threshold = 1
+	c, err := NewCartesiaSynthesizer(WithBaseURL(wsURL), WithDialTimeout(2*time.Second), WithCircuitBreaker(threshold, 10*time.Second), WithMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewCartesiaSynthesizer: %v", err)
+	}
+
+	if _, err := c.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish}); err == nil {
+		t.Fatal("expected the first call to fail (server returns 500)")
+	}
+
+	_, err = c.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("expected the second call to be rejected by the (now open) breaker, got: %v", err)
+	}
+
+	if got := metrics.CostEventCount("cartesia"); got != 0 {
+		t.Errorf("CostEventCount(cartesia) = %d, want 0: a circuit-open rejection must never record cost (no handshake was ever attempted)", got)
+	}
+	if got := metrics.CostTotal("cartesia"); got != 0 {
+		t.Errorf("CostTotal(cartesia) = %v, want 0 for a circuit-open rejection", got)
+	}
 }

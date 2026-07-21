@@ -272,9 +272,14 @@ func (s *Session) Metrics() *observability.LatencyRecorder {
 // doc comment and fallback.go's package doc comment). Once true it stays
 // true for the rest of the Session's life: in the MT/TTS case, raw caller
 // audio keeps being passed through to the agent instead of translated; in
-// the ASR-failure case, the leg's goroutine has already exited and no
-// further audio for it will ever be forwarded (see runLeg's doc comment)
-// -- true here means "this leg is dead", not just "still degraded".
+// the ASR-failure case, runLeg's own goroutine has already exited, but a
+// replacement drainDeadLeg goroutine takes over forwarding any audio
+// still pushed for this leg (as passthrough, on a poll cadence -- see
+// FallbackConfig.DeadLegDrainInterval) until Session.Close() finally
+// tears the whole session down (see runLeg's and drainDeadLeg's doc
+// comments) -- true here means "this leg's ASR is dead and MT/TTS will
+// never run for it again", not "no more audio will ever be forwarded for
+// it".
 func (s *Session) CallerLegDegraded() bool {
 	return s.callerLeg.isDegraded()
 }
@@ -416,15 +421,20 @@ func (s *Session) Close() error {
 // function's `tr, ok := <-transcripts` case and fallback.go's package doc
 // comment) rather than because Session.Close() deliberately closed the
 // stream (s.closing; normal shutdown, nothing to degrade). In the
-// permanent-failure case, once this function returns, the leg is gone for
-// good: it is the only consumer that ever drains leg.audio or reads
-// stream.Transcripts(), so any Push{Caller,Agent}Audio call after that
-// point still succeeds (the frame is simply buffered into leg.audio's
-// ring buffer) but nothing will ever forward that audio anywhere again
-// until Session.Close() runs. Keeping the leg "alive" across its own ASR
-// stream permanently dying would require a much deeper redesign (a
-// replacement consumer for leg.audio with no ASR stream feeding it) and is
-// intentionally out of scope here.
+// permanent-failure case, this function's own goroutine returns once it
+// has forwarded whatever was already buffered for the in-flight
+// utterance, but the leg does not go dark after that: before returning,
+// it hands leg.audio off to a replacement goroutine (drainDeadLeg,
+// started via s.wg.Add(1)+go exactly like this function's own goroutine
+// was, so Close's existing wg.Wait() waits for it too with no separate
+// synchronization mechanism needed) that polls leg.audio on a cadence
+// (FallbackConfig.DeadLegDrainInterval) and forwards whatever has
+// accumulated as passthrough, so any Push{Caller,Agent}Audio call that
+// arrives after the leg's ASR died still eventually reaches the
+// listening party instead of silently sitting in the ring buffer until
+// Session.Close() finally tears the whole session down. See
+// drainDeadLeg's doc comment for the full detail, including why it can
+// never race Close's closing of out.
 func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLang Language, out chan<- tts.AudioChunk) {
 	defer s.wg.Done()
 
@@ -465,20 +475,20 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 				frames := leg.audio.drain()
 				s.emitPassthroughTimed(frames, out, utteranceStart)
 
-				// Deliberately NOT attempting to keep this leg "alive"
-				// for audio pushed after this point: doing so would need
-				// a live consumer to keep draining leg.audio, but runLeg
-				// (this goroutine) is the only consumer and is about to
-				// return -- there would be nothing left to drain future
-				// pushes until Session.Close() runs. Future
-				// Push{Caller,Agent}Audio calls will still succeed (the
-				// frame is simply buffered into leg.audio's ring buffer,
-				// per its existing behavior) but nothing will ever
-				// drain/forward that audio again. That is a real,
-				// documented gap -- not silently pretended away -- left
-				// for a future sprint; today's fix only stops dropping
-				// the audio that was already in flight at the moment the
-				// leg died.
+				// This goroutine (runLeg's) is done -- there is no more
+				// ASR stream to read transcripts from -- but the leg
+				// itself must not go dark for the rest of the call:
+				// leg.audio is still live (Push{Caller,Agent}Audio never
+				// stops accepting frames for it), so hand it off to a
+				// replacement drain goroutine, tracked by the same
+				// s.wg this goroutine itself is tracked by, so Close's
+				// existing wg.Wait() naturally waits for it too with no
+				// new synchronization primitive. See drainDeadLeg's doc
+				// comment for the polling cadence and the argument for
+				// why it can never write to out after Close has closed
+				// it.
+				s.wg.Add(1)
+				go s.drainDeadLeg(leg, out)
 				return
 			}
 			if !tr.IsFinal {
@@ -591,6 +601,139 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 			}
 		}
 	}
+}
+
+// drainDeadLeg is the replacement consumer for leg.audio started by
+// runLeg (via s.wg.Add(1)+go, so it is waited on by Close's existing
+// wg.Wait() the exact same way runLeg's own goroutine is) the moment a
+// leg's underlying ASR StreamSession permanently dies mid-call -- see
+// runLeg's `tr, ok := <-transcripts` branch and this function's own
+// spawn site. From that point on, runLeg's goroutine has already
+// returned (there is no more ASR stream to read transcripts from), so
+// this goroutine is the leg's *only* remaining consumer of leg.audio and
+// the only thing that can ever forward audio pushed to it again.
+//
+// It polls leg.audio every FallbackConfig.DeadLegDrainInterval (default
+// 300ms; see that field's doc comment for why) and forwards whatever has
+// accumulated since the last poll as one passthrough chunk, tagged
+// reasonASRStreamClosedPassthrough (distinct from reasonASRStreamClosed,
+// which fallback.go's package doc comment explains is reserved for the
+// single event marking the instant the leg died). A poll that finds
+// nothing buffered is a silent no-op -- it deliberately does not emit an
+// empty/tone-only passthrough chunk every cycle, which would otherwise
+// spam the listening party with a warning tone every
+// DeadLegDrainInterval for the rest of a call that received no further
+// audio for this leg.
+//
+// Exits the moment s.ctx is cancelled (Close's normal shutdown path),
+// but not before one last drain-and-forward so audio buffered right up
+// to shutdown isn't dropped either -- mirroring the "flush before
+// exiting" shape every other shutdown path in this file already uses. It
+// also exits as soon as it observes s.closing (set as Close's very first
+// step, well before s.cancel() is ever reached -- see Close's doc
+// comment): without that check this goroutine, having no ASR stream
+// left to signal it, would sit waiting on s.ctx.Done() alone, which
+// can't fire until Close's own wg.Wait() has already returned -- a
+// deadlock-shaped trap that would force every Close() call on a session
+// with a dead leg to eat the full finalFlushTimeout (3s) backstop. See
+// this function's ticker case below for the fix and the full argument.
+//
+// Shutdown-ordering safety (this exact class of bug has bitten this repo
+// twice before -- see DEVLOG.md's 2026-07-12 and 2026-07-14 entries):
+// Close() only closes out (s.agentOut/s.callerOut) after its wg.Wait()
+// call returns, and this goroutine is tracked by that same s.wg (added
+// by runLeg immediately before spawning it, mirroring NewSession's own
+// s.wg.Add(2) for the two runLeg goroutines). That means out is
+// guaranteed to still be open for as long as this goroutine has not yet
+// returned -- Close's wg.Wait() cannot observe a zero counter, and
+// therefore cannot proceed to close(out), while this goroutine is still
+// running. So even in the narrow window where s.ctx has just been
+// cancelled but this goroutine's select hasn't yet observed
+// s.ctx.Done(), a concurrent ticker fire attempting to write to out
+// cannot land on a closed channel. The write itself goes through
+// flushDeadLegAudio -> emitPassthroughTimed -> emitPassthrough ->
+// forwardAudio, whose send is already a `select { case out <- chunk:
+// case <-s.ctx.Done(): ... }` (see forwardAudio below), the same guard
+// every other send site in this file uses -- so even if s.ctx is
+// cancelled during that very send, the select simply takes the
+// s.ctx.Done() branch instead of blocking, and forwardAudio unwinds
+// cleanly. No separate synchronization mechanism is needed beyond reuse
+// of s.wg and the existing select-guarded send.
+func (s *Session) drainDeadLeg(leg *legState, out chan<- tts.AudioChunk) {
+	defer s.wg.Done()
+
+	interval := s.fallback.DeadLegDrainInterval
+	if interval <= 0 {
+		interval = defaultDeadLegDrainInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			// Final flush on the way out: whatever was buffered right up
+			// to shutdown still deserves to reach the listening party
+			// instead of being silently discarded. Its own send is
+			// guarded by the same s.ctx.Done() select as every other
+			// send in this file (see forwardAudio), so this cannot race
+			// Close's closing of out even though s.ctx is already
+			// cancelled here.
+			s.flushDeadLegAudio(leg, out)
+			return
+		case <-ticker.C:
+			if !s.flushDeadLegAudio(leg, out) {
+				// The session is shutting down mid-send; forwardAudio's
+				// contract (mirrored here) says to stop immediately
+				// rather than loop back around to the ticker again.
+				return
+			}
+
+			// Session.Close() sets s.closing as its very first step,
+			// before either ASR stream is closed and well before it
+			// ever cancels s.ctx: s.cancel() only runs after Close's own
+			// wg.Wait() returns, or its finalFlushTimeout (3s) backstop
+			// fires (see Close's doc comment). This goroutine is the one
+			// leg goroutine with no ASR stream left to signal it, so
+			// without this check it would sit waiting on s.ctx.Done()
+			// alone -- which, since Close doesn't reach s.cancel() until
+			// wg.Wait() already returned, can never happen while this
+			// goroutine (tracked by that same s.wg) is still running.
+			// That's exactly the ordering trap flagged in this
+			// function's own doc comment (see DEVLOG.md's 2026-07-12/
+			// 2026-07-14 entries): it would force every single Close()
+			// call on a session with a dead leg to eat the full
+			// finalFlushTimeout backstop before s.cancel() was ever
+			// reached, even though nothing was actually stalled.
+			// Checking s.closing here -- the same field runLeg's own
+			// transcripts-closed branch already reads, not a new
+			// synchronization primitive -- lets this goroutine notice
+			// Close() has started within one poll interval instead of
+			// waiting for context cancellation that can't arrive until
+			// this goroutine (and every other) has already exited.
+			if s.closing.Load() {
+				return
+			}
+		}
+	}
+}
+
+// flushDeadLegAudio drains leg.audio and, if anything was buffered since
+// the last drain, forwards it as one passthrough chunk tagged
+// reasonASRStreamClosedPassthrough. If nothing was buffered, it is a
+// no-op (see drainDeadLeg's doc comment for why that matters). Returns
+// false if the session was shutting down mid-send (mirroring
+// emitPassthrough/forwardAudio's existing contract, and drainDeadLeg
+// stops polling when this happens), true otherwise -- including the
+// common empty-buffer case where no send was attempted at all.
+func (s *Session) flushDeadLegAudio(leg *legState, out chan<- tts.AudioChunk) bool {
+	utteranceStart := leg.audio.utteranceStart()
+	frames := leg.audio.drain()
+	if len(frames) == 0 {
+		return true
+	}
+	recordFallbackReason(s.metrics, stageLegDegraded, leg.name, reasonASRStreamClosedPassthrough)
+	return s.emitPassthroughTimed(frames, out, utteranceStart)
 }
 
 // emitPassthrough builds (see buildPassthroughChunks) and forwards the

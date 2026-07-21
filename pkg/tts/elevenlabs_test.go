@@ -3,6 +3,8 @@ package tts
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -674,4 +676,167 @@ func TestElevenLabsSynthesizer_NoMetricsConfiguredNoOp(t *testing.T) {
 		t.Fatalf("SynthesizeStream: %v", err)
 	}
 	drainElevenLabsChunks(t, ch, 5*time.Second)
+}
+
+// TestElevenLabsSynthesizer_RetrySucceeds_RecordsCostExactlyOnce is part
+// of the 2026-07-21 PE cost-tracking-under-retry/reconnect audit (see
+// DEVLOG.md): it strengthens
+// TestElevenLabsSynthesizer_RetriesOn429ThenSucceeds's scenario (a
+// transient 429 on the first request, success on the retry) with an
+// explicit cost-recording assertion -- pinning invariant (1) from that
+// audit: a retry-then-succeed call must record cost exactly once, not
+// once per HTTP attempt.
+func TestElevenLabsSynthesizer_RetrySucceeds_RecordsCostExactlyOnce(t *testing.T) {
+	pcm := []byte{1, 2, 3, 4}
+	srv, attempts := newCountingElevenLabsServer(t, func(attempt int, w http.ResponseWriter) {
+		if attempt < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"detail":{"status":"rate_limited"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pcm)
+	})
+	defer srv.Close()
+
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	metrics := observability.NewLatencyRecorder()
+	e, err := NewElevenLabsSynthesizer(WithElevenLabsBaseURL(srv.URL), WithElevenLabsDialTimeout(2*time.Second), WithElevenLabsMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+
+	const text = "hello"
+	ch, err := e.SynthesizeStream(context.Background(), text, Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainElevenLabsChunks(t, ch, 5*time.Second)
+
+	if got := atomic.LoadInt32(attempts); got != 2 {
+		t.Fatalf("attempts = %d, want 2 (1 failure + 1 success)", got)
+	}
+
+	if n := metrics.CostEventCount("elevenlabs"); n != 1 {
+		t.Errorf("CostEventCount(elevenlabs) = %d, want exactly 1 for a call that failed once (429) then succeeded on retry -- a mismatch would mean RecordCost fired once per HTTP attempt instead of once per SynthesizeStream call", n)
+	}
+	want := float64(len(text)) * elevenlabsCostPerCharUSD
+	if got := metrics.CostTotal("elevenlabs"); got < want*0.999 || got > want*1.001 {
+		t.Errorf("CostTotal(elevenlabs) = %v, want %v (one character-based charge, not doubled by the retried request)", got, want)
+	}
+}
+
+// TestElevenLabsSynthesizer_MidStreamDropAfterAccept_CostStillBilledOnce
+// is part of the 2026-07-21 PE cost-tracking-under-retry/reconnect audit:
+// it specifically targets invariant (2) -- "no cost recorded for content
+// not delivered" -- for ElevenLabs' design. See elevenlabsCostPerCharUSD's
+// doc comment and SynthesizeStream's RecordCost call site: ElevenLabs
+// bills per character of input text once the request is accepted (HTTP
+// 200), not per second of audio actually streamed back afterward, because
+// that is how ElevenLabs' real vendor billing works (the "cost" tracked
+// here is real dollars already owed once the request was accepted,
+// independent of whether the resulting audio later reaches the caller).
+// This test drives a real mid-stream connection drop -- the server
+// returns HTTP 200 with a Content-Length promising more bytes than it
+// actually sends, then closes the connection, so the response body read
+// fails with a genuine transport error partway through -- and confirms
+// this is NOT a cost-tracking bug: the channel closes without ever
+// delivering an IsFinal=true chunk (a failed synthesis by this package's
+// own documented contract; see readLoop's doc comment), while the cost
+// recorded at accept time is still exactly one character-based charge,
+// neither zeroed out nor doubled by the later failure.
+func TestElevenLabsSynthesizer_MidStreamDropAfterAccept_CostStillBilledOnce(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/text-to-speech/", func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+			return
+		}
+		conn, bufrw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		body := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+		// Promise far more bytes than are ever actually sent via
+		// Content-Length, then close the raw connection after writing
+		// only `body` -- the client's body.Read() will surface a genuine
+		// transport error (io.ErrUnexpectedEOF) partway through, exactly
+		// like a real dropped connection mid-audio-stream.
+		header := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n", len(body)+100000)
+		if _, err := bufrw.Writer.WriteString(header); err != nil {
+			return
+		}
+		if _, err := bufrw.Writer.Write(body); err != nil {
+			return
+		}
+		_ = bufrw.Writer.Flush()
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	metrics := observability.NewLatencyRecorder()
+	e, err := NewElevenLabsSynthesizer(WithElevenLabsBaseURL(srv.URL), WithElevenLabsDialTimeout(2*time.Second), WithElevenLabsMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+
+	const text = "namaste, how can I help you today?"
+	ch, err := e.SynthesizeStream(context.Background(), text, Persona{Language: LanguageEnglish})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	chunks := drainElevenLabsChunks(t, ch, 5*time.Second)
+
+	for i, chunk := range chunks {
+		if chunk.IsFinal {
+			t.Errorf("chunk[%d].IsFinal = true, want false: the connection dropped before the promised audio was fully delivered", i)
+		}
+	}
+
+	want := float64(len(text)) * elevenlabsCostPerCharUSD
+	got := metrics.CostTotal("elevenlabs")
+	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostTotal(elevenlabs) = %v, want %v (billed once at accept time; unaffected by the later mid-stream drop, per this package's documented per-character-on-accept billing design)", got, want)
+	}
+	if n := metrics.CostEventCount("elevenlabs"); n != 1 {
+		t.Errorf("CostEventCount(elevenlabs) = %d, want exactly 1 (recorded once at accept time, neither dropped nor doubled by the later mid-stream failure)", n)
+	}
+}
+
+// TestElevenLabsCircuitBreaker_OpenRejectionNeverRecordsCost is part of
+// the 2026-07-21 PE cost-tracking-under-retry/reconnect audit: it pins
+// invariant (4) -- a call rejected fail-fast by an open circuit breaker
+// (zero HTTP requests ever made) must never record a nonzero cost.
+func TestElevenLabsCircuitBreaker_OpenRejectionNeverRecordsCost(t *testing.T) {
+	var failing int32 = 1
+	srv := newToggleElevenLabsServer(t, &failing, []byte{1, 2, 3, 4})
+	defer srv.Close()
+
+	t.Setenv("ELEVENLABS_API_KEY", "test-key")
+	metrics := observability.NewLatencyRecorder()
+	const threshold = 1
+	e, err := NewElevenLabsSynthesizer(WithElevenLabsBaseURL(srv.URL), WithElevenLabsDialTimeout(2*time.Second), WithElevenLabsCircuitBreaker(threshold, 10*time.Second), WithElevenLabsMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewElevenLabsSynthesizer: %v", err)
+	}
+
+	if _, err := e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish}); err == nil {
+		t.Fatal("expected the first call to fail (server returns 500)")
+	}
+
+	_, err = e.SynthesizeStream(context.Background(), "hello", Persona{Language: LanguageEnglish})
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("expected the second call to be rejected by the (now open) breaker, got: %v", err)
+	}
+
+	if got := metrics.CostEventCount("elevenlabs"); got != 0 {
+		t.Errorf("CostEventCount(elevenlabs) = %d, want 0: a circuit-open rejection must never record cost (no HTTP request was ever made)", got)
+	}
+	if got := metrics.CostTotal("elevenlabs"); got != 0 {
+		t.Errorf("CostTotal(elevenlabs) = %v, want 0 for a circuit-open rejection", got)
+	}
 }

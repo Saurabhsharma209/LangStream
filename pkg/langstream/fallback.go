@@ -47,9 +47,22 @@
 // recordFallbackReason) so a dashboard can tell *why* the leg went dark,
 // and forwards whatever raw audio was still buffered for the in-flight
 // utterance as one last passthrough chunk instead of silently dropping
-// it. See runLeg's doc comment for the one thing that case explicitly
-// does NOT attempt to do (keep the leg alive for audio pushed after it
-// dies).
+// it.
+//
+// A dead leg does not stay dark for the rest of the call, though:
+// session.go's runLeg hands the leg's raw-audio ring buffer off to a
+// dedicated replacement drain goroutine (drainDeadLeg) before returning,
+// so any Push{Caller,Agent}Audio call that arrives *after* the leg died
+// still gets forwarded as passthrough, on a poll cadence
+// (FallbackConfig.DeadLegDrainInterval, default 300ms) rather than
+// per-utterance the way a live leg is. Each of those later flushes is
+// tagged with the distinct reason reasonASRStreamClosedPassthrough
+// (rather than reasonASRStreamClosed, which is reserved for the single
+// event marking the instant the leg died) so a dashboard can tell "the
+// leg just died" apart from "the leg has been dead for a while and
+// audio kept arriving anyway". See runLeg's and drainDeadLeg's doc
+// comments for the full shutdown-ordering argument for why this is safe
+// to do without a second synchronization mechanism.
 package langstream
 
 import (
@@ -111,6 +124,22 @@ type FallbackConfig struct {
 	// count. Default 3.
 	MaxConsecutiveFailures int
 
+	// DeadLegDrainInterval controls how often a leg whose ASR
+	// StreamSession has permanently died (Transcripts() channel closed
+	// on its own mid-call, not via Session.Close() — see session.go's
+	// runLeg and drainDeadLeg) polls its raw-audio ring buffer for audio
+	// pushed *after* the leg died, so it can still be forwarded as
+	// passthrough instead of silently sitting in the buffer until
+	// Session.Close() finally tears everything down. Default 300ms,
+	// picked as a middle point in a reasonable 200-500ms range: frequent
+	// enough that the listening party never perceives an unnaturally
+	// long gap between passthrough chunks, infrequent enough not to spin
+	// the CPU or contend leg.audio's mutex on what is, after the leg's
+	// ASR stream died, otherwise a mostly-idle poll loop. Tests that need
+	// to observe a flush without a real-world sleep should set this to a
+	// short value (e.g. a few milliseconds) via FallbackConfig.
+	DeadLegDrainInterval time.Duration
+
 	// Metrics, if set, receives a RecordEvent/RecordError call — using
 	// pkg/observability's existing exported API (see
 	// pkg/observability/metrics.go's LatencyRecorder.RecordEvent /
@@ -138,6 +167,7 @@ func DefaultFallbackConfig() FallbackConfig {
 		TranslateTimeout:       2 * time.Second,
 		SynthesizeTimeout:      3 * time.Second,
 		MaxConsecutiveFailures: 3,
+		DeadLegDrainInterval:   defaultDeadLegDrainInterval,
 	}
 }
 
@@ -159,6 +189,9 @@ func (cfg FallbackConfig) withDefaults() FallbackConfig {
 	}
 	if cfg.MaxConsecutiveFailures <= 0 {
 		cfg.MaxConsecutiveFailures = d.MaxConsecutiveFailures
+	}
+	if cfg.DeadLegDrainInterval <= 0 {
+		cfg.DeadLegDrainInterval = d.DeadLegDrainInterval
 	}
 	return cfg
 }
@@ -196,6 +229,12 @@ func isFatal(err error) bool {
 // telephony packetization interval this is ~10 seconds of audio, well
 // beyond a normal utterance.
 const audioBufferFrames = 500
+
+// defaultDeadLegDrainInterval is FallbackConfig.DeadLegDrainInterval's
+// default (see that field's doc comment for the reasoning behind
+// choosing 300ms specifically, in the 200-500ms range this task called
+// for).
+const defaultDeadLegDrainInterval = 300 * time.Millisecond
 
 // bufferedFrame is one raw PCM frame retained for possible passthrough.
 type bufferedFrame struct {
@@ -395,6 +434,18 @@ func recordFallbackErr(rec *observability.LatencyRecorder, stage, vendor string,
 // dashboard-facing string distinguishing *why* the leg died, not just
 // that it did.
 const reasonASRStreamClosed = "asr_stream_closed"
+
+// reasonASRStreamClosedPassthrough tags a stageLegDegraded event recorded
+// by drainDeadLeg (session.go) for every *subsequent* passthrough flush
+// of audio pushed after a leg's ASR StreamSession has already died —
+// as opposed to reasonASRStreamClosed, which is recorded exactly once,
+// for the flush that happens at the instant the leg dies. Kept distinct
+// so a dashboard can tell "the leg just died" (one event, per leg, per
+// call) apart from "the leg has been dead for a while and audio kept
+// arriving anyway" (potentially many events, proportional to how long
+// the call continues after the leg died and how much audio keeps being
+// pushed to it).
+const reasonASRStreamClosedPassthrough = "asr_stream_closed_passthrough"
 
 // recordFallbackReason behaves like recordFallback, but additionally tags
 // the event with an explicit reason via RecordErrorReason, following the

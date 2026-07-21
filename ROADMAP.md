@@ -309,6 +309,24 @@ correctly invalidated, and grew the WER corpus 41->47 with new error
 shapes. No other bugs found. Week 4 still cannot meaningfully start
 without Saurabh's decision.
 
+**2026-07-21 note:** still genuinely blocked on Saurabh's anchor-customer/
+live-traffic decision (unchanged since Sprint 8), so today (Sprint 14)
+again did opportunistic hardening across Tech/PE/QA rather than inventing
+roadmap scope: closed the dead-leg audio gap Sprint 13 left intentionally
+open (Tech: audio pushed to a leg after its ASR stream permanently dies is
+now kept forwarding via a new `drainDeadLeg` poller instead of being
+silently stuck forever until `Session.Close()`; found and fixed a real
+shutdown-ordering bug in the same change before it landed); ran a clean
+four-invariant audit of cost-recording correctness under retry/reconnect
+across all five vendor clients (PE: no bugs found, pinned with 12 new
+regression tests); and QA added integration coverage for the dead-leg fix
+plus grew the WER corpus 47->52 with new non-overlapping error shapes.
+Sandbox disk pressure was present again ($HOME/`/sessions` at 100% full
+all run) but workable via the same `/tmp`-based workaround as Sprint 13 --
+two of the last three runs have now been workable, only Sprint 12 hit a
+hard wall. Week 4 still cannot meaningfully start without Saurabh's
+decision.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

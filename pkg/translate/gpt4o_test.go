@@ -3,6 +3,7 @@ package translate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -586,5 +587,98 @@ func TestGPT4oTranslator_Translate_FailedRequestDoesNotRecordCost(t *testing.T) 
 	}
 	if n := metrics.CostEventCount("gpt-4o"); n != 0 {
 		t.Errorf("CostEventCount(gpt-4o) = %d, want 0 for a failed request", n)
+	}
+}
+
+// TestGPT4oTranslator_Translate_RetrySucceeds_RecordsCostExactlyOnce is
+// part of the 2026-07-21 PE cost-tracking-under-retry/reconnect audit
+// (see DEVLOG.md): it strengthens
+// TestGPT4oTranslator_Translate_RetriesOn429ThenSucceeds's scenario (a
+// transient 429 on the first attempt, success on the retry) with an
+// explicit cost-recording assertion -- pinning invariant (1) from that
+// audit: a retry-then-succeed call must record cost exactly once, not
+// once per HTTP attempt.
+func TestGPT4oTranslator_Translate_RetrySucceeds_RecordsCostExactlyOnce(t *testing.T) {
+	sse := sseChunk("hi") + "data: [DONE]\n\n"
+	srv, attempts := newCountingServer(t, func(attempt int, w http.ResponseWriter) {
+		if attempt < 2 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, sse)
+	})
+	defer srv.Close()
+
+	metrics := observability.NewLatencyRecorder()
+	tr, err := NewGPT4oTranslator(WithBaseURL(srv.URL), WithAPIKey("test-api-key"), WithMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewGPT4oTranslator: %v", err)
+	}
+
+	if _, err := tr.Translate(context.Background(), "namaste", "hi", "en", true); err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	if got := atomic.LoadInt32(attempts); got != 2 {
+		t.Fatalf("attempts = %d, want 2 (1 failure + 1 success)", got)
+	}
+
+	if n := metrics.CostEventCount("gpt-4o"); n != 1 {
+		t.Errorf("CostEventCount(gpt-4o) = %d, want exactly 1 for a call that failed once (429) then succeeded on retry -- a mismatch would mean RecordCost fired once per HTTP attempt instead of once per Translate call", n)
+	}
+	if got := metrics.CostTotal("gpt-4o"); got <= 0 {
+		t.Errorf("CostTotal(gpt-4o) = %v, want > 0 after the retry eventually succeeded", got)
+	}
+}
+
+// TestGPT4oTranslator_Translate_CircuitOpen_NeverRecordsCost is part of the
+// 2026-07-21 PE cost-tracking-under-retry/reconnect audit: it pins
+// invariant (4) -- a call rejected fail-fast by an open circuit breaker
+// (zero HTTP requests ever made) must never record a nonzero cost.
+func TestGPT4oTranslator_Translate_CircuitOpen_NeverRecordsCost(t *testing.T) {
+	srv, attempts := newCountingServer(t, func(attempt int, w http.ResponseWriter) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("still down"))
+	})
+	defer srv.Close()
+
+	metrics := observability.NewLatencyRecorder()
+	const threshold = 1
+	tr, err := NewGPT4oTranslator(
+		WithBaseURL(srv.URL),
+		WithAPIKey("test-api-key"),
+		WithMetrics(metrics),
+		WithCircuitBreaker(threshold, 10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewGPT4oTranslator: %v", err)
+	}
+
+	// This call exhausts its full retry budget against the always-500
+	// server, tripping the breaker (threshold=1).
+	if _, err := tr.Translate(context.Background(), "namaste", "hi", "en", true); err == nil {
+		t.Fatal("expected an error after exhausting retries against the always-failing server")
+	}
+	attemptsAfterTrip := atomic.LoadInt32(attempts)
+	costEventsAfterTrip := metrics.CostEventCount("gpt-4o")
+
+	// The breaker should now be open: the next call must be rejected
+	// fail-fast, with zero additional HTTP requests and, critically, zero
+	// additional RecordCost calls.
+	_, err = tr.Translate(context.Background(), "namaste", "hi", "en", true)
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("expected the second Translate call to be rejected by the (now open) breaker, got: %v", err)
+	}
+	if got := atomic.LoadInt32(attempts); got != attemptsAfterTrip {
+		t.Errorf("HTTP attempts after breaker-rejected Translate = %d, want unchanged %d (zero additional requests)", got, attemptsAfterTrip)
+	}
+	if got := metrics.CostEventCount("gpt-4o"); got != costEventsAfterTrip {
+		t.Errorf("CostEventCount(gpt-4o) after breaker-rejected Translate = %d, want unchanged %d (a circuit-open rejection must never record cost)", got, costEventsAfterTrip)
+	}
+	if got := metrics.CostTotal("gpt-4o"); got != 0 {
+		t.Errorf("CostTotal(gpt-4o) = %v, want 0: no call in this test ever succeeded, so no cost should ever have been recorded", got)
 	}
 }

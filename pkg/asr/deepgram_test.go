@@ -613,6 +613,147 @@ func TestDeepgramRecognizer_CircuitBreaker_MidStreamReconnectDoesNotTrip(t *test
 	}
 }
 
+// TestDeepgramRecognizer_MidStreamReconnectSucceeds_CostRecordedOncePerPush
+// is part of the 2026-07-21 PE cost-tracking-under-retry/reconnect audit
+// (see DEVLOG.md): it pins invariant (3) from that audit -- a mid-stream
+// reconnect must not cause RecordCost to fire twice (or zero times) for
+// the audio pushed in the PushAudio call that triggered/absorbed the
+// reconnect. Unlike TestDeepgramRecognizer_CircuitBreaker_MidStreamReconnectDoesNotTrip
+// above (which forces the reconnect to fail, to prove the breaker is
+// untouched), this test forces the reconnect to SUCCEED and continues
+// pushing audio afterward, so it can assert on the resulting cost totals:
+// recordAudioCost is only ever called from the single call site at the
+// end of PushAudio (see deepgram.go), reached exactly once per successful
+// PushAudio call regardless of whether that call happened to need a
+// reconnect internally -- this test drives that path for real against a
+// fake server and checks the actual CostEventCount/CostTotal output
+// rather than just reading the source.
+func TestDeepgramRecognizer_MidStreamReconnectSucceeds_CostRecordedOncePerPush(t *testing.T) {
+	var connNum int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&connNum, 1)
+		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("fake deepgram server: upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+		if n == 1 {
+			// The first connection accepts exactly one audio frame, then
+			// drops -- forcing a mid-stream reconnect on the next
+			// PushAudio call.
+			_, _, _ = conn.ReadMessage()
+			return
+		}
+		// The reconnect (and anything after it) stays up and silently
+		// drains whatever audio arrives, so every later PushAudio call
+		// succeeds directly.
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/listen"
+
+	os.Setenv("DEEPGRAM_API_KEY", "unit-test-key")
+	metrics := observability.NewLatencyRecorder()
+	r, err := NewDeepgramRecognizer(
+		WithBaseURL(wsURL),
+		WithMaxReconnectAttempts(3),
+		WithMetrics(metrics),
+	)
+	if err != nil {
+		t.Fatalf("NewDeepgramRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "en")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	// 320 bytes @ 8kHz/16-bit mono = 160 samples = 20ms of audio.
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio[0] (initial connect): %v", err)
+	}
+
+	// Give the readLoop goroutine time to observe the server's drop of
+	// the first connection before the next PushAudio call, so that call
+	// deterministically takes the mid-stream reconnect path (same
+	// synchronization convention as
+	// TestDeepgramRecognizer_CircuitBreaker_MidStreamReconnectDoesNotTrip
+	// above).
+	time.Sleep(150 * time.Millisecond)
+
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio[1] (mid-stream reconnect, should succeed against the new connection): %v", err)
+	}
+
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio[2] (post-reconnect): %v", err)
+	}
+
+	const wantPushes = 3
+	if got := metrics.CostEventCount("deepgram"); got != wantPushes {
+		t.Errorf("CostEventCount(deepgram) = %d, want %d (exactly one RecordCost per successful PushAudio call, even though PushAudio[1] triggered a mid-stream reconnect internally -- a mismatch would mean the reconnect either double-billed or dropped a billing event)", got, wantPushes)
+	}
+	wantMinutes := (0.02 / 60.0) * float64(wantPushes)
+	wantCost := wantMinutes * deepgramCostPerMinuteUSD
+	if got := metrics.CostTotal("deepgram"); got < wantCost*0.999 || got > wantCost*1.001 {
+		t.Errorf("CostTotal(deepgram) = %v, want %v (%d frames' worth of 20ms audio, no double-count introduced by the reconnect)", got, wantCost, wantPushes)
+	}
+}
+
+// TestDeepgramRecognizer_CircuitBreaker_OpenRejectionNeverRecordsCost is
+// part of the 2026-07-21 PE cost-tracking-under-retry/reconnect audit: it
+// pins invariant (4) -- a call rejected fail-fast by an open circuit
+// breaker (zero dial attempts, zero audio ever sent) must never record a
+// nonzero cost. TestDeepgramRecognizer_CircuitBreaker_RecordsErrorReason
+// above already checks the rejection is tagged via RecordErrorReason;
+// this test checks the orthogonal cost-recording seam explicitly, which
+// nothing previously asserted directly.
+func TestDeepgramRecognizer_CircuitBreaker_OpenRejectionNeverRecordsCost(t *testing.T) {
+	srv, wsURL, _ := newRefusingDeepgramServer(t)
+	defer srv.Close()
+
+	os.Setenv("DEEPGRAM_API_KEY", "unit-test-key")
+	metrics := observability.NewLatencyRecorder()
+	r, err := NewDeepgramRecognizer(
+		WithBaseURL(wsURL),
+		WithMaxReconnectAttempts(1),
+		WithCircuitBreaker(1, 10*time.Second),
+		WithMetrics(metrics),
+	)
+	if err != nil {
+		t.Fatalf("NewDeepgramRecognizer: %v", err)
+	}
+
+	sess, err := r.StartStream(context.Background(), "en")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err == nil {
+		t.Fatal("expected PushAudio to fail (vendor refuses every connect)")
+	}
+	_ = sess.Close()
+
+	if _, err := r.StartStream(context.Background(), "en"); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("expected the second StartStream to be rejected by the (now open) breaker, got: %v", err)
+	}
+
+	if got := metrics.CostEventCount("deepgram"); got != 0 {
+		t.Errorf("CostEventCount(deepgram) = %d, want 0: a circuit-open rejection must never record cost (no vendor call was ever attempted, no audio was ever sent)", got)
+	}
+	if got := metrics.CostTotal("deepgram"); got != 0 {
+		t.Errorf("CostTotal(deepgram) = %v, want 0 for a circuit-open rejection", got)
+	}
+}
+
 // TestDeepgramRecognizer_CircuitBreaker_DefaultEnabledWithoutOption
 // verifies a default breaker is always active, matching pkg/translate and
 // pkg/tts's convention.

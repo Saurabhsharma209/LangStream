@@ -874,3 +874,229 @@ func TestSessionVoicePersonaOverride(t *testing.T) {
 		t.Fatalf("expected non-empty fallback VoiceID for unassigned language")
 	}
 }
+
+// TestSessionDrainDeadLegForwardsAudioPushedAfterASRStreamCloses covers
+// today's fix (session.go's drainDeadLeg, spawned by runLeg's
+// `tr, ok := <-transcripts` branch once a leg's ASR StreamSession has
+// permanently died): audio pushed to a leg *after* its ASR stream closes
+// must not sit forgotten in leg.audio until Session.Close() -- it must
+// still reach the listening party as passthrough, polled on
+// FallbackConfig.DeadLegDrainInterval's cadence rather than dropped.
+//
+// Uses a short (200ms) DeadLegDrainInterval override so the test doesn't
+// need to sleep for the 300ms production default, let alone anything
+// longer. The 20ms/200ms (10x) margin used for the "not delivered yet"
+// assertion below is deliberately generous: this only needs to prove the
+// forward doesn't happen synchronously/immediately on push, not pin down
+// the exact tick boundary.
+func TestSessionDrainDeadLegForwardsAudioPushedAfterASRStreamCloses(t *testing.T) {
+	rec := &fakeRecognizer{scripts: [][]asr.Transcript{{}, {}}}
+	metrics := observability.NewLatencyRecorder()
+
+	cfg := validConfig()
+	cfg.ASR = rec
+	cfg.Fallback = FallbackConfig{Metrics: metrics, DeadLegDrainInterval: 200 * time.Millisecond}
+
+	sess, err := NewSession(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer sess.Close()
+
+	firstFrame := asr.AudioFrame{PCM: []byte{11, 22, 33}, SampleRate: 8000}
+	if err := sess.PushCallerAudio(firstFrame); err != nil {
+		t.Fatalf("PushCallerAudio: %v", err)
+	}
+	if len(rec.sessions) == 0 {
+		t.Fatal("expected fakeRecognizer to have started at least one stream")
+	}
+	callerStream := rec.sessions[0]
+
+	// Kill the caller leg's ASR stream permanently, mid-call.
+	if err := callerStream.Close(); err != nil {
+		t.Fatalf("closing fake caller ASR stream: %v", err)
+	}
+
+	// Drain the one-time death-drain passthrough of firstFrame (runLeg's
+	// own synchronous flush, unchanged by today's fix) before pushing
+	// more audio, so it can't be confused with what's under test here.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case chunk, ok := <-sess.AgentHearsAudio():
+			if !ok {
+				t.Fatal("AgentHearsAudio closed unexpectedly")
+			}
+			if chunk.IsFinal {
+				goto drained
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for the initial death-drain passthrough chunk")
+		}
+	}
+drained:
+
+	if !sess.CallerLegDegraded() {
+		t.Fatal("expected the caller leg to be permanently degraded once its ASR stream closed")
+	}
+
+	// Push audio *after* the leg has already died. fakeStreamSession's
+	// PushAudio errors once its stream is closed (unlike some real
+	// backends, which might accept the call and simply do nothing) --
+	// but Session.PushCallerAudio buffers the frame into leg.audio
+	// *unconditionally*, before ever calling into the ASR backend (see
+	// PushCallerAudio's doc comment), so that buffering happens
+	// regardless of this expected error. The error return itself is not
+	// under test here.
+	secondFrame := asr.AudioFrame{PCM: []byte{99, 98, 97, 96, 95}, SampleRate: 8000}
+	_ = sess.PushCallerAudio(secondFrame)
+
+	// It must not be forwarded immediately: drainDeadLeg only polls every
+	// DeadLegDrainInterval (200ms here).
+	select {
+	case chunk, ok := <-sess.AgentHearsAudio():
+		t.Fatalf("expected no passthrough chunk yet (drain cadence not elapsed), got ok=%v chunk=%+v", ok, chunk)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	// It must eventually arrive, forwarded as passthrough by drainDeadLeg.
+	var sawSecond, sawFinal bool
+	deadline = time.After(2 * time.Second)
+	for !sawFinal {
+		select {
+		case chunk, ok := <-sess.AgentHearsAudio():
+			if !ok {
+				t.Fatal("AgentHearsAudio closed unexpectedly")
+			}
+			if string(chunk.PCM) == string(secondFrame.PCM) {
+				sawSecond = true
+			}
+			sawFinal = chunk.IsFinal
+		case <-deadline:
+			t.Fatal("timed out waiting for post-death audio to be forwarded as passthrough")
+		}
+	}
+	if !sawSecond {
+		t.Fatal("expected the audio pushed after the ASR stream died to be forwarded as passthrough, but it never appeared")
+	}
+
+	if got := metrics.ReasonCount(stageLegDegraded, "caller", reasonASRStreamClosedPassthrough); got < 1 {
+		t.Fatalf("ReasonCount(leg_degraded, caller, asr_stream_closed_passthrough) = %d, want >= 1", got)
+	}
+	// reasonASRStreamClosed (singular, instant-of-death) must still have
+	// fired exactly once, distinct from the ongoing-passthrough reason
+	// checked above.
+	if got := metrics.ReasonCount(stageLegDegraded, "caller", reasonASRStreamClosed); got != 1 {
+		t.Fatalf("ReasonCount(leg_degraded, caller, asr_stream_closed) = %d, want 1", got)
+	}
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestSessionDrainDeadLegStopsCleanlyOnCloseNoGoroutineLeak drives the
+// same permanent-ASR-failure trigger repeatedly, each time also pushing
+// audio *after* the leg dies (so drainDeadLeg actually has something to
+// forward, exercising it beyond just spinning on an empty buffer), and
+// confirms Session.Close() always shuts the resulting drainDeadLeg
+// goroutine down cleanly with no leak -- following the same
+// repeated-iteration goroutine-count-check shape as
+// asr_permanent_failure_integration_test.go's
+// TestASRPermanentFailure_NoGoroutineLeak and this file's own
+// TestSessionCloseDoesNotLeakGoroutines.
+func TestSessionDrainDeadLegStopsCleanlyOnCloseNoGoroutineLeak(t *testing.T) {
+	settleGoroutines(t)
+	before := runtime.NumGoroutine()
+
+	for i := 0; i < 15; i++ {
+		rec := &fakeRecognizer{scripts: [][]asr.Transcript{{}, {}}}
+		cfg := validConfig()
+		cfg.ASR = rec
+		cfg.Fallback = FallbackConfig{DeadLegDrainInterval: 20 * time.Millisecond}
+
+		sess, err := NewSession(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+
+		if err := sess.PushCallerAudio(asr.AudioFrame{PCM: []byte{1, 2, 3}, SampleRate: 8000}); err != nil {
+			t.Fatalf("PushCallerAudio: %v", err)
+		}
+		if err := rec.sessions[0].Close(); err != nil {
+			t.Fatalf("closing fake caller ASR stream: %v", err)
+		}
+
+		// Drain until the death-drain final chunk, then push more audio
+		// so drainDeadLeg's poll loop actually has work to do at least
+		// once before Close() tears everything down.
+		for {
+			chunk, ok := <-sess.AgentHearsAudio()
+			if !ok || chunk.IsFinal {
+				break
+			}
+		}
+		// See TestSessionDrainDeadLegForwardsAudioPushedAfterASRStreamCloses's
+		// comment on why this expected post-death error is not checked.
+		_ = sess.PushCallerAudio(asr.AudioFrame{PCM: []byte{4, 5, 6}, SampleRate: 8000})
+		for {
+			chunk, ok := <-sess.AgentHearsAudio()
+			if !ok || chunk.IsFinal {
+				break
+			}
+		}
+
+		if err := sess.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+
+	settleGoroutines(t)
+	after := runtime.NumGoroutine()
+
+	if after > before+4 {
+		t.Fatalf("possible goroutine leak from drainDeadLeg after repeated ASR-permanent-failure cycles: before=%d after=%d", before, after)
+	}
+}
+
+// TestSessionNormalCloseDoesNotSpawnDeadLegDrainer proves the new
+// drainDeadLeg machinery is scoped strictly to the permanent-ASR-failure
+// path: an ordinary Session.Close() (no leg ever died on its own) must
+// behave exactly as it did before this change -- no
+// reasonASRStreamClosedPassthrough (or reasonASRStreamClosed) event ever
+// recorded, and Close() must return quickly, well under one
+// DeadLegDrainInterval. That second check matters because if a
+// drainDeadLeg goroutine were (incorrectly) spawned on a normal shutdown
+// too, Close() would have to wait for it to notice s.closing on its next
+// tick (see drainDeadLeg's doc comment on why it can't exit purely via
+// s.ctx.Done() before that), which would make this test's deliberately
+// long 5s DeadLegDrainInterval blow the tight deadline below.
+func TestSessionNormalCloseDoesNotSpawnDeadLegDrainer(t *testing.T) {
+	metrics := observability.NewLatencyRecorder()
+
+	cfg := validConfig()
+	cfg.Fallback = FallbackConfig{Metrics: metrics, DeadLegDrainInterval: 5 * time.Second}
+
+	sess, err := NewSession(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	start := time.Now()
+	if err := sess.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("normal Close() took %v, want well under one DeadLegDrainInterval (5s) -- suggests a drainDeadLeg goroutine was unexpectedly spawned", elapsed)
+	}
+
+	if sess.CallerLegDegraded() || sess.AgentLegDegraded() {
+		t.Fatal("a normal Close() must not mark either leg permanently degraded")
+	}
+	if got := metrics.ReasonCount(stageLegDegraded, "caller", reasonASRStreamClosedPassthrough); got != 0 {
+		t.Fatalf("ReasonCount(leg_degraded, caller, asr_stream_closed_passthrough) = %d, want 0 after a normal Close()", got)
+	}
+	if got := metrics.ReasonCount(stageLegDegraded, "agent", reasonASRStreamClosedPassthrough); got != 0 {
+		t.Fatalf("ReasonCount(leg_degraded, agent, asr_stream_closed_passthrough) = %d, want 0 after a normal Close()", got)
+	}
+}

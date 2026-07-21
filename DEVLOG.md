@@ -1,5 +1,168 @@
 # LangStream Dev Log
 
+## 2026-07-21 (Sprint 14: dead-leg audio drain, vendor cost-recording audit, WER corpus growth) — scheduled run
+
+### Agents run
+Tech, PE, QA — three agents in parallel (Tech/PE), then QA sequenced after
+so it could test against Tech's and PE's real, finished code rather than
+guessing at their shape in advance. SRE not needed (no scoped SRE-owned
+gap found during planning; CI/Docker/observability infra unchanged from
+prior audits). Week 3's one open item (real-PSTN jitter tuning) and all of
+Week 4 remain gated on Saurabh's anchor-customer/live-traffic decision,
+unchanged since Sprint 8 — today again did opportunistic hardening rather
+than inventing roadmap scope.
+
+### Repo health at start
+Clean, on the very first try: `go build ./...`, `go vet ./...`,
+`go test ./... -race` all passed clean for the entire repo (all 12
+buildable packages; `examples/backend_selection` and
+`tools/latency_benchmark` have no test files). `gofmt -l .` clean.
+ClearStream checked (`git ls-remote --tags`): still only `v0.1.0`, no
+`VERSIONING.md` action needed — today's scope never touched `pkg/rtp`'s
+ClearStream import either way.
+
+### Sandbox note
+`$HOME` (`/sessions/...`) was again at 100% full, 0 bytes free, for the
+entire run — same pattern as every sprint since Sprint 9, Sprint 12's
+disk-exhaustion incident being the one exception that briefly looked
+clean. Worked around exactly as Sprint 13 did: cloned directly into a
+fresh, this-run-owned directory (`/tmp/lswork/LangStream`), reused the
+pre-existing extracted go1.22.5 toolchain at `/tmp/gotools` (read+execute
+accessible even though owned by a stale UID from a past run), and used a
+fresh `TMPDIR` (`/tmp/lswork/gotmp`) rather than the sandbox's default
+`$TMPDIR`, which points at the full `/sessions` filesystem and fails Go's
+own scratch-dir creation immediately even when `/tmp` itself has room.
+Root filesystem held 2.6→1.1GB free across the run (three
+parallel/sequenced agents each compiling and testing) — tighter than
+Sprint 13's 2.7-3.4GB but never hit the wall. Confirms Sprint 13's
+tentative read: the disk situation is sandbox-instance-specific, not a
+monotonically-worsening shared-state problem — this is now two clean (or
+workable) runs out of the last three, with only Sprint 12 hitting a hard
+wall. Still worth the next run checking early and reporting the delta
+either way, per Sprint 13's own note.
+
+### Changes
+
+**Tech — dead-leg audio no longer silently dropped forever
+(`pkg/langstream/session.go`, `pkg/langstream/fallback.go`)**
+Closed the gap Sprint 13 documented as intentional and left open: after
+an ASR stream permanently dies mid-call, `runLeg` did one last
+drain-and-forward of buffered audio and returned — nothing was left to
+drain any audio pushed afterward until `Session.Close()` finally ran, so
+a caller who kept talking to an already-dead leg had that audio
+silently disappear. New `drainDeadLeg` goroutine (spawned via the same
+`s.wg` the leg goroutines already use, so `Close()`'s existing
+`wg.Wait()` covers it with no new synchronization primitive) polls
+`leg.audio` every `FallbackConfig.DeadLegDrainInterval` (new field,
+300ms default) and forwards whatever's buffered as passthrough, tagged
+with a new, distinct reason `reasonASRStreamClosedPassthrough` (separate
+from the original one-time `reasonASRStreamClosed`) so the dashboard can
+tell "the leg just died" from "the leg's been dead and audio kept
+arriving."
+
+**Real bug found and fixed during this same task:** the first cut of
+`drainDeadLeg` only exited on `s.ctx.Done()`. Since `Close()` doesn't
+call `s.cancel()` until after its own `wg.Wait()` returns (or a 3s
+`finalFlushTimeout` backstop fires), and the drainer is tracked by that
+same `wg`, every `Close()` on a session with a dead leg would have
+deadlock-waited for the full 3-second backstop before `s.cancel()` could
+even run — caught because
+`TestASRPermanentFailure_RealSessionDegradesCallerLegAndForwardsBufferedAudio`
+suddenly took exactly 3.00s instead of near-instant. Fixed by having
+`drainDeadLeg` also check the existing `s.closing` atomic flag each tick
+(reusing the existing primitive, not adding one) so it exits within one
+poll interval of `Close()` starting. This is the third instance of this
+exact shutdown-ordering bug class in this repo (see DEVLOG.md's
+2026-07-12 and 2026-07-14 entries) — worth remembering as a standing
+review point any time a new goroutine is added to `Session`.
+
+**PE — vendor cost-recording audit across all 5 vendor clients
+(`pkg/asr/deepgram_test.go`, `pkg/asr/sarvam_test.go`,
+`pkg/translate/gpt4o_test.go`, `pkg/tts/cartesia_test.go`,
+`pkg/tts/elevenlabs_test.go`)**
+Audited Deepgram, Sarvam, GPT-4o, Cartesia, and ElevenLabs against four
+specific cost-correctness invariants: no double-counting `RecordCost` on
+retry-then-succeed; no cost recorded for undelivered work on full-retry
+exhaustion; ASR mid-stream reconnects don't double-bill; circuit-open
+rejections never record cost. **Clean audit — no bugs found.** All four
+invariants already held in every vendor client (each success path has
+exactly one cost call site, reached only after the retry loop resolves;
+Cartesia/ElevenLabs bill per-character at request-acceptance time by
+design, matching real vendor invoicing, so a later mid-stream drop
+correctly doesn't erase or double that cost; Deepgram/Sarvam compute
+cost fresh from the current `AudioFrame` per `PushAudio` call, never from
+reconnect-resettable cumulative state; all five breakers reject before
+any billing logic runs). Per this repo's established pattern for a real
+negative result (see Sprint 11's race-pattern audit), added 12 new
+pinning regression tests across the five files above rather than
+manufacturing a fix for a non-bug, so a future regression in any of these
+four invariants is caught loudly instead of silently.
+
+**QA — integration coverage for Tech's fix, WER corpus growth (47 → 52),
+race-pattern audit continuation**
+New root-level `dead_leg_drain_integration_test.go`: drives a real
+`*langstream.Session` (not `runLeg` in isolation) through a permanent ASR
+failure followed by *three* separate subsequent audio pushes over time
+(Tech's own unit tests covered one follow-up push; this closes the gap
+to "keeps forwarding indefinitely, not just once more"), for both caller
+and agent legs, plus a 15-iteration goroutine-leak check pushing 3
+frames per cycle. WER corpus grew 47 → 52 with 5 new, hand-verified,
+non-overlapping error shapes: total-deletion-to-empty-hypothesis
+(silence timeout, WER 1.0 via genuine D=N, distinct from the existing
+S=N total-substitution case), deletion+insertion with zero substitutions,
+a contiguous 3-word phrase-repeat insertion (previous insertions were all
+single-word), the same word mis-heard identically at two occurrences
+("hai"/"hain" verb agreement, vs. existing multi-substitution entries
+using unrelated word pairs), and a trailing 3-word contiguous deletion
+block (call-cutoff/truncation shape, distinct from the existing 2-word
+mid-sentence deletion and the 3-non-adjacent-deletions entry).
+`corpus_test.go` and `wer_measurement_test.go` updated in sync (one
+entry — the empty-hypothesis case — deliberately excluded from the
+Sarvam-backed pipeline test, since `sarvam.go`'s `handleMessage` silently
+drops empty-transcript messages; documented, not a bug). Race-pattern
+audit found one structurally-relevant-but-safe case (PE's two
+mid-stream-reconnect cost tests use a fixed 150ms sleep to let a
+goroutine observe a dropped connection, matching a pattern already
+shipped in Sprint 13 and run clean 25x under `-race` — flagged for
+visibility, not fixed, per Sprint 11's precedent for this exact kind of
+negative-but-notable finding) and nothing else.
+
+### Bugs found/fixed
+One, described above under Tech: the dead-leg drainer's original
+`s.ctx.Done()`-only exit condition would have forced every `Close()` on a
+session with a dead leg to eat the 3s `finalFlushTimeout` backstop. Fixed
+same-day, before landing. No bugs found in PE's or QA's own work, and QA
+found none in Tech's or PE's finished code either.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+- `go test ./... -race -count=3` — all 12 buildable packages pass, no
+  flakes, run in chunks to stay under this sandbox's per-command time
+  limit (`.`/`pkg/langstream`/`pkg/asr`; `pkg/translate`/`pkg/tts`/
+  `pkg/qa`; `pkg/rtp`/`pkg/webrtcgw`/`pkg/observability`/`cmd/langstream`;
+  `examples/...`)
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- Real-condition jitter-buffer tuning against live PSTN traces — still
+  needs live/pilot call traffic (Week 4). Unchanged.
+- Week 4 (live pilot, real WER/latency/CSAT, go/no-go) still cannot start
+  without Saurabh's decision on anchor customer(s) / live traffic —
+  unchanged.
+- Docker-build verification, legal review of `docs/compliance.md` — both
+  unchanged, still need a human.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that's the top priority and supersedes everything below.
+2. Absent that: continue opportunistic hardening (WER corpus, race-
+   pattern audits) if no higher-priority item exists — still cheap,
+   high-value, and don't block on anything.
+3. Keep checking whether the sandbox disk situation holds — two workable
+   runs out of the last three (Sprint 12 the exception), but that's still
+   too small a sample to call the pattern resolved.
+
+
 ## 2026-07-20 (Sprint 13: ASR circuit breakers + permanent-ASR-failure leg visibility, WER corpus growth) — scheduled run
 
 ### Agents run
