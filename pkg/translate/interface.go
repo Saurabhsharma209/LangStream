@@ -16,8 +16,8 @@ type Chunk struct {
 	IsFinal    bool // true once this maps to a final (non-partial) ASR transcript
 }
 
-// Translator is the interface every MT backend (GPT-4o, DeepL, NLLB-200, ...)
-// implements.
+// Translator is the interface every MT backend (GPT-4o, Gemini, DeepL,
+// NLLB-200, ...) implements.
 type Translator interface {
 	Name() string
 

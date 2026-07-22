@@ -22,11 +22,18 @@ func TestDefaultFallbackConfigValues(t *testing.T) {
 	if !d.DegradeToneEnabled {
 		t.Error("DegradeToneEnabled = false, want true")
 	}
-	if d.TranslateTimeout != 2*time.Second {
-		t.Errorf("TranslateTimeout = %v, want 2s", d.TranslateTimeout)
+	// 6s/4s, not the original 2s/3s: recalibrated after Saurabh's live
+	// pilot test showed real vendor latency (never exercised against
+	// anything but fast local fake servers before now) routinely blew
+	// through the original, too-tight budgets on a single attempt alone
+	// -- see TranslateTimeout's/SynthesizeTimeout's doc comments in
+	// fallback.go for the full retry-budget math behind these specific
+	// values.
+	if d.TranslateTimeout != 6*time.Second {
+		t.Errorf("TranslateTimeout = %v, want 6s", d.TranslateTimeout)
 	}
-	if d.SynthesizeTimeout != 3*time.Second {
-		t.Errorf("SynthesizeTimeout = %v, want 3s", d.SynthesizeTimeout)
+	if d.SynthesizeTimeout != 4*time.Second {
+		t.Errorf("SynthesizeTimeout = %v, want 4s", d.SynthesizeTimeout)
 	}
 	if d.MaxConsecutiveFailures != 3 {
 		t.Errorf("MaxConsecutiveFailures = %v, want 3", d.MaxConsecutiveFailures)
@@ -40,11 +47,11 @@ func TestFallbackConfigWithDefaultsFillsOnlyZeroFields(t *testing.T) {
 	if got.ConfidenceThreshold != 0.9 {
 		t.Errorf("ConfidenceThreshold = %v, want explicit 0.9 preserved", got.ConfidenceThreshold)
 	}
-	if got.TranslateTimeout != 2*time.Second {
-		t.Errorf("TranslateTimeout = %v, want defaulted 2s", got.TranslateTimeout)
+	if got.TranslateTimeout != 6*time.Second {
+		t.Errorf("TranslateTimeout = %v, want defaulted 6s", got.TranslateTimeout)
 	}
-	if got.SynthesizeTimeout != 3*time.Second {
-		t.Errorf("SynthesizeTimeout = %v, want defaulted 3s", got.SynthesizeTimeout)
+	if got.SynthesizeTimeout != 4*time.Second {
+		t.Errorf("SynthesizeTimeout = %v, want defaulted 4s", got.SynthesizeTimeout)
 	}
 	if got.MaxConsecutiveFailures != 3 {
 		t.Errorf("MaxConsecutiveFailures = %v, want defaulted 3", got.MaxConsecutiveFailures)

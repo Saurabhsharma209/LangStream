@@ -39,6 +39,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/exotel/langstream/pkg/asr"
 	"github.com/exotel/langstream/pkg/langstream"
 	"github.com/exotel/langstream/pkg/observability"
@@ -87,6 +89,9 @@ func init() {
 	})
 	langstream.RegisterTranslatorBackend("gpt4o", func() (translate.Translator, error) {
 		return translate.NewGPT4oTranslator()
+	})
+	langstream.RegisterTranslatorBackend("gemini", func() (translate.Translator, error) {
+		return translate.NewGeminiTranslator()
 	})
 	langstream.RegisterTTSBackend("cartesia", func() (tts.Synthesizer, error) {
 		return tts.NewCartesiaSynthesizer()
@@ -190,6 +195,24 @@ func resolveBackend(flagValue, envVar string) string {
 	return langstream.BackendMock
 }
 
+// cliLogger builds the *zap.Logger newSession wires into every
+// langstream.Session it constructs (see SessionConfig.Logger's doc
+// comment) so MT/TTS fallback events are visible in this CLI's own
+// output by default, not just counted in the observability dashboard's
+// metrics -- the structured-logging counterpart to the raw stderr debug
+// print floated during the 2026-07 pilot (see session.go's
+// logMTFailure/logTTSFailure/logTTSStall). Falls back to zap.NewNop() if
+// production-logger construction itself fails, mirroring the exact same
+// fallback duplex.go's buildDuplexSession already uses for its own,
+// separate RTP-layer logger.
+func cliLogger() *zap.Logger {
+	logger, err := zap.NewProduction()
+	if err != nil {
+		return zap.NewNop()
+	}
+	return logger
+}
+
 // newSession resolves the named ASR/MT/TTS backends through pkg/langstream's
 // backend registry and constructs a langstream.Session configured for
 // callerLang/agentLang. It is the shared backend-resolution +
@@ -217,6 +240,7 @@ func newSession(ctx context.Context, asrName, mtName, ttsName string, callerLang
 		ASR:            rec,
 		Translator:     tr,
 		TTS:            syn,
+		Logger:         cliLogger().Named("langstream.session"),
 	}
 
 	sess, err := langstream.NewSession(ctx, cfg)

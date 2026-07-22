@@ -1100,3 +1100,257 @@ func TestSessionNormalCloseDoesNotSpawnDeadLegDrainer(t *testing.T) {
 		t.Fatalf("ReasonCount(leg_degraded, agent, asr_stream_closed_passthrough) = %d, want 0 after a normal Close()", got)
 	}
 }
+
+// blockingConnectSynthesizer simulates a real TTS backend's
+// SynthesizeStream call itself blocking during connection setup / an
+// internal connect-phase retry loop (e.g. a vendor's own up-to-3-attempt
+// reconnect with backoff, see FallbackConfig.SynthesizeTimeout's doc
+// comment in fallback.go) -- i.e. it never even returns a channel, let
+// alone a first chunk, until either ctx is cancelled or
+// simulatedConnectDelay elapses on its own. This is deliberately a
+// different (and, per fallback.go's doc comment, more realistic) shape
+// than stallingSynthesizer above: stallingSynthesizer returns its channel
+// immediately and only *that channel* never produces a chunk, so it only
+// ever exercises forwardTTSWithStallGuard's post-return wait -- it would
+// pass identically whether ttsCtx carried a deadline or not, since
+// SynthesizeStream itself never blocks. blockingConnectSynthesizer instead
+// blocks *inside* the SynthesizeStream call itself, which is exactly the
+// phase Tech's fix (session.go's runLeg constructing ttsCtx via
+// context.WithTimeout instead of the old context.WithCancel) is supposed
+// to bound: before the fix, ttsCtx carried no deadline at all, so this
+// call would only ever be interrupted by simulatedConnectDelay elapsing on
+// its own or the whole session shutting down -- never by
+// FallbackConfig.SynthesizeTimeout.
+type blockingConnectSynthesizer struct {
+	simulatedConnectDelay time.Duration
+}
+
+func (s *blockingConnectSynthesizer) Name() string { return "blocking-connect" }
+func (s *blockingConnectSynthesizer) SupportedLanguages() []tts.Language {
+	return []tts.Language{"en", "hi"}
+}
+
+func (s *blockingConnectSynthesizer) SynthesizeStream(ctx context.Context, text string, persona tts.Persona) (<-chan tts.AudioChunk, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(s.simulatedConnectDelay):
+		out := make(chan tts.AudioChunk, 1)
+		out <- tts.AudioChunk{PCM: []byte(text), SampleRate: 8000, IsFinal: true}
+		close(out)
+		return out, nil
+	}
+}
+
+// TestSynthesizeTimeoutBoundsEntireSynthesizeStreamCallIncludingConnectPhase
+// is the regression test for the ttsCtx fix described in
+// blockingConnectSynthesizer's doc comment above: it proves
+// FallbackConfig.SynthesizeTimeout bounds the *entire*
+// Synthesizer.SynthesizeStream call -- including whatever a real vendor's
+// internal connect-phase retry loop does before ever handing back a
+// channel -- not merely the already-covered "wait for a first chunk once
+// SynthesizeStream has already returned" phase
+// TestSessionTTSStallFallsBackToPassthrough exercises.
+//
+// simulatedConnectDelay is deliberately many times SynthesizeTimeout: if
+// ttsCtx ever regressed back to context.WithCancel (no deadline), this
+// call would block for the *entire* simulatedConnectDelay (only ever
+// interrupted by Close()/session shutdown, never by SynthesizeTimeout),
+// so passthrough audio would only appear long after SynthesizeTimeout --
+// this test's tight upper bound below (a small, fixed multiple of
+// SynthesizeTimeout, far short of simulatedConnectDelay) is what actually
+// distinguishes the fixed behavior from the pre-fix bug, not just "did it
+// eventually fall back".
+func TestSynthesizeTimeoutBoundsEntireSynthesizeStreamCallIncludingConnectPhase(t *testing.T) {
+	const synthesizeTimeout = 80 * time.Millisecond
+	const simulatedConnectDelay = 2 * time.Second // many multiples of synthesizeTimeout
+
+	rec := &fakeRecognizer{
+		scripts: [][]asr.Transcript{
+			{{Text: "will hang during connect", Language: "hi", IsFinal: true}},
+			{},
+		},
+	}
+
+	cfg := validConfig()
+	cfg.ASR = rec
+	cfg.Translator = &fakeTranslator{}
+	cfg.TTS = &blockingConnectSynthesizer{simulatedConnectDelay: simulatedConnectDelay}
+	cfg.Fallback = FallbackConfig{SynthesizeTimeout: synthesizeTimeout}
+
+	sess, err := NewSession(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer sess.Close()
+
+	frame := asr.AudioFrame{PCM: []byte{7, 7, 7}, SampleRate: 8000}
+	start := time.Now()
+	if err := sess.PushCallerAudio(frame); err != nil {
+		t.Fatalf("PushCallerAudio: %v", err)
+	}
+
+	// Generous relative to synthesizeTimeout (10x) but nowhere near
+	// simulatedConnectDelay (2s): if this fires, either the fallback
+	// never happened (a hang) or it took long enough to suggest
+	// SynthesizeTimeout is once again not bounding the connect phase.
+	deadline := time.After(10 * synthesizeTimeout)
+	var sawOriginal bool
+	var elapsed time.Duration
+	for {
+		select {
+		case chunk, ok := <-sess.AgentHearsAudio():
+			if !ok {
+				t.Fatal("AgentHearsAudio closed unexpectedly")
+			}
+			if string(chunk.PCM) == string(frame.PCM) {
+				sawOriginal = true
+				elapsed = time.Since(start)
+			}
+			if chunk.IsFinal {
+				if !sawOriginal {
+					t.Fatal("expected original audio somewhere in the passthrough stream")
+				}
+				// The whole SynthesizeStream call (this fake's own
+				// internal "connect phase" included) must have been
+				// bounded by synthesizeTimeout, not by
+				// simulatedConnectDelay: allow generous scheduling
+				// slack (5x) but this must stay far short of
+				// simulatedConnectDelay (2s) for the fix to be doing its
+				// job.
+				if elapsed > 5*synthesizeTimeout {
+					t.Fatalf("passthrough arrived after %v, want well under %v (5x SynthesizeTimeout=%v) -- SynthesizeTimeout is not bounding the full SynthesizeStream call (including connect-phase blocking), suggesting ttsCtx has regressed back to an unbounded context.WithCancel", elapsed, 5*synthesizeTimeout, synthesizeTimeout)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out after %v waiting for passthrough after a simulated TTS connect-phase stall (SynthesizeTimeout=%v) -- session may be hanging, or SynthesizeTimeout is not bounding the connect phase at all", 10*synthesizeTimeout, synthesizeTimeout)
+		}
+	}
+}
+
+// erroringSynthesizer implements tts.Synthesizer by always returning an
+// error directly from SynthesizeStream (as opposed to stallingSynthesizer,
+// which returns a channel that never produces a chunk, or
+// blockingConnectSynthesizer, which blocks inside the call). No existing
+// test in this file previously exercised runLeg's direct
+// "SynthesizeStream itself returned an error" branch (see session.go's
+// logTTSFailure call site) with a hard error rather than a stall/timeout,
+// so this fake closes that small additional gap alongside this test's
+// main nil-Logger-safety purpose below.
+type erroringSynthesizer struct {
+	err error
+}
+
+func (s *erroringSynthesizer) Name() string                       { return "erroring" }
+func (s *erroringSynthesizer) SupportedLanguages() []tts.Language { return []tts.Language{"en", "hi"} }
+func (s *erroringSynthesizer) SynthesizeStream(ctx context.Context, text string, persona tts.Persona) (<-chan tts.AudioChunk, error) {
+	return nil, s.err
+}
+
+// TestNewSession_NilLoggerDefaultsToNopAndAllFailureLogSitesAreSafe is the
+// regression test for SessionConfig.Logger's nil-defaults-to-zap.NewNop()
+// contract (see session.go's NewSession: "logger := cfg.Logger; if logger
+// == nil { logger = zap.NewNop() }"). Every one of session.go's three log
+// call sites (logMTFailure, logTTSFailure, logTTSStall) unconditionally
+// calls a method on s.logger with no nil-guard of its own -- if the
+// nil-default were ever missing or broken (e.g. a future refactor of
+// NewSession accidentally skips it, or a struct literal in
+// s.logger's own assignment path gets reordered), any SessionConfig built
+// without an explicit Logger (which is most of this file's tests,
+// including many below that already exercise MT/TTS fallback paths, plus
+// the "mock" backend construction used throughout cmd/langstream and
+// elsewhere in this repo) would panic with a nil-pointer dereference the
+// moment an MT/TTS failure or stall actually happened, rather than
+// gracefully logging nothing.
+//
+// This test deliberately never sets SessionConfig.Logger (the zero
+// value, nil) and drives two of the three log call sites directly to a
+// hard failure that must reach logMTFailure/logTTSFailure -- proving,
+// explicitly and by name, that the default is actually applied and safe,
+// rather than relying on that being an incidental side effect of every
+// other test in this file that also happens to leave Logger unset.
+func TestNewSession_NilLoggerDefaultsToNopAndAllFailureLogSitesAreSafe(t *testing.T) {
+	t.Run("MT failure", func(t *testing.T) {
+		rec := &fakeRecognizer{
+			scripts: [][]asr.Transcript{
+				{{Text: "hello", Language: "hi", IsFinal: true}},
+				{},
+			},
+		}
+		cfg := validConfig()
+		cfg.ASR = rec
+		cfg.Translator = &fakeTranslator{err: errors.New("mt boom")}
+		cfg.TTS = &fakeSynthesizer{}
+		// cfg.Logger deliberately left unset (nil).
+		if cfg.Logger != nil {
+			t.Fatal("test setup bug: cfg.Logger must be nil for this test to be meaningful")
+		}
+
+		sess, err := NewSession(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		defer sess.Close()
+
+		frame := asr.AudioFrame{PCM: []byte{1, 2, 3}, SampleRate: 8000}
+		if err := sess.PushCallerAudio(frame); err != nil {
+			t.Fatalf("PushCallerAudio: %v", err)
+		}
+
+		deadline := time.After(2 * time.Second)
+		for {
+			select {
+			case chunk, ok := <-sess.AgentHearsAudio():
+				if !ok {
+					t.Fatal("AgentHearsAudio closed unexpectedly")
+				}
+				if chunk.IsFinal {
+					return // reached without panicking: logMTFailure(nil-defaulted logger, ...) is safe.
+				}
+			case <-deadline:
+				t.Fatal("timed out waiting for passthrough after an MT failure with no Logger configured")
+			}
+		}
+	})
+
+	t.Run("TTS failure", func(t *testing.T) {
+		rec := &fakeRecognizer{
+			scripts: [][]asr.Transcript{
+				{{Text: "hello", Language: "hi", IsFinal: true}},
+				{},
+			},
+		}
+		cfg := validConfig()
+		cfg.ASR = rec
+		cfg.Translator = &fakeTranslator{}
+		cfg.TTS = &erroringSynthesizer{err: errors.New("tts boom")}
+		// cfg.Logger deliberately left unset (nil).
+
+		sess, err := NewSession(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		defer sess.Close()
+
+		frame := asr.AudioFrame{PCM: []byte{4, 5, 6}, SampleRate: 8000}
+		if err := sess.PushCallerAudio(frame); err != nil {
+			t.Fatalf("PushCallerAudio: %v", err)
+		}
+
+		deadline := time.After(2 * time.Second)
+		for {
+			select {
+			case chunk, ok := <-sess.AgentHearsAudio():
+				if !ok {
+					t.Fatal("AgentHearsAudio closed unexpectedly")
+				}
+				if chunk.IsFinal {
+					return // reached without panicking: logTTSFailure(nil-defaulted logger, ...) is safe.
+				}
+			case <-deadline:
+				t.Fatal("timed out waiting for passthrough after a TTS failure with no Logger configured")
+			}
+		}
+	})
+}

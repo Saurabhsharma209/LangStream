@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -53,6 +54,12 @@ func TestDeepgramRecognizer_MissingAPIKey(t *testing.T) {
 	}
 }
 
+// TestDeepgramRecognizer_SupportedLanguagesAndUnsupportedHint verifies
+// both "en" and "hi" are advertised (see DeepgramRecognizer's doc comment
+// for why "hi" now routes to Nova-3/language=multi rather than being
+// rejected outright, unlike this backend's original English-only pilot
+// scope), and that a genuinely unsupported hint (neither "en" nor "hi")
+// is still rejected.
 func TestDeepgramRecognizer_SupportedLanguagesAndUnsupportedHint(t *testing.T) {
 	os.Setenv("DEEPGRAM_API_KEY", "test-key")
 	r, err := NewDeepgramRecognizer()
@@ -60,12 +67,23 @@ func TestDeepgramRecognizer_SupportedLanguagesAndUnsupportedHint(t *testing.T) {
 		t.Fatalf("NewDeepgramRecognizer: %v", err)
 	}
 	langs := r.SupportedLanguages()
-	if len(langs) != 1 || langs[0] != "en" {
-		t.Fatalf("expected [en], got %v", langs)
+	want := map[Language]bool{"en": false, "hi": false}
+	for _, l := range langs {
+		if _, ok := want[l]; ok {
+			want[l] = true
+		}
+	}
+	for l, found := range want {
+		if !found {
+			t.Errorf("expected SupportedLanguages() to include %q, got %v", l, langs)
+		}
+	}
+	if len(langs) != 2 {
+		t.Errorf("expected exactly [en hi] (in some order), got %v", langs)
 	}
 
-	if _, err := r.StartStream(context.Background(), "hi"); err == nil {
-		t.Fatal("expected error starting stream with unsupported language hint")
+	if _, err := r.StartStream(context.Background(), "fr"); err == nil {
+		t.Fatal("expected error starting stream with a genuinely unsupported language hint (\"fr\")")
 	}
 }
 
@@ -771,5 +789,357 @@ func TestDeepgramRecognizer_CircuitBreaker_DefaultEnabledWithoutOption(t *testin
 	}
 	if r.breaker.cooldown != defaultBreakerCooldown {
 		t.Errorf("default cooldown = %v, want %v", r.breaker.cooldown, defaultBreakerCooldown)
+	}
+}
+
+// --- Hindi (Nova-3 code-switching) wiring ---------------------------------
+
+// newFakeDeepgramServerCapturingURL is like newFakeDeepgramServer but also
+// publishes the exact request URL (query string and all) the client
+// connected with, so tests can assert on which model/language/endpointing
+// wire params a given languageHint actually produced.
+func newFakeDeepgramServerCapturingURL(t *testing.T, handler func(t *testing.T, conn *websocket.Conn)) (*httptest.Server, string, chan *url.URL) {
+	t.Helper()
+	urls := make(chan *url.URL, 1)
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		urls <- r.URL
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("fake deepgram server: upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+		handler(t, conn)
+	}))
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/listen"
+	return srv, wsURL, urls
+}
+
+func drainConn(t *testing.T, conn *websocket.Conn) {
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+	}
+}
+
+// TestDeepgramRecognizer_HindiConnectsWithNova3MultiWireParams verifies
+// that languageHint "hi" connects Deepgram with model=nova-3 and the
+// wire-level language=multi parameter (Nova-3's real-time Hindi-English
+// code-switching mode -- see DeepgramRecognizer's doc comment), NOT
+// model=nova-2 with language=hi (Nova-2 has no Hindi code-switching
+// support at all, only Spanish+English -- this is exactly the bug this
+// fix avoids relative to just widening the old English-only language
+// check). It also checks the code-switching-specific endpointing=100
+// hint is set.
+func TestDeepgramRecognizer_HindiConnectsWithNova3MultiWireParams(t *testing.T) {
+	srv, wsURL, urls := newFakeDeepgramServerCapturingURL(t, func(t *testing.T, conn *websocket.Conn) {
+		drainConn(t, conn)
+	})
+	defer srv.Close()
+
+	os.Setenv("DEEPGRAM_API_KEY", "unit-test-key")
+	r, err := NewDeepgramRecognizer(WithBaseURL(wsURL))
+	if err != nil {
+		t.Fatalf("NewDeepgramRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio: %v", err)
+	}
+
+	select {
+	case gotURL := <-urls:
+		q := gotURL.Query()
+		if got := q.Get("model"); got != "nova-3" {
+			t.Errorf("model = %q, want %q", got, "nova-3")
+		}
+		if got := q.Get("language"); got != "multi" {
+			t.Errorf("language = %q, want %q (Nova-3's code-switching wire mode, not \"hi\")", got, "multi")
+		}
+		if got := q.Get("endpointing"); got != "100" {
+			t.Errorf("endpointing = %q, want %q for a code-switching session", got, "100")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the fake server to receive a connection")
+	}
+}
+
+// TestDeepgramRecognizer_EnglishConnectsWithNova2Params verifies "en"
+// still connects with model=nova-2 and language=en, unchanged from before
+// this fix, and does not set the code-switching-specific endpointing
+// override.
+func TestDeepgramRecognizer_EnglishConnectsWithNova2Params(t *testing.T) {
+	srv, wsURL, urls := newFakeDeepgramServerCapturingURL(t, func(t *testing.T, conn *websocket.Conn) {
+		drainConn(t, conn)
+	})
+	defer srv.Close()
+
+	os.Setenv("DEEPGRAM_API_KEY", "unit-test-key")
+	r, err := NewDeepgramRecognizer(WithBaseURL(wsURL))
+	if err != nil {
+		t.Fatalf("NewDeepgramRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "en")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio: %v", err)
+	}
+
+	select {
+	case gotURL := <-urls:
+		q := gotURL.Query()
+		if got := q.Get("model"); got != "nova-2" {
+			t.Errorf("model = %q, want %q", got, "nova-2")
+		}
+		if got := q.Get("language"); got != "en" {
+			t.Errorf("language = %q, want %q", got, "en")
+		}
+		if got := q.Get("endpointing"); got != "" {
+			t.Errorf("endpointing = %q, want unset for a plain English session", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the fake server to receive a connection")
+	}
+}
+
+// TestDeepgramRecognizer_EmptyLanguageHintDefaultsToEnglishNova2 verifies
+// StartStream's "" -> "en" default still resolves to the Nova-2 (not
+// Nova-3) wire params.
+func TestDeepgramRecognizer_EmptyLanguageHintDefaultsToEnglishNova2(t *testing.T) {
+	srv, wsURL, urls := newFakeDeepgramServerCapturingURL(t, func(t *testing.T, conn *websocket.Conn) {
+		drainConn(t, conn)
+	})
+	defer srv.Close()
+
+	os.Setenv("DEEPGRAM_API_KEY", "unit-test-key")
+	r, err := NewDeepgramRecognizer(WithBaseURL(wsURL))
+	if err != nil {
+		t.Fatalf("NewDeepgramRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio: %v", err)
+	}
+
+	select {
+	case gotURL := <-urls:
+		q := gotURL.Query()
+		if got := q.Get("model"); got != "nova-2" {
+			t.Errorf("model = %q, want %q", got, "nova-2")
+		}
+		if got := q.Get("language"); got != "en" {
+			t.Errorf("language = %q, want %q", got, "en")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the fake server to receive a connection")
+	}
+}
+
+// TestDeepgramRecognizer_WithDeepgramHindiModelOverride verifies
+// WithDeepgramHindiModel overrides the Hindi-path model independently of
+// WithDeepgramModel (which only affects the English path).
+func TestDeepgramRecognizer_WithDeepgramHindiModelOverride(t *testing.T) {
+	srv, wsURL, urls := newFakeDeepgramServerCapturingURL(t, func(t *testing.T, conn *websocket.Conn) {
+		drainConn(t, conn)
+	})
+	defer srv.Close()
+
+	os.Setenv("DEEPGRAM_API_KEY", "unit-test-key")
+	r, err := NewDeepgramRecognizer(WithBaseURL(wsURL), WithDeepgramHindiModel("nova-3-custom"))
+	if err != nil {
+		t.Fatalf("NewDeepgramRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio: %v", err)
+	}
+
+	select {
+	case gotURL := <-urls:
+		if got := gotURL.Query().Get("model"); got != "nova-3-custom" {
+			t.Errorf("model = %q, want %q", got, "nova-3-custom")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the fake server to receive a connection")
+	}
+}
+
+// TestDeepgramRecognizer_RecordsHindiCostPerAudioMinute verifies Hindi
+// (Nova-3 "multi") sessions bill at deepgramHindiCostPerMinuteUSD, not
+// the English Nova-2 rate.
+func TestDeepgramRecognizer_RecordsHindiCostPerAudioMinute(t *testing.T) {
+	srv, wsURL := newFakeDeepgramServer(t, func(t *testing.T, conn *websocket.Conn) {
+		drainConn(t, conn)
+	})
+	defer srv.Close()
+
+	os.Setenv("DEEPGRAM_API_KEY", "unit-test-key")
+	metrics := observability.NewLatencyRecorder()
+	r, err := NewDeepgramRecognizer(WithBaseURL(wsURL), WithMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewDeepgramRecognizer: %v", err)
+	}
+	sess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+	defer sess.Close()
+
+	// 320 bytes @ 8kHz/16-bit mono = 160 samples = 20ms of audio.
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000}
+	if err := sess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio: %v", err)
+	}
+
+	wantMinutes := 0.02 / 60.0
+	want := wantMinutes * deepgramHindiCostPerMinuteUSD
+	got := metrics.CostTotal("deepgram")
+	if diff := got - want; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("CostTotal(deepgram) = %v, want %v (Hindi/nova-3-multi rate)", got, want)
+	}
+	if got == metrics.CostTotal("deepgram") && want == wantMinutes*deepgramCostPerMinuteUSD {
+		t.Fatal("test setup bug: Hindi and English rates must differ for this test to be meaningful")
+	}
+}
+
+// TestDeepgramRecognizer_EnglishSessionUnaffectedByHindiOnSameRecognizer
+// closes a gap in PE's own Hindi/Nova-3 test coverage above: every one of
+// PE's new tests
+// (TestDeepgramRecognizer_HindiConnectsWithNova3MultiWireParams/
+// TestDeepgramRecognizer_EnglishConnectsWithNova2Params/
+// TestDeepgramRecognizer_WithDeepgramHindiModelOverride/
+// TestDeepgramRecognizer_RecordsHindiCostPerAudioMinute) starts exactly
+// one StreamSession, of one language, per *DeepgramRecognizer instance --
+// none of them prove that a single, long-lived DeepgramRecognizer (the
+// real, production shape: one Recognizer instance shared by
+// langstream.NewSession for *both* the caller and agent legs, see
+// session.go's NewSession) produces fully independent, non-cross-
+// contaminated behavior when it is actually used for both an English and
+// a Hindi session at once, which is exactly how the Hindi feature is
+// meant to be used (a bilingual call: e.g. Hindi-speaking caller,
+// English-speaking agent).
+//
+// This test builds one DeepgramRecognizer configured with a Hindi-only
+// model override (WithDeepgramHindiModel) and no English override at all,
+// starts an English StreamSession first and confirms it connects with
+// plain, unmodified Nova-2 English params, then starts a second, Hindi
+// StreamSession from that *same* recognizer and confirms it independently
+// gets the Nova-3/"multi"/endpointing=100 code-switching params --
+// proving the Hindi-specific fields (hindiModel/wireLanguage, resolved
+// once per StartStream call in deepgram.go's StartStream) never bleed
+// into or get bled into by the English path on a shared Recognizer. It
+// also pushes audio on both sessions and confirms their recorded costs
+// land at each language's own distinct per-minute rate on one shared
+// metrics recorder, with no bleed-over of one session's rate into the
+// other's.
+func TestDeepgramRecognizer_EnglishSessionUnaffectedByHindiOnSameRecognizer(t *testing.T) {
+	srv, wsURL, urls := newFakeDeepgramServerCapturingURL(t, func(t *testing.T, conn *websocket.Conn) {
+		drainConn(t, conn)
+	})
+	defer srv.Close()
+
+	os.Setenv("DEEPGRAM_API_KEY", "unit-test-key")
+	metrics := observability.NewLatencyRecorder()
+	r, err := NewDeepgramRecognizer(WithBaseURL(wsURL), WithDeepgramHindiModel("hindi-only-override"), WithMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewDeepgramRecognizer: %v", err)
+	}
+
+	// English session first -- started, connected, and its wire params
+	// captured entirely before the Hindi session (configured with its own
+	// model override on this same recognizer) is even started.
+	enSess, err := r.StartStream(context.Background(), "en")
+	if err != nil {
+		t.Fatalf("StartStream(en): %v", err)
+	}
+	defer enSess.Close()
+
+	frame := AudioFrame{PCM: make([]byte, 320), SampleRate: 8000} // 20ms @ 8kHz
+	if err := enSess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio (en): %v", err)
+	}
+
+	select {
+	case gotURL := <-urls:
+		q := gotURL.Query()
+		if got := q.Get("model"); got != "nova-2" {
+			t.Errorf("english session model = %q, want %q (must be unaffected by this recognizer's Hindi-only model override)", got, "nova-2")
+		}
+		if got := q.Get("language"); got != "en" {
+			t.Errorf("english session language = %q, want %q", got, "en")
+		}
+		if got := q.Get("endpointing"); got != "" {
+			t.Errorf("english session endpointing = %q, want unset (code-switching endpointing must not leak into the English path)", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the english session's connection")
+	}
+
+	// Now start the Hindi session on the *same* recognizer instance.
+	hiSess, err := r.StartStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("StartStream(hi): %v", err)
+	}
+	defer hiSess.Close()
+
+	if err := hiSess.PushAudio(context.Background(), frame); err != nil {
+		t.Fatalf("PushAudio (hi): %v", err)
+	}
+
+	select {
+	case gotURL := <-urls:
+		q := gotURL.Query()
+		if got := q.Get("model"); got != "hindi-only-override" {
+			t.Errorf("hindi session model = %q, want %q", got, "hindi-only-override")
+		}
+		if got := q.Get("language"); got != "multi" {
+			t.Errorf("hindi session language = %q, want %q", got, "multi")
+		}
+		if got := q.Get("endpointing"); got != "100" {
+			t.Errorf("hindi session endpointing = %q, want %q", got, "100")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the hindi session's connection")
+	}
+
+	// Cost: 20ms of audio pushed on each session. Total recorded cost
+	// across this one shared metrics recorder must equal the sum of each
+	// session's *own* rate -- if the two sessions' costs were ever
+	// cross-contaminated (e.g. a shared/last-write-wins rate instead of
+	// each session's own s.wireLanguage), this sum would come out wrong
+	// even though each individual session's URL params (checked above)
+	// looked correct.
+	wantMinutes := 0.02 / 60.0
+	wantTotal := wantMinutes*deepgramCostPerMinuteUSD + wantMinutes*deepgramHindiCostPerMinuteUSD
+	gotTotal := metrics.CostTotal("deepgram")
+	if diff := gotTotal - wantTotal; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("CostTotal(deepgram) = %v, want %v (english rate + hindi rate, no cross-contamination)", gotTotal, wantTotal)
 	}
 }

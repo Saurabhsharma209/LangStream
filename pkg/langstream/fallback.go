@@ -102,17 +102,90 @@ type FallbackConfig struct {
 	DegradeToneEnabled bool
 
 	// TranslateTimeout bounds a single Translator.Translate call for one
-	// utterance. Exceeding it is treated the same as Translate returning
-	// an error. Default 2s.
+	// utterance -- including every retry attempt and backoff delay the
+	// Translator makes internally, not just the first attempt (session.go's
+	// runLeg wraps the *entire* Translate call in one context.WithTimeout
+	// using this value, see mtCtx). Exceeding it is treated the same as
+	// Translate returning an error. Default 6s.
+	//
+	// Why 6s, not the original 2s (2026-07 pilot incident): every real
+	// backend's Translate implementation (see pkg/translate/gpt4o.go)
+	// retries a transient failure up to 3 attempts total, with
+	// capped-exponential backoff between attempts (150ms base, capped at
+	// 1.2s, ~20% jitter -- gpt4oRetryBaseDelay/gpt4oRetryMaxDelay). Because
+	// TranslateTimeout wraps the whole call, a tight budget doesn't just
+	// risk cutting off one slow attempt -- it can (and, per Saurabh's live
+	// pilot test, did) expire mid-first-attempt on perfectly healthy
+	// vendor traffic, before a retry ever got a chance to run: 2s is
+	// already tight for one full non-streaming-to-completion GPT-4o
+	// chat-completion round trip (this call reads an SSE stream to
+	// completion and returns one assembled Chunk, so unlike TTS's
+	// first-chunk-only budget below, the *entire* generation must finish
+	// within budget -- see GPT4oTranslator.Translate's doc comment).
+	// Result: this pilot was very likely falling back to untranslated
+	// passthrough far more often than the fallback design intended, which
+	// is a much better explanation for "translation quality" complaints
+	// than any actual mistranslation -- the translation was simply
+	// skipped.
+	//
+	// The math behind 6s: budget for *two* real attempts (so one slow or
+	// transient first attempt doesn't by itself force a fallback that a
+	// cheap, near-immediate retry would have avoided), assuming a
+	// realistic p95 per-attempt latency for a short call-center utterance
+	// of ~2-2.5s (GPT-4o and comparable streaming-chat-completion LLM
+	// backends commonly cite p50 time-to-first-token in the low hundreds
+	// of ms, but TranslateTimeout must cover the *entire* generation, and
+	// real network/queueing variance routinely pushes a full short
+	// completion past 2s under load) plus one backoff delay between them
+	// (~150-360ms, see above): 2 * 2.5s + 0.3s ~= 5.3s, rounded up to 6s
+	// for margin. A vendor that is genuinely down (not just slow) still
+	// fails fast (errors, not hangs), so 6s is only actually spent
+	// end-to-end when the vendor is truly hanging -- a real but rare case,
+	// bounded well below the naive "just bump it to 10s" fix, and nowhere
+	// near the ~8s-plus a full 3-attempt retry budget would need if this
+	// value tried to cover every attempt instead of just two. See
+	// maxSaneFallbackTimeout below if you're considering raising this.
 	TranslateTimeout time.Duration
 
 	// SynthesizeTimeout bounds how long a single Synthesizer.SynthesizeStream
-	// call is given to deliver its *first* audio chunk. Exceeding it is
-	// treated the same as SynthesizeStream returning an error. A stream
-	// that starts producing chunks within budget is allowed to run to
-	// completion afterward — a long-but-flowing synthesis is not cut off
-	// just because its *total* duration exceeds SynthesizeTimeout, only a
-	// backend that never starts responding is treated as failed. Default 3s.
+	// call is given, *starting from the call itself* (including connection
+	// setup and any internal connect-phase retries the Synthesizer makes,
+	// e.g. pkg/tts/cartesia.go's/elevenlabs.go's own up-to-3-attempt
+	// connect retry with the same 150ms/1.2s backoff shape gpt4o.go uses),
+	// to deliver its *first* audio chunk. Exceeding it is treated the same
+	// as SynthesizeStream returning an error. A stream that starts
+	// producing chunks within budget is allowed to run to completion
+	// afterward — a long-but-flowing synthesis is not cut off just because
+	// its *total* duration exceeds SynthesizeTimeout, only a backend that
+	// never starts responding is treated as failed. Default 4s.
+	//
+	// Why 4s, not the original 3s: the original 3s was only ever enforced
+	// against the *post-connect* "wait for first chunk" wait (see
+	// session.go's forwardTTSWithStallGuard) -- the ttsCtx passed into
+	// SynthesizeStream itself carried no deadline at all
+	// (context.WithCancel, not WithTimeout), so a slow/hanging vendor
+	// connection during SynthesizeStream's own internal connect-retry loop
+	// was bounded only by that backend's own dial timeout (e.g.
+	// cartesiaDefaultDialTimeout, 10s *per attempt*, x3 attempts = up to
+	// 30s) with no relation to SynthesizeTimeout whatsoever -- a second,
+	// independently-timed source of dead air this field's doc comment
+	// never actually delivered on. Fixed alongside this timeout
+	// recalibration (see session.go's runLeg: ttsCtx now uses
+	// context.WithTimeout(s.ctx, SynthesizeTimeout), and
+	// forwardTTSWithStallGuard waits on that same context instead of
+	// starting a fresh, second, independent timer after SynthesizeStream
+	// already returns) so SynthesizeTimeout actually bounds what its name
+	// says it bounds: connect-through-first-chunk, once, not twice.
+	//
+	// The math behind 4s: same "cover 2 real attempts" reasoning as
+	// TranslateTimeout above, but against a shorter realistic per-attempt
+	// budget, since this phase only needs a WebSocket/HTTP handshake plus
+	// time-to-first-audio-byte, not a full generation: Cartesia/
+	// ElevenLabs-class low-latency streaming TTS commonly cites first-byte
+	// latency in the 100-500ms range under good network conditions;
+	// assume a real-world p95 of ~1.5s per attempt (handshake + TTFB,
+	// including realistic network variance). 2 * 1.5s + ~0.3s backoff ~=
+	// 3.3s, rounded up to 4s for margin.
 	SynthesizeTimeout time.Duration
 
 	// MaxConsecutiveFailures is how many consecutive MT/TTS failures on
@@ -159,13 +232,40 @@ type FallbackConfig struct {
 	Metrics *observability.LatencyRecorder
 }
 
-// DefaultFallbackConfig returns FallbackConfig's documented defaults.
+// maxSaneFallbackTimeout is not enforced anywhere in code -- it is
+// deliberately just a documented reference point, not a clamp, so an
+// operator with an unusual, well-understood environment (e.g. a
+// deliberately slow regional vendor endpoint) can still configure
+// something higher without this package silently overriding their
+// choice. It exists so the next engineer tempted to bump
+// TranslateTimeout/SynthesizeTimeout "just to be safe" has a documented
+// line to think twice about crossing: above this, a single utterance's
+// dead-air-before-fallback budget starts to become noticeable and
+// annoying to a real caller on a live voice call -- the same UX cost
+// that made Saurabh's draft's blind 10s bump for both values the wrong
+// fix even though the underlying "the timeout is too tight" diagnosis
+// was directionally correct. If you find yourself needing to raise
+// either timeout past this to stop seeing fallbacks, that is almost
+// always a signal the actual problem is vendor latency (or the network
+// path to the vendor) that needs its own investigation, not that this
+// timeout is miscalibrated.
+const maxSaneFallbackTimeout = 8 * time.Second
+
+// DefaultFallbackConfig returns FallbackConfig's documented defaults. See
+// TranslateTimeout's and SynthesizeTimeout's doc comments above for the
+// reasoning behind their specific values (6s / 4s) -- both were
+// recalibrated from their original, too-tight Week 3 defaults (2s / 3s)
+// after live-pilot testing showed real vendor latency (never exercised
+// against anything but fast local fake servers before now, see
+// ROADMAP.md's Week 2 decision) routinely exceeded them on a single
+// attempt alone, causing far more MT/TTS fallback-to-passthrough than
+// intended.
 func DefaultFallbackConfig() FallbackConfig {
 	return FallbackConfig{
 		ConfidenceThreshold:    0.55,
 		DegradeToneEnabled:     true,
-		TranslateTimeout:       2 * time.Second,
-		SynthesizeTimeout:      3 * time.Second,
+		TranslateTimeout:       6 * time.Second,
+		SynthesizeTimeout:      4 * time.Second,
 		MaxConsecutiveFailures: 3,
 		DeadLegDrainInterval:   defaultDeadLegDrainInterval,
 	}

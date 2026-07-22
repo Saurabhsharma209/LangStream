@@ -50,12 +50,46 @@ const (
 	defaultDeepgramBaseURL = "wss://api.deepgram.com/v1/listen"
 	defaultDeepgramModel   = "nova-2"
 
+	// defaultDeepgramHindiModel is the model used for Hindi
+	// (languageHint == "hi") sessions -- deliberately NOT nova-2. See
+	// DeepgramRecognizer's and SupportedLanguages' doc comments for the
+	// full reasoning: this repo's Hindi calls are "Hinglish" (callers
+	// code-switch between Hindi and English mid-sentence -- see
+	// pkg/asr/sarvam.go's doc comment and DEVLOG.md's 2026-07-14 entry
+	// for a live-verified example), and Deepgram's real-time
+	// code-switching support is model- and language-pair-specific:
+	// Nova-2's only documented code-switching pair is Spanish+English
+	// (its "multi" wire-language mode), not Hindi+English, so Nova-2
+	// cannot handle Hinglish speech even with language=hi. Nova-3 added
+	// real-time code-switching across 10 languages including Hindi,
+	// engaged via the wire-level language=multi parameter (verified
+	// 2026-07-22 against
+	// https://developers.deepgram.com/docs/multilingual-code-switching
+	// and https://developers.deepgram.com/docs/models-languages-overview:
+	// "Nova-3 supports the ability to transcribe codeswitching
+	// conversations in real-time between 10 languages -- English,
+	// Spanish, French, German, Hindi, Russian, Portuguese, Japanese,
+	// Italian, and Dutch" using the `multi` language code, versus
+	// Nova-2's `multi` being Spanish+English only). So Hindi sessions use
+	// nova-3 with wireLanguage "multi", never nova-2 with language "hi".
+	defaultDeepgramHindiModel = "nova-3"
+
 	// dgKeepAliveInterval must stay comfortably under Deepgram's documented
 	// 10-second NET-0001 idle timeout.
 	dgKeepAliveInterval = 5 * time.Second
 
 	dgReconnectBase = 250 * time.Millisecond
 	dgReconnectMax  = 5 * time.Second
+
+	// dgCodeSwitchEndpointingMS is the endpointing window (in
+	// milliseconds) used for code-switching ("multi" wire-language)
+	// sessions. Deepgram's docs recommend a tighter endpointing value
+	// than the connection default for code-switching sessions so a
+	// language-switch boundary is flushed promptly rather than absorbed
+	// into a longer default pause window (see
+	// https://developers.deepgram.com/docs/multilingual-code-switching,
+	// reviewed 2026-07-22).
+	dgCodeSwitchEndpointingMS = "100"
 
 	// deepgramCostPerMinuteUSD approximates Deepgram's published
 	// Pay-As-You-Go pricing for Nova-2 streaming transcription
@@ -65,6 +99,17 @@ const (
 	// plan/commitment and change over time, and this value is not read
 	// live from any API.
 	deepgramCostPerMinuteUSD = 0.0059
+
+	// deepgramHindiCostPerMinuteUSD approximates Deepgram's published
+	// Nova-3 multilingual (`multi`) streaming rate (~$0.0058 per
+	// audio-minute as of 2026-07-22, see https://deepgram.com/pricing and
+	// https://convertaudiototext.com/blog/deepgram-nova-3-explained's
+	// summary of it -- Nova-3 monolingual streaming is pricier, around
+	// $0.0077/min, but Hindi sessions always use the cheaper
+	// `multi`-mode rate since that's the wire-language they connect
+	// with). Same pilot-cost-visibility-only caveats as
+	// deepgramCostPerMinuteUSD above.
+	deepgramHindiCostPerMinuteUSD = 0.0058
 )
 
 // DeepgramOption configures a DeepgramRecognizer.
@@ -77,10 +122,21 @@ func WithBaseURL(u string) DeepgramOption {
 	return func(r *DeepgramRecognizer) { r.baseURL = u }
 }
 
-// WithDeepgramModel overrides the Deepgram model query parameter (default
-// "nova-2").
+// WithDeepgramModel overrides the Deepgram model query parameter used for
+// English ("en") sessions (default "nova-2"). It has no effect on Hindi
+// ("hi") sessions -- see WithDeepgramHindiModel for that.
 func WithDeepgramModel(model string) DeepgramOption {
 	return func(r *DeepgramRecognizer) { r.model = model }
+}
+
+// WithDeepgramHindiModel overrides the Deepgram model used for Hindi
+// ("hi") sessions (default "nova-3"; see defaultDeepgramHindiModel's doc
+// comment for why Hindi does not default to nova-2). Exists mainly for
+// tests; production code should rarely need this, since nova-3 is
+// currently the only Deepgram model verified to support real-time
+// Hindi-English code-switching.
+func WithDeepgramHindiModel(model string) DeepgramOption {
+	return func(r *DeepgramRecognizer) { r.hindiModel = model }
 }
 
 // WithMaxReconnectAttempts caps how many consecutive times a session will
@@ -120,12 +176,36 @@ func WithCircuitBreaker(threshold int, cooldown time.Duration) DeepgramOption {
 	return func(r *DeepgramRecognizer) { r.breaker = newCircuitBreaker(threshold, cooldown) }
 }
 
-// DeepgramRecognizer is a real, English-only streaming ASR backend backed by
-// Deepgram's live transcription WebSocket API.
+// DeepgramRecognizer is a real streaming ASR backend backed by Deepgram's
+// live transcription WebSocket API. It supports two language hints:
+//
+//   - "en": Nova-2 (see defaultDeepgramModel), Deepgram's general
+//     English streaming model, connected with wire-language "en".
+//   - "hi": Nova-3 (see defaultDeepgramHindiModel), connected with the
+//     wire-level "language=multi" parameter rather than "language=hi".
+//     This is deliberate, not a shortcut or an oversight: this repo's
+//     Hindi calls are "Hinglish" -- callers code-switch between Hindi
+//     and English mid-sentence (see pkg/asr/sarvam.go's doc comment and
+//     DEVLOG.md's 2026-07-14 entry for a live-verified example utterance
+//     ("...अपना order वापस चाहिए...") where "order" is a mid-sentence
+//     English word). Deepgram's real-time code-switching support is
+//     model- and language-pair-specific: Nova-2's only documented
+//     code-switching pair is Spanish+English, so model=nova-2 with
+//     language=hi would transcribe Hindi speech in isolation but handle
+//     mid-utterance English words badly -- exactly the case this
+//     product needs Hindi calls to handle well. Nova-3's "multi" wire
+//     mode supports real-time code-switching across 10 languages
+//     including Hindi (verified 2026-07-22 against
+//     https://developers.deepgram.com/docs/multilingual-code-switching
+//     and https://developers.deepgram.com/docs/models-languages-overview),
+//     so that pair (model=nova-3, language=multi) is what a "hi"
+//     languageHint connects with. See defaultDeepgramHindiModel's doc
+//     comment for the sourcing detail.
 type DeepgramRecognizer struct {
 	apiKey               string
 	baseURL              string
-	model                string
+	model                string // English ("en") sessions; see WithDeepgramModel.
+	hindiModel           string // Hindi ("hi") sessions; see WithDeepgramHindiModel.
 	maxReconnectAttempts int
 	dialer               *websocket.Dialer
 	metrics              *observability.LatencyRecorder
@@ -145,6 +225,7 @@ func NewDeepgramRecognizer(opts ...DeepgramOption) (*DeepgramRecognizer, error) 
 		apiKey:               apiKey,
 		baseURL:              defaultDeepgramBaseURL,
 		model:                defaultDeepgramModel,
+		hindiModel:           defaultDeepgramHindiModel,
 		maxReconnectAttempts: 3,
 		dialer:               websocket.DefaultDialer,
 		breaker:              newCircuitBreaker(0, 0),
@@ -158,10 +239,13 @@ func NewDeepgramRecognizer(opts ...DeepgramOption) (*DeepgramRecognizer, error) 
 // Name implements Recognizer.
 func (r *DeepgramRecognizer) Name() string { return "deepgram" }
 
-// SupportedLanguages implements Recognizer. This backend is scoped to
-// English only for the pilot.
+// SupportedLanguages implements Recognizer. English ("en", Nova-2) and
+// Hindi ("hi", Nova-3 connected with wire-level language=multi for
+// Hindi-English code-switching) are both supported -- see
+// DeepgramRecognizer's doc comment for why "hi" does not simply mean
+// "nova-2 with language=hi".
 func (r *DeepgramRecognizer) SupportedLanguages() []Language {
-	return []Language{"en"}
+	return []Language{"en", "hi"}
 }
 
 // StartStream implements Recognizer. The underlying WebSocket connection is
@@ -173,8 +257,21 @@ func (r *DeepgramRecognizer) StartStream(ctx context.Context, languageHint Langu
 	if lang == "" {
 		lang = "en"
 	}
-	if lang != "en" {
-		return nil, fmt.Errorf("asr/deepgram: unsupported language %q (this backend is English-only)", lang)
+
+	// model/wireLanguage pick the actual Deepgram model and wire-level
+	// "language" query param for this session. See DeepgramRecognizer's
+	// doc comment for why "hi" maps to (nova-3, "multi") rather than
+	// (nova-3, "hi") or (nova-2, "hi").
+	var model, wireLanguage string
+	switch lang {
+	case "en":
+		model = r.model
+		wireLanguage = "en"
+	case "hi":
+		model = r.hindiModel
+		wireLanguage = "multi"
+	default:
+		return nil, fmt.Errorf("asr/deepgram: unsupported language %q (this backend supports \"en\" and \"hi\" only)", lang)
 	}
 
 	// Circuit breaker gate: if too many consecutive sessions have failed
@@ -191,11 +288,13 @@ func (r *DeepgramRecognizer) StartStream(ctx context.Context, languageHint Langu
 
 	sessCtx, cancel := context.WithCancel(ctx)
 	s := &deepgramSession{
-		r:      r,
-		lang:   lang,
-		ctx:    sessCtx,
-		cancel: cancel,
-		out:    make(chan Transcript, 64),
+		r:            r,
+		lang:         lang,
+		model:        model,
+		wireLanguage: wireLanguage,
+		ctx:          sessCtx,
+		cancel:       cancel,
+		out:          make(chan Transcript, 64),
 	}
 	return s, nil
 }
@@ -215,6 +314,13 @@ var _ Recognizer = (*DeepgramRecognizer)(nil)
 type deepgramSession struct {
 	r    *DeepgramRecognizer
 	lang Language
+
+	// model/wireLanguage are the Deepgram model and wire-level "language"
+	// query param this session connects with, resolved once in
+	// StartStream from lang (see DeepgramRecognizer's doc comment):
+	// ("en" -> r.model, "en") or ("hi" -> r.hindiModel, "multi").
+	model        string
+	wireLanguage string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -305,9 +411,17 @@ func (s *deepgramSession) recordAudioCost(frame AudioFrame) {
 	if s.r.metrics == nil || frame.SampleRate <= 0 {
 		return
 	}
+	// Hindi sessions connect with wire-language "multi" (Nova-3
+	// code-switching -- see DeepgramRecognizer's doc comment) which
+	// Deepgram bills at its multilingual streaming rate, distinct from
+	// the plain Nova-2 English rate.
+	rate := deepgramCostPerMinuteUSD
+	if s.wireLanguage == "multi" {
+		rate = deepgramHindiCostPerMinuteUSD
+	}
 	samples := len(frame.PCM) / 2 // 16-bit mono PCM
 	minutes := float64(samples) / float64(frame.SampleRate) / 60.0
-	s.r.metrics.RecordCost("deepgram", minutes*deepgramCostPerMinuteUSD)
+	s.r.metrics.RecordCost("deepgram", minutes*rate)
 }
 
 // ensureConnected dials Deepgram if there is no live connection, applying
@@ -425,11 +539,17 @@ func (s *deepgramSession) buildURL(sampleRate int) (string, error) {
 	q.Set("encoding", "linear16")
 	q.Set("sample_rate", strconv.Itoa(sampleRate))
 	q.Set("channels", "1")
-	q.Set("language", string(s.lang))
-	q.Set("model", s.r.model)
+	q.Set("language", s.wireLanguage)
+	q.Set("model", s.model)
 	q.Set("interim_results", "true")
 	q.Set("punctuate", "true")
 	q.Set("vad_events", "true")
+	if s.wireLanguage == "multi" {
+		// See dgCodeSwitchEndpointingMS's doc comment: Deepgram
+		// recommends a tighter endpointing window for code-switching
+		// sessions.
+		q.Set("endpointing", dgCodeSwitchEndpointingMS)
+	}
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }

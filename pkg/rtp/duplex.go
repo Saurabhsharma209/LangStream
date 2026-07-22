@@ -555,17 +555,55 @@ func (d *DuplexSession) bridgeCleanAudio(leg *clearstream.Session, push func(asr
 	}
 }
 
+// ttsFrameBytes is the exact frame size ClearStream's own InjectBotAudio
+// (see the vendored clearstream module's pkg/rtp/playback.go, pinned at
+// github.com/Saurabhsharma209/ClearStream per go.mod's replace directive)
+// encodes outbound bot audio in: 160 samples -- InjectBotAudio's own
+// hardcoded "20ms @ 8kHz" assumption, applied to whatever slice it is
+// handed regardless of that slice's actual declared sample rate -- times
+// 2 bytes/sample (16-bit PCM) = 320 bytes.
+//
+// This matters because InjectBotAudio pads *any* trailing partial frame
+// of whatever byte slice it is called with with silence -- it has no
+// memory of a previous or future call, each call is frame-aligned
+// starting from byte 0 of that call's input alone. feedTTSPacer used to
+// call InjectBotAudio (via runTTSPacer) once per raw tts.AudioChunk
+// exactly as TTS produced it, with no re-chunking; real Cartesia/
+// ElevenLabs streaming chunks have no reason to land on a clean multiple
+// of ttsFrameBytes (each chunk is simply however many bytes happened to
+// be in that WebSocket/HTTP message), so in production this meant every
+// single chunk boundary that didn't happen to align was getting
+// silence-padded and cut off right there, discarding the true
+// continuation into the next chunk -- a real, audible source of
+// clicking/choppy distortion on a live call. This never showed up
+// against this repo's own fake vendor test servers because those happen
+// to emit round chunk sizes. See feedTTSPacer's doc comment for the fix
+// (accumulate to a clean ttsFrameBytes boundary before pushing, carrying
+// any remainder forward instead of padding it away on every chunk).
+const ttsFrameBytes = 160 * 2
+
 // feedTTSPacer is the producer half of DuplexSession's outbound
 // TTS-pacing bridge (see runTTSPacer for the consumer half that actually
 // calls InjectBotAudio, and jitter.go's package doc comment for why a
 // JitterBuffer -- originally built for inbound network-jitter absorption
 // -- is repurposed here instead). It reads synthesized tts.AudioChunks off
 // in (Session.AgentHearsAudio() or Session.CallerHearsAudio()) as ASR->MT->
-// TTS actually produces them -- however bursty that timing is -- and
-// pushes each into pacer tagged with a strictly increasing SeqNum. There
-// is no reordering for pacer to do here (in is a single Go channel, so
-// chunks already arrive in synthesis order); the only thing pacer adds is
-// the release-timing smoothing runTTSPacer applies on the way out.
+// TTS actually produces them -- however bursty that timing (or their
+// individual byte length) is -- and pushes the result into pacer tagged
+// with a strictly increasing SeqNum. There is no reordering for pacer to
+// do here (in is a single Go channel, so chunks already arrive in
+// synthesis order); what this function does add, beyond forwarding, is
+// accumulating incoming PCM bytes to a clean ttsFrameBytes (320-byte,
+// 160-sample) boundary before ever pushing a packet, carrying any
+// leftover remainder forward to be combined with the *next* chunk instead
+// of pushing every raw chunk through as its own separately-InjectBotAudio'd
+// call -- see ttsFrameBytes's doc comment for why that used to silently
+// corrupt audio at chunk boundaries. The accumulated remainder is only
+// ever flushed unaligned (left for ClearStream's own InjectBotAudio to
+// silence-pad, exactly as it always has for a genuine trailing partial
+// frame) at the true end of one utterance's synthesis (chunk.IsFinal) or
+// when in closes for good -- never at an intermediate streaming chunk
+// boundary within the same utterance.
 //
 // It exits when in closes (Session was closed by whoever owns its
 // lifecycle) or d.ctx is cancelled (Stop's backstop), whichever comes
@@ -577,27 +615,80 @@ func (d *DuplexSession) feedTTSPacer(in <-chan tts.AudioChunk, pacer *ttsPacer, 
 	defer d.wg.Done()
 
 	var seq uint16
+	// push queues payload into pacer as one packet, tagged with the next
+	// SeqNum. A zero-length payload (e.g. carry being empty when in
+	// closes with nothing left over) is a deliberate no-op rather than an
+	// error, so callers below don't each need their own length check.
+	push := func(payload []byte) {
+		if len(payload) == 0 {
+			return
+		}
+		// Payload carries payload as-is (already 16-bit LE mono -- the
+		// same byte layout InjectBotAudio expects, so no conversion is
+		// needed here or in runTTSPacer).
+		pacer.buf.Push(Packet{SeqNum: seq, Payload: payload}, time.Now())
+		seq++
+		// Recorded *after* Push so runTTSPacer, which loops "while
+		// there is still an unresolved pushed chunk", never observes
+		// pushed incremented before the corresponding packet is
+		// actually visible to Pull.
+		pacer.pushed.Add(1)
+	}
+
+	// carry holds PCM bytes accumulated from previous chunk(s) that don't
+	// yet form one whole ttsFrameBytes-sized frame -- see ttsFrameBytes's
+	// doc comment. Always a private copy (never aliases a tts.AudioChunk's
+	// own backing array), so it's safe to keep across loop iterations.
+	var carry []byte
+
 	for {
 		select {
 		case <-d.ctx.Done():
 			return
 		case chunk, ok := <-in:
 			if !ok {
+				// The feed is closing for good: flush whatever's left
+				// exactly once instead of silently discarding it (see
+				// this function's doc comment -- InjectBotAudio will
+				// silence-pad it same as any genuine trailing partial
+				// frame).
+				push(carry)
+				carry = nil
 				return
 			}
-			if len(chunk.PCM) == 0 {
+			// A zero-length, non-final chunk carries nothing new to
+			// accumulate. A zero-length *final* chunk (e.g.
+			// ElevenLabsSynthesizer's documented IsFinal=true empty
+			// sentinel, sent so callers always see exactly one
+			// IsFinal=true chunk) still must not be skipped, though --
+			// it's the exact signal that flushes any already-carried
+			// remainder below.
+			if len(chunk.PCM) == 0 && !chunk.IsFinal {
 				continue
 			}
-			// Payload carries chunk.PCM as-is (already 16-bit LE mono --
-			// the same byte layout InjectBotAudio expects, so no
-			// conversion is needed here or in runTTSPacer).
-			pacer.buf.Push(Packet{SeqNum: seq, Payload: chunk.PCM}, time.Now())
-			seq++
-			// Recorded *after* Push so runTTSPacer, which loops "while
-			// there is still an unresolved pushed chunk", never observes
-			// pushed incremented before the corresponding packet is
-			// actually visible to Pull.
-			pacer.pushed.Add(1)
+
+			buf := append(carry, chunk.PCM...)
+			aligned := len(buf) - (len(buf) % ttsFrameBytes)
+			if aligned > 0 {
+				push(buf[:aligned])
+			}
+			if chunk.IsFinal {
+				// True end of this utterance's synthesis: flush the
+				// remainder as-is now rather than holding it over into
+				// the *next* utterance's audio (which would otherwise
+				// splice a few stray samples from one utterance onto the
+				// front of a later, unrelated one).
+				if aligned < len(buf) {
+					push(buf[aligned:])
+				}
+				carry = nil
+				continue
+			}
+			if aligned < len(buf) {
+				carry = append([]byte(nil), buf[aligned:]...)
+			} else {
+				carry = nil
+			}
 		}
 	}
 }

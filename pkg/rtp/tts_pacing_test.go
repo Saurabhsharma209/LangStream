@@ -88,14 +88,36 @@ func waitForCount(t *testing.T, rec *injectRecorder, n int, timeout time.Duratio
 	t.Fatalf("timed out after %s waiting for %d injected chunk(s), got %d", timeout, n, rec.count())
 }
 
+// alignedTTSChunk builds a tts.AudioChunk payload that is exactly one
+// ttsFrameBytes-sized frame, filled with fill repeated throughout -- used
+// so tests can push chunks that are already frame-aligned and confirm
+// each maps to exactly one packet/injection, independent of the
+// accumulate-to-frame-boundary logic feedTTSPacer now applies to
+// non-aligned input (see TestTTSPacer_AccumulatesPartialFramesAcrossChunkBoundaries
+// for that case).
+func alignedTTSChunk(fill byte, isFinal bool) tts.AudioChunk {
+	pcm := make([]byte, ttsFrameBytes)
+	for i := range pcm {
+		pcm[i] = fill
+	}
+	return tts.AudioChunk{PCM: pcm, SampleRate: 8000, IsFinal: isFinal}
+}
+
 // TestTTSPacer_DeliversChunksInOrderUnmodified pushes a burst of
-// synthesized chunks (all queued essentially at once, simulating bursty
-// TTS generation) through feedTTSPacer/runTTSPacer and confirms every
-// chunk still arrives at inject, unmodified, and in the same order they
-// were synthesized in -- the pacing buffer must smooth *timing*, not drop
-// or reorder content (see jitter.go's package doc comment: a single Go
-// channel feeds feedTTSPacer, so there is no real reordering to do here,
-// only release-timing smoothing).
+// already-frame-aligned synthesized chunks (all queued essentially at
+// once, simulating bursty TTS generation) through feedTTSPacer/
+// runTTSPacer and confirms every chunk still arrives at inject,
+// unmodified, and in the same order they were synthesized in -- the
+// pacing buffer must smooth *timing*, not drop or reorder content (see
+// jitter.go's package doc comment: a single Go channel feeds
+// feedTTSPacer, so there is no real reordering to do here, only
+// release-timing smoothing). Each chunk here is deliberately an exact
+// multiple of ttsFrameBytes so feedTTSPacer's accumulate-to-frame-boundary
+// logic (see ttsFrameBytes's doc comment) has no partial remainder to
+// carry between chunks, keeping this test's 1:1 chunk-to-injection
+// mapping meaningful; see
+// TestTTSPacer_AccumulatesPartialFramesAcrossChunkBoundaries for coverage
+// of the non-aligned case that logic exists for.
 func TestTTSPacer_DeliversChunksInOrderUnmodified(t *testing.T) {
 	d := newTestPacingDuplexSession(t, Config{
 		TargetDelay:    10 * time.Millisecond,
@@ -111,7 +133,7 @@ func TestTTSPacer_DeliversChunksInOrderUnmodified(t *testing.T) {
 
 	const n = 5
 	for i := 0; i < n; i++ {
-		in <- tts.AudioChunk{PCM: []byte{byte(i)}, SampleRate: 16000, IsFinal: i == n-1}
+		in <- alignedTTSChunk(byte(i), i == n-1)
 	}
 	close(in)
 
@@ -122,8 +144,15 @@ func TestTTSPacer_DeliversChunksInOrderUnmodified(t *testing.T) {
 		t.Fatalf("got %d injected chunk(s), want exactly %d", len(got), n)
 	}
 	for i, pcm := range got {
-		if len(pcm) != 1 || pcm[0] != byte(i) {
-			t.Errorf("chunk[%d] = %v, want [%d] (chunks must arrive unmodified and in order)", i, pcm, i)
+		if len(pcm) != ttsFrameBytes {
+			t.Errorf("chunk[%d] length = %d, want %d (chunks must arrive unmodified)", i, len(pcm), ttsFrameBytes)
+			continue
+		}
+		for _, b := range pcm {
+			if b != byte(i) {
+				t.Errorf("chunk[%d] contains byte %d, want every byte == %d (chunks must arrive unmodified and in order)", i, b, i)
+				break
+			}
 		}
 	}
 
@@ -152,9 +181,15 @@ func TestTTSPacer_SpreadsBurstyChunksOverTime(t *testing.T) {
 	go d.feedTTSPacer(in, d.agentPacer, "agent")
 	go d.runTTSPacer(d.agentPacer, rec.inject, "agent")
 
+	// Frame-aligned payloads (see alignedTTSChunk) so each chunk maps to
+	// exactly one packet, keeping this test's "n packets must be spread
+	// out" premise meaningful under feedTTSPacer's accumulate-to-frame-
+	// boundary logic (see ttsFrameBytes's doc comment) -- a non-aligned
+	// small payload here would just get accumulated into one packet
+	// instead of n, which would prove nothing about pacing.
 	const n = 4
 	for i := 0; i < n; i++ {
-		in <- tts.AudioChunk{PCM: []byte{byte(i)}, SampleRate: 16000, IsFinal: i == n-1}
+		in <- alignedTTSChunk(byte(i), i == n-1)
 	}
 	close(in)
 
@@ -212,6 +247,95 @@ func TestTTSPacer_StillDeliversBufferedChunkAfterFeedChannelCloses(t *testing.T)
 	got, _ := rec.snapshot()
 	if len(got) != 1 || len(got[0]) != 1 || got[0][0] != 0xAB {
 		t.Fatalf("got %v, want a single [0xAB] chunk delivered after the feed channel closed", got)
+	}
+
+	d.cancel()
+	waitGroupDone(t, &d.wg, 2*time.Second)
+}
+
+// TestTTSPacer_AccumulatesPartialFramesAcrossChunkBoundaries is the
+// regression test for the real chunk-boundary distortion bug this file's
+// ttsFrameBytes constant documents: real Cartesia/ElevenLabs streaming
+// chunks are not guaranteed to land on a clean ttsFrameBytes (320-byte,
+// 160-sample) boundary, and ClearStream's own InjectBotAudio silence-pads
+// (and cuts off) any trailing partial frame of *whatever slice it's
+// handed*, independently per call. Before this fix, feedTTSPacer handed
+// each raw TTS chunk to InjectBotAudio as its own separate call, so every
+// non-aligned chunk boundary got silence-padded and truncated right
+// there, discarding the true continuation into the next chunk -- exactly
+// the kind of per-chunk clicking/choppiness a listener would notice on a
+// real call. This test pushes several deliberately non-aligned, non-final
+// chunks (whose sizes share no common factor with ttsFrameBytes) followed
+// by a final chunk, and confirms:
+//
+//  1. No bytes are lost, duplicated, or reordered: concatenating every
+//     payload actually injected, in the order injected, reproduces
+//     exactly the concatenation of every chunk pushed, in push order.
+//  2. Injection happens in ttsFrameBytes-sized pieces (proving
+//     accumulation is actually happening, not just a passthrough that
+//     happens to preserve bytes) -- with the sole exception of the final
+//     flush, which legitimately carries whatever non-aligned remainder is
+//     left once the true end of the utterance (IsFinal) is reached, for
+//     ClearStream's own InjectBotAudio to silence-pad exactly as it
+//     always has for a genuine trailing partial frame.
+func TestTTSPacer_AccumulatesPartialFramesAcrossChunkBoundaries(t *testing.T) {
+	d := newTestPacingDuplexSession(t, Config{
+		TargetDelay:    5 * time.Millisecond,
+		PacketInterval: 2 * time.Millisecond,
+	})
+
+	in := make(chan tts.AudioChunk, 16)
+	rec := &injectRecorder{}
+
+	d.wg.Add(2)
+	go d.feedTTSPacer(in, d.agentPacer, "agent")
+	go d.runTTSPacer(d.agentPacer, rec.inject, "agent")
+
+	// Chunk sizes deliberately not multiples of ttsFrameBytes (320), and
+	// varying, mimicking real vendor streaming chunks that don't align to
+	// this package's downstream frame size. Each chunk is filled with a
+	// distinct, identifiable byte value so ordering/content is verifiable
+	// after accumulation reshuffles chunk boundaries.
+	sizes := []int{100, 250, 90, 400, 37}
+	var want []byte
+	for i, n := range sizes {
+		pcm := make([]byte, n)
+		for j := range pcm {
+			pcm[j] = byte(i + 1)
+		}
+		want = append(want, pcm...)
+		in <- tts.AudioChunk{PCM: pcm, SampleRate: 8000, IsFinal: i == len(sizes)-1}
+	}
+	close(in)
+
+	// Total input is 100+250+90+400+37 = 877 bytes = 2*ttsFrameBytes (640)
+	// + 237 leftover, so expect exactly 2 aligned mid-stream flushes plus
+	// one final unaligned flush of the 237-byte remainder = 3 injections.
+	wantInjections := len(want)/ttsFrameBytes + 1
+	waitForCount(t, rec, wantInjections, 2*time.Second)
+
+	got, _ := rec.snapshot()
+	if len(got) != wantInjections {
+		t.Fatalf("got %d injection(s), want exactly %d", len(got), wantInjections)
+	}
+
+	var gotConcat []byte
+	for i, pcm := range got {
+		if i < len(got)-1 {
+			if len(pcm) != ttsFrameBytes {
+				t.Errorf("injection[%d] length = %d, want exactly ttsFrameBytes (%d) for every non-final flush", i, len(pcm), ttsFrameBytes)
+			}
+		}
+		gotConcat = append(gotConcat, pcm...)
+	}
+
+	if len(gotConcat) != len(want) {
+		t.Fatalf("concatenated injected bytes length = %d, want %d (bytes lost or duplicated across chunk boundaries)", len(gotConcat), len(want))
+	}
+	for i := range want {
+		if gotConcat[i] != want[i] {
+			t.Fatalf("byte %d = %d, want %d (content/order not preserved across accumulated chunk boundaries)", i, gotConcat[i], want[i])
+		}
 	}
 
 	d.cancel()

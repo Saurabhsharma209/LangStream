@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/exotel/langstream/pkg/asr"
 	"github.com/exotel/langstream/pkg/observability"
 	"github.com/exotel/langstream/pkg/translate"
@@ -79,6 +81,21 @@ type SessionConfig struct {
 	// FallbackConfig's doc comment if you do want to set individual
 	// fields explicitly.
 	Fallback FallbackConfig
+
+	// Logger receives structured visibility into runLeg's MT/TTS failure
+	// and stall events (see logMTFailure/logTTSFailure/logTTSStall in
+	// session.go) -- the same events fallback.go's Metrics recorder
+	// already counts, but as human-readable, greppable log lines rather
+	// than counters, for live debugging (this is the structured
+	// replacement for a raw stderr fmt.Fprintf debug print floated during
+	// the 2026-07 pilot: see this field's introduction for that context).
+	// Defaults to zap.NewNop() if nil, mirroring pkg/rtp.LegConfig.Logger's
+	// and pkg/rtp.DuplexConfig.Logger's exact same optional-logger
+	// pattern -- Session logs unconditionally through this field (it must
+	// never be left as a literal nil *zap.Logger), so a caller that
+	// doesn't care about this visibility can simply leave it unset rather
+	// than being forced to pass zap.NewNop() themselves.
+	Logger *zap.Logger
 }
 
 // validate checks that cfg is complete enough to build a Session.
@@ -153,6 +170,10 @@ type Session struct {
 	// exported RecordEvent/RecordError API (see fallback.go). Never nil
 	// after NewSession returns.
 	metrics *observability.LatencyRecorder
+	// logger receives structured MT/TTS failure/stall visibility (see
+	// SessionConfig.Logger's doc comment). Never nil after NewSession
+	// returns -- defaults to zap.NewNop().
+	logger *zap.Logger
 
 	wg sync.WaitGroup
 
@@ -222,6 +243,11 @@ func NewSession(ctx context.Context, cfg SessionConfig) (*Session, error) {
 		metrics = observability.NewLatencyRecorder()
 	}
 
+	logger := cfg.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	s := &Session{
 		cfg:       cfg,
 		ctx:       sessCtx,
@@ -235,6 +261,7 @@ func NewSession(ctx context.Context, cfg SessionConfig) (*Session, error) {
 		agentLeg:  newLegState("agent", audioBufferFrames),
 		fallback:  fallback,
 		metrics:   metrics,
+		logger:    logger,
 	}
 
 	s.wg.Add(2)
@@ -400,6 +427,61 @@ func (s *Session) Close() error {
 	return s.closeErr
 }
 
+// logMTFailure/logTTSFailure/logTTSStall give live, human-readable
+// visibility into MT/TTS fallback triggers via s.logger (see
+// SessionConfig.Logger's doc comment), alongside (not instead of) the
+// existing Metrics counters recordFallbackErr/recordFallback already
+// record in fallback.go. They are the structured, consistently-shaped
+// replacement for a raw fmt.Fprintf(os.Stderr, ...) debug print floated
+// during the 2026-07 pilot to help debug live MT failures: a bare stderr
+// print would (a) not respect a caller's actual logging configuration --
+// level, output sink, JSON vs console encoding -- at all, (b) have no
+// equivalent for TTS failures even though they degrade a call exactly the
+// same way MT failures do, and (c) not be structured/greppable the way
+// zap's fields are. All three log at Warn (a degraded utterance is
+// unusual and worth a human's attention, but is not, by itself, an
+// application error the way an unhandled panic would be -- runLeg always
+// has a graceful fallback ready for exactly this case).
+//
+// text is included at Warn level for the same live-debugging value the
+// original draft wanted (seeing *what utterance* MT/TTS choked on is far
+// more actionable than an opaque error alone); this does mean caller/agent
+// speech content reaches whatever sink Logger is configured to write to,
+// so a production deployment that must not persist raw utterance text in
+// logs (e.g. a stricter PII/compliance posture) should configure
+// SessionConfig.Logger accordingly (a redacting core, a lower level than
+// Warn suppressed in that environment, etc.) -- addressing that policy
+// question in general is out of scope for this fix, which only needed to
+// replace an unconditional stderr print with something a caller can
+// actually control.
+func logMTFailure(logger *zap.Logger, err error, legName, text string, srcLang, dstLang Language) {
+	logger.Warn("langstream: MT error, falling back to passthrough",
+		zap.Error(err),
+		zap.String("leg", legName),
+		zap.String("text", text),
+		zap.String("src", string(srcLang)),
+		zap.String("dst", string(dstLang)),
+	)
+}
+
+func logTTSFailure(logger *zap.Logger, err error, legName, text string, dstLang Language) {
+	logger.Warn("langstream: TTS error, falling back to passthrough",
+		zap.Error(err),
+		zap.String("leg", legName),
+		zap.String("text", text),
+		zap.String("dst", string(dstLang)),
+	)
+}
+
+func logTTSStall(logger *zap.Logger, timeout time.Duration, legName, text string, dstLang Language) {
+	logger.Warn("langstream: TTS stalled (no first chunk within SynthesizeTimeout), falling back to passthrough",
+		zap.Duration("timeout", timeout),
+		zap.String("leg", legName),
+		zap.String("text", text),
+		zap.String("dst", string(dstLang)),
+	)
+}
+
 // runLeg is the pipeline for a single leg: it reads recognized speech from
 // stream, translates final transcripts from srcLang to dstLang, synthesizes
 // the translation, and forwards the resulting audio chunks to out. It runs
@@ -549,6 +631,7 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 			mtCancel()
 			recordLatency(s.metrics, stageMT, msSince(mtStart))
 			if err != nil {
+				logMTFailure(s.logger, err, leg.name, tr.Text, srcLang, dstLang)
 				recordFallbackErr(s.metrics, stageTranslate, s.cfg.Translator.Name(), err)
 				if leg.recordFailure(isFatal(err), s.fallback.MaxConsecutiveFailures) {
 					recordFallback(s.metrics, stageLegDegraded, leg.name)
@@ -566,10 +649,26 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 			}
 
 			persona := s.personas.Get(dstLang)
-			ttsCtx, ttsCancel := context.WithCancel(s.ctx)
+			// synthesizeStart/ttsCtx together bound (and time) the
+			// *entire* SynthesizeStream call, not just the post-connect
+			// wait for a first chunk -- see FallbackConfig.SynthesizeTimeout's
+			// doc comment for why this matters: a Synthesizer's own
+			// internal connect-phase retries (e.g. Cartesia's/ElevenLabs'
+			// up-to-3-attempt reconnect with backoff) used to run under
+			// ttsCtx's old context.WithCancel, which never expired on its
+			// own -- so a slow/hanging vendor connection was bounded only
+			// by that backend's own dial timeout (many seconds, times up
+			// to 3 attempts), completely independent of
+			// FallbackConfig.SynthesizeTimeout. Using WithTimeout here
+			// instead means the whole call -- connect, retries, and the
+			// wait for the first chunk -- shares one real budget, exactly
+			// like mtCtx already does for Translate above.
+			synthesizeStart := time.Now()
+			ttsCtx, ttsCancel := context.WithTimeout(s.ctx, s.fallback.SynthesizeTimeout)
 			audio, err := s.cfg.TTS.SynthesizeStream(ttsCtx, chunk.Text, persona)
 			if err != nil {
 				ttsCancel()
+				logTTSFailure(s.logger, err, leg.name, chunk.Text, dstLang)
 				recordFallbackErr(s.metrics, stageTTS, s.cfg.TTS.Name(), err)
 				if leg.recordFailure(isFatal(err), s.fallback.MaxConsecutiveFailures) {
 					recordFallback(s.metrics, stageLegDegraded, leg.name)
@@ -580,11 +679,12 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 				continue
 			}
 
-			completed, stalled, shuttingDown := s.forwardTTSWithStallGuard(audio, out, ttsCancel)
+			completed, stalled, shuttingDown := s.forwardTTSWithStallGuard(ttsCtx, synthesizeStart, audio, out, ttsCancel)
 			if shuttingDown {
 				return
 			}
 			if stalled {
+				logTTSStall(s.logger, s.fallback.SynthesizeTimeout, leg.name, chunk.Text, dstLang)
 				recordFallback(s.metrics, stageTTS, s.cfg.TTS.Name())
 				if leg.recordFailure(false, s.fallback.MaxConsecutiveFailures) {
 					recordFallback(s.metrics, stageLegDegraded, leg.name)
@@ -766,43 +866,56 @@ func (s *Session) emitPassthroughTimed(frames []bufferedFrame, out chan<- tts.Au
 	return ok
 }
 
-// forwardTTSWithStallGuard waits up to FallbackConfig.SynthesizeTimeout for
-// the first chunk on in (the channel returned by Synthesizer.SynthesizeStream).
-// If the first chunk arrives within budget, it is forwarded and the rest of
-// the stream is handed off to the normal, unbounded forwardAudio — a
-// synthesis that has started producing audio is not cut off just because
-// its *total* duration exceeds SynthesizeTimeout, only a backend that never
-// starts responding is treated as stalled/failed. cancel is always called
-// exactly once before this returns, releasing ttsCtx's resources whether
-// the stream is left to finish naturally, abandoned as stalled, or the
-// session is shutting down.
+// forwardTTSWithStallGuard waits, up to ttsCtx's own deadline (set by the
+// caller to FallbackConfig.SynthesizeTimeout when ttsCtx was created --
+// see runLeg's TTS call site), for the first chunk on in (the channel
+// returned by Synthesizer.SynthesizeStream). If the first chunk arrives
+// within budget, it is forwarded and the rest of the stream is handed off
+// to the normal, unbounded forwardAudio — a synthesis that has started
+// producing audio is not cut off just because its *total* duration
+// exceeds SynthesizeTimeout, only a backend that never starts responding
+// is treated as stalled/failed. cancel is always called exactly once
+// before this returns, releasing ttsCtx's resources whether the stream is
+// left to finish naturally, abandoned as stalled, or the session is
+// shutting down.
+//
+// Watching ttsCtx.Done() here (rather than starting a second, independent
+// timer of the same duration) is deliberate: ttsCtx's deadline started
+// ticking the moment SynthesizeStream was first called, in runLeg, before
+// this function ever runs -- so any time already spent in
+// SynthesizeStream's own internal connect-phase retries counts against
+// the same budget this wait uses, instead of silently getting a second,
+// fresh SynthesizeTimeout-sized allowance for free (see
+// FallbackConfig.SynthesizeTimeout's doc comment). ttsCtx is derived from
+// s.ctx (context.WithTimeout(s.ctx, ...), see runLeg), so ttsCtx.Done()
+// alone -- disambiguated via s.ctx.Err() below -- covers both "the
+// session is shutting down" and "SynthesizeTimeout elapsed" without
+// racing two independently-fired Done channels against each other for
+// the shutdown case the way a second, separate case <-s.ctx.Done() would.
 //
 // Return values: completed is true if the stream was forwarded to a
 // normal close (with or without any chunks). stalled is true if no chunk
-// arrived within SynthesizeTimeout. shuttingDown is true if s.ctx was
-// cancelled while waiting/forwarding, in which case the caller's leg
-// goroutine should return immediately, matching forwardAudio's contract.
-// At most one of completed/stalled/shuttingDown is true.
-func (s *Session) forwardTTSWithStallGuard(in <-chan tts.AudioChunk, out chan<- tts.AudioChunk, cancel context.CancelFunc) (completed, stalled, shuttingDown bool) {
+// arrived within budget. shuttingDown is true if s.ctx was cancelled
+// while waiting/forwarding, in which case the caller's leg goroutine
+// should return immediately, matching forwardAudio's contract. At most
+// one of completed/stalled/shuttingDown is true.
+func (s *Session) forwardTTSWithStallGuard(ttsCtx context.Context, synthesizeStart time.Time, in <-chan tts.AudioChunk, out chan<- tts.AudioChunk, cancel context.CancelFunc) (completed, stalled, shuttingDown bool) {
 	defer cancel()
 
-	synthesizeStart := time.Now()
-	timer := time.NewTimer(s.fallback.SynthesizeTimeout)
-	defer timer.Stop()
-
 	select {
-	case <-s.ctx.Done():
-		return false, false, true
 	case chunk, ok := <-in:
 		if !ok {
 			return true, false, false
 		}
-		// tts_first_chunk: time from starting SynthesizeStream to this,
-		// its first chunk, actually arriving. Recorded only once we know
-		// a real chunk arrived (ok == true) -- a closed-with-no-chunks
-		// stream (!ok, handled above) or an outright stall (timer.C,
-		// handled below) never gets a sample, matching "only measure the
-		// stage that actually happened".
+		// tts_first_chunk: time from *starting* SynthesizeStream (not
+		// from when it returned) to this, its first chunk, actually
+		// arriving -- so this sample includes any internal connect-phase
+		// retry time the same way FallbackConfig.SynthesizeTimeout's
+		// budget now does. Recorded only once we know a real chunk
+		// arrived (ok == true) -- a closed-with-no-chunks stream (!ok,
+		// handled above) or an outright stall (ttsCtx.Done(), handled
+		// below) never gets a sample, matching "only measure the stage
+		// that actually happened".
 		recordLatency(s.metrics, stageTTSFirstChunk, msSince(synthesizeStart))
 		select {
 		case out <- chunk:
@@ -812,7 +925,13 @@ func (s *Session) forwardTTSWithStallGuard(in <-chan tts.AudioChunk, out chan<- 
 		if chunk.IsFinal {
 			return true, false, false
 		}
-	case <-timer.C:
+	case <-ttsCtx.Done():
+		if s.ctx.Err() != nil {
+			// The session itself is shutting down, not (necessarily)
+			// SynthesizeTimeout elapsing -- ttsCtx inherits s.ctx's
+			// cancellation, so ttsCtx.Done() fires for this reason too.
+			return false, false, true
+		}
 		return false, true, false
 	}
 

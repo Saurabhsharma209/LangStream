@@ -1,5 +1,172 @@
 # LangStream Dev Log
 
+## 2026-07-22 (interactive session, Saurabh) — voice-distortion root cause, MT/TTS timeout bug, Gemini backend, Deepgram Hindi
+
+Saurabh reported live-pilot issues with translation quality, voice
+distortion, and clarity, and pushed a rough, untested set of ideas to a
+`suggestions` branch (commit `e8b83ac`: a Gemini translator draft,
+Deepgram Hindi support via plain `nova-2`, a blind `TranslateTimeout`/
+`SynthesizeTimeout` bump from 2s/3s to a flat 10s, and inline stderr MT
+debug logging) as a signal, not a finished fix. Asked to investigate and
+fix properly rather than merge that branch as-is. Tech and PE agents ran
+in parallel on `main`, followed by QA's independent verification pass.
+
+### Investigation findings (before any code was written)
+
+- **Ruled out one plausible theory first:** checked whether ClearStream's
+  outbound G.711 codec (A-law vs µ-law) could be silently mismatched from
+  the RTP leg's actual negotiated `PayloadType` (a classic cause of
+  garbled telephony audio). Confirmed via ClearStream's own
+  `resolvePayloadType()` (`pkg/rtp/session.go`) that `Codec` is correctly
+  auto-derived from `PayloadType` when left unset -- this was already
+  correct, not a bug, so no change was made here.
+- **Real root cause #1 (voice distortion): a chunk-boundary bug in
+  `pkg/rtp/duplex.go`'s TTS pacer.** ClearStream's `InjectBotAudio` accepts
+  raw PCM16 but silence-pads any trailing partial 160-sample (20ms@8kHz)
+  frame on *every single call*. `feedTTSPacer` was handing each
+  arbitrarily-sized real TTS chunk straight through -- since Cartesia/
+  ElevenLabs streaming chunk sizes don't naturally land on clean 320-byte
+  boundaries, nearly every chunk boundary was getting silently
+  padded/truncated at a non-sample-aligned point, which is exactly the
+  kind of thing that sounds like clicking/choppy distortion on a real call
+  but wouldn't show up against this repo's round-number fake-server test
+  fixtures.
+- **Real root cause #2 (translation being skipped, not mistranslated):**
+  `TranslateTimeout`/`SynthesizeTimeout` (2s/3s) wrap each vendor call's
+  *entire* retry sequence (3 attempts, up to ~1.8s of cumulative backoff
+  alone, on top of real request latency) -- but this budget was only ever
+  validated against fast local fakes per ROADMAP.md's Week 2 decision;
+  real vendor latency was untested until Saurabh's own live run. A tight
+  2s budget could plausibly expire on one real GPT-4o/Cartesia attempt,
+  triggering fallback-to-original-audio (with a warning tone) far more
+  often than intended -- which would read as "translation/clarity" issues
+  to a caller even though the translation itself was never wrong, just
+  frequently skipped.
+- **Real root cause #3, found only while fixing #2, not hypothesized in
+  advance:** `SynthesizeTimeout`'s `ttsCtx` was built with
+  `context.WithCancel` (no deadline at all), not `context.WithTimeout` --
+  so TTS's own internal connect-retry logic (up to 3 attempts x up to 10s
+  dial timeout = up to 30s) ran completely unbounded by
+  `SynthesizeTimeout`; only the post-connect "wait for first chunk" phase
+  was ever actually timed.
+- **Deepgram Hindi:** confirmed via Deepgram's own docs
+  (`developers.deepgram.com/docs/multilingual-code-switching`,
+  `.../docs/models-languages-overview`) that Nova-2's real-time
+  code-switching is English-Spanish only -- it does not support
+  Hindi-English code-switching. Naively adding `language=hi` on `nova-2`
+  (Saurabh's draft) would transcribe pure Hindi reasonably but likely
+  produce noticeably worse results than Sarvam on exactly this product's
+  primary real-world pattern: Hinglish, mid-sentence code-switched
+  speech.
+
+### Changes
+
+**Tech -- chunk-boundary fix (`pkg/rtp/duplex.go`, `pkg/rtp/tts_pacing_test.go`)**
+`feedTTSPacer` now accumulates PCM into clean 320-byte (160-sample)
+frames, carrying any remainder forward to the next chunk, and only
+flushing a genuine partial tail at `IsFinal` or stream close. New
+`TestTTSPacer_AccumulatesPartialFramesAcrossChunkBoundaries`; existing
+tests updated to use frame-aligned fixtures where the old ones
+accidentally masked this.
+
+**Tech -- timeout recalibration + fix (`pkg/langstream/fallback.go`,
+`pkg/langstream/session.go`, `pkg/langstream/fallback_test.go`)**
+`TranslateTimeout` 2s -> **6s** (covers ~2 real attempts at a realistic
+p95 latency + backoff), `SynthesizeTimeout` 3s -> **4s** (same reasoning,
+TTS's per-attempt cost is lower) -- both derived from the retry math
+above and documented in `fallback.go`'s doc comments, not the draft's
+blind flat 10s (which would mean up to 10s of dead air on a genuinely-down
+vendor -- a worse real-time-call experience than a well-reasoned tighter
+number). `ttsCtx` now built with `context.WithTimeout(s.ctx,
+s.fallback.SynthesizeTimeout)` so the timeout actually bounds the whole
+`SynthesizeStream` call including connect-retries, fixing the
+previously-unbounded-connect-phase bug found above. Added a documented,
+non-enforced `maxSaneFallbackTimeout` (8s) reference ceiling.
+
+**Tech -- structured MT/TTS failure logging (`pkg/langstream/session.go`,
+`cmd/langstream/main.go`)**
+New optional `SessionConfig.Logger *zap.Logger` (defaults to
+`zap.NewNop()`), replacing the draft's raw `fmt.Fprintf(os.Stderr, ...)`
+idea with real structured logging consistent with `pkg/rtp`'s existing
+logger pattern -- covers both MT and TTS failure/stall sites (the draft
+only logged MT), wired into the CLI's real session construction in
+`cmd/langstream/main.go`.
+
+**PE -- Gemini 2.0 Flash translator backend (`pkg/translate/gemini.go`,
+`gemini_test.go`, new)**
+Built out from the draft's API shape (which was structurally sound) but
+fixed a real gap: the draft never recorded cost at all. Added real
+`RecordCost` wiring using Gemini's per-token pricing ($0.10/M input,
+$0.40/M output), parsing `usageMetadata` for exact token counts with a
+char-count fallback matching `gpt4o.go`'s existing convention. 28 new
+tests (success, retry/breaker/cooldown/probe, safety-block handling,
+context cancellation, the 4 cost-recording invariants this repo already
+established for other vendors). Registered as `--backend gemini` /
+`LANGSTREAM_TRANSLATOR_BACKEND=gemini`.
+
+**PE -- Deepgram Hindi via Nova-3 code-switching, not Nova-2
+(`pkg/asr/deepgram.go`, `deepgram_test.go`)**
+Hindi now routes to `model=nova-3` + `language=multi` (Deepgram's
+real-time multilingual code-switching mode, confirmed to include Hindi),
+not plain `nova-2`/`language=hi` -- English unchanged on `nova-2`/
+`language=en`. Added `endpointing=100` for code-switching sessions per
+Deepgram's own recommendation, a Hindi-specific cost rate, and a
+`WithDeepgramHindiModel` override option. 6 new tests including
+cross-language isolation on a shared recognizer instance.
+
+**QA -- independent verification (`chunk_boundary_integration_test.go`
+new; `pkg/langstream/session_test.go`, `pkg/asr/deepgram_test.go`
+appended)**
+Verified the chunk-boundary fix by driving real audio through a real
+`*langstream.Session` + `*rtp.DuplexSession` with a fake TTS producing
+deliberately non-aligned chunk sizes (137/501/322 bytes), decoding the
+actual G.711 RTP output sample-for-sample against an independently
+reimplemented reference mu-law codec -- and confirmed the test actually
+catches the bug by temporarily reverting the fix and watching it fail
+with exactly the expected corruption pattern before restoring it.
+Verified the `ttsCtx` timeout fix the same way (a fake TTS backend that
+blocks past `SynthesizeTimeout` before ever connecting). Filled two
+coverage gaps (Deepgram English/Hindi cross-language isolation on a
+shared recognizer; `SessionConfig.Logger`'s nil-defaults-to-`zap.NewNop()`
+path). Gemini's 28 tests audited for the repo's standard
+assert-after-async race pattern -- clean, no fix needed.
+
+### Bugs found/fixed
+Three, all described above: the TTS chunk-boundary silence-padding bug
+(the most likely actual cause of "voice distortion"), the unbounded
+TTS-connect-retry timeout bug (found while fixing the timeout budget, not
+hypothesized going in), and Deepgram Hindi's code-switching gap on
+Nova-2 (caught before it shipped, via research, not via a live failure).
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+- `go test ./... -race -count=3` -- all 12 buildable packages pass, run in
+  chunks (`.`/`pkg/langstream`/`pkg/rtp`; `pkg/asr`/`pkg/translate`;
+  `pkg/tts`/`pkg/qa`/`pkg/observability`; `pkg/webrtcgw`/`cmd/langstream`/
+  `examples`)
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Not done / needs a real key or live call to confirm further
+- Gemini and Deepgram-Nova-3-Hindi are both implemented and unit/
+  integration tested against fake servers, per this repo's established
+  Week 2 pattern -- neither has been live-tested against the real vendor
+  API from this session (no keys available here). Recommend a live smoke
+  test (same shape as the 2026-07-14 Sarvam/ElevenLabs live verification)
+  before relying on either in a real pilot call.
+- The chunk-boundary and timeout fixes are structural/logic fixes verified
+  by decoding real RTP output in-test, but a live PSTN call is still the
+  real confirmation that the audible "distortion" complaint is resolved --
+  recommend Saurabh re-test the same scenario that surfaced the original
+  complaint.
+
+### Tomorrow
+1. If Saurabh can live-test with real Gemini/Deepgram keys, that's the
+   highest-value next step to confirm today's fixes actually resolve what
+   he heard.
+2. Otherwise, continue the normal scheduled-automation cadence -- Week 4
+   still blocked on the anchor-customer/live-traffic decision, unchanged.
+
+
 ## 2026-07-21 (Sprint 14: dead-leg audio drain, vendor cost-recording audit, WER corpus growth) — scheduled run
 
 ### Agents run
