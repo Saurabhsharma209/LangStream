@@ -158,10 +158,8 @@ func NewDeepgramRecognizer(opts ...DeepgramOption) (*DeepgramRecognizer, error) 
 // Name implements Recognizer.
 func (r *DeepgramRecognizer) Name() string { return "deepgram" }
 
-// SupportedLanguages implements Recognizer. This backend is scoped to
-// English only for the pilot.
 func (r *DeepgramRecognizer) SupportedLanguages() []Language {
-	return []Language{"en"}
+	return []Language{"en", "hi"}
 }
 
 // StartStream implements Recognizer. The underlying WebSocket connection is
@@ -173,8 +171,8 @@ func (r *DeepgramRecognizer) StartStream(ctx context.Context, languageHint Langu
 	if lang == "" {
 		lang = "en"
 	}
-	if lang != "en" {
-		return nil, fmt.Errorf("asr/deepgram: unsupported language %q (this backend is English-only)", lang)
+	if lang != "en" && lang != "hi" {
+		return nil, fmt.Errorf("asr/deepgram: unsupported language %q", lang)
 	}
 
 	// Circuit breaker gate: if too many consecutive sessions have failed

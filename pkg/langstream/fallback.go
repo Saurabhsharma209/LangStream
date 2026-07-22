@@ -164,8 +164,8 @@ func DefaultFallbackConfig() FallbackConfig {
 	return FallbackConfig{
 		ConfidenceThreshold:    0.55,
 		DegradeToneEnabled:     true,
-		TranslateTimeout:       2 * time.Second,
-		SynthesizeTimeout:      3 * time.Second,
+		TranslateTimeout:       10 * time.Second,
+		SynthesizeTimeout:      10 * time.Second,
 		MaxConsecutiveFailures: 3,
 		DeadLegDrainInterval:   defaultDeadLegDrainInterval,
 	}

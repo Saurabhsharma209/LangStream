@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -549,6 +550,7 @@ func (s *Session) runLeg(leg *legState, stream asr.StreamSession, srcLang, dstLa
 			mtCancel()
 			recordLatency(s.metrics, stageMT, msSince(mtStart))
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "langstream: MT error: %v (text=%q src=%s dst=%s)\n", err, tr.Text, srcLang, dstLang)
 				recordFallbackErr(s.metrics, stageTranslate, s.cfg.Translator.Name(), err)
 				if leg.recordFailure(isFatal(err), s.fallback.MaxConsecutiveFailures) {
 					recordFallback(s.metrics, stageLegDegraded, leg.name)

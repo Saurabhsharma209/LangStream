@@ -88,6 +88,9 @@ func init() {
 	langstream.RegisterTranslatorBackend("gpt4o", func() (translate.Translator, error) {
 		return translate.NewGPT4oTranslator()
 	})
+	langstream.RegisterTranslatorBackend("gemini", func() (translate.Translator, error) {
+		return translate.NewGeminiTranslator()
+	})
 	langstream.RegisterTTSBackend("cartesia", func() (tts.Synthesizer, error) {
 		return tts.NewCartesiaSynthesizer()
 	})
