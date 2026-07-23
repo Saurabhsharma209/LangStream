@@ -17,6 +17,18 @@ var emptyHypothesisEntries = map[string]bool{
 	"hinglish_total_deletion_empty_hypothesis_silence_timeout": true,
 }
 
+// emptyReferenceEntries lists the corpus entries whose Reference is
+// deliberately "" (a genuine hallucination-from-true-silence shape -- see
+// FixedCorpus's Sprint 2026-07-23 doc comment on
+// hinglish_hallucination_from_true_silence_empty_reference), the mirror
+// image of emptyHypothesisEntries above, so
+// TestFixedCorpus_EntriesAreWellFormed's empty-Reference guard can allow
+// exactly this one intentional exception by name instead of disabling the
+// guard for every entry.
+var emptyReferenceEntries = map[string]bool{
+	"hinglish_hallucination_from_true_silence_empty_reference": true,
+}
+
 // TestFixedCorpus_EntriesAreWellFormed guards against the exact class of
 // silent-fixture bug this repo has been bitten by before (an empty/
 // malformed fixture that "passes" trivially): every entry must have a
@@ -45,8 +57,11 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 		if e.Language == "" {
 			t.Errorf("entry %q has empty Language", e.Name)
 		}
-		if e.Reference == "" {
+		if e.Reference == "" && !emptyReferenceEntries[e.Name] {
 			t.Errorf("entry %q has empty Reference", e.Name)
+		}
+		if e.Reference != "" && emptyReferenceEntries[e.Name] {
+			t.Errorf("entry %q is listed in emptyReferenceEntries but has a non-empty Reference %q -- update emptyReferenceEntries or this entry", e.Name, e.Reference)
 		}
 		if e.Hypothesis == "" && !emptyHypothesisEntries[e.Name] {
 			t.Errorf("entry %q has empty Hypothesis", e.Name)
@@ -125,6 +140,14 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // contiguous three-word deletion modeling a truncated/cut-off call) —
 // see FixedCorpus's doc comment for each entry's reasoning and
 // hand-computed WER.
+//
+// Sprint 2026-07-23 (QA): includes five further entries (a leading
+// contiguous two-word deletion block, a reference-side repeated word
+// collapsed by the fake ASR, three non-adjacent substitutions in a long
+// utterance, a contiguous three-word substitution block, and a
+// hallucination-from-true-silence case with an empty Reference) — see
+// FixedCorpus's doc comment for each entry's reasoning and hand-computed
+// WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -200,6 +223,14 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_three_word_phrase_repeat_insertion_order_confirmation":         3.0 / 7.0,
 		"hinglish_systematic_repeated_word_substitution_hai_hain_verb_agreement": 2.0 / 11.0,
 		"hinglish_trailing_three_word_deletion_call_cutoff_complaint_update":     3.0 / 14.0,
+
+		// Sprint 2026-07-23 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_leading_two_word_deletion_call_greeting":                2.0 / 8.0,
+		"hinglish_reference_repeated_word_collapsed_dhanyavaad":           1.0 / 8.0,
+		"hinglish_three_nonadjacent_substitutions_payment_confirmation":   3.0 / 18.0,
+		"hinglish_contiguous_three_word_substitution_block_refund_status": 3.0 / 8.0,
+		"hinglish_hallucination_from_true_silence_empty_reference":        1.0,
 	}
 
 	entries := FixedCorpus()

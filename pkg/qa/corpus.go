@@ -228,6 +228,82 @@ func placeholderPCM() []byte {
 //   - hinglish_case_sensitivity_capitalized_sir_mismatch:            WER 1/6  (1 substitution / 6 words)
 //
 //   - hinglish_severe_hallucination_wer_exceeds_one_listen_request:  WER 5/3  (5 insertions / 3 words, WER > 1.0)
+//
+// Sprint 2026-07-23 (QA) adds five further entries covering error shapes
+// still not represented anywhere in this corpus, found while auditing
+// every existing entry's hand-verified error shape (per this file's own
+// sprint-by-sprint doc-comment history) for gaps rather than re-treading
+// an already-covered mechanic under a new name:
+//
+//   - a leading contiguous two-word deletion block -- every existing
+//     multi-word deletion entry
+//     (hinglish_two_word_deletion_travel_booking_confirmation drops a
+//     contiguous mid-sentence pair,
+//     hinglish_trailing_three_word_deletion_call_cutoff_complaint_update
+//     drops a contiguous trailing block,
+//     hinglish_three_nonadjacent_deletions_complaint_resolution drops
+//     three scattered single words) has never dropped a contiguous block
+//     anchored at the very *start* of the utterance -- the greeting-word
+//     equivalent of an ASR that starts transcribing a beat late;
+//
+//   - a genuine reference-side repeated word ("dhanyavaad dhanyavaad" --
+//     a real speaker actually saying "thank you thank you") collapsed by
+//     the fake ASR down to a single occurrence -- the inverse of
+//     hinglish_three_word_phrase_repeat_insertion_order_confirmation and
+//     every other insertion entry in this corpus (which all duplicate a
+//     word the reference only has *once*): here the duplication is
+//     genuinely present in the ground truth, and the deleted word is
+//     identical to its own reference neighbor, a distinct alignment edge
+//     case (two adjacent identical reference tokens) none of this
+//     corpus's other deletion entries exercise;
+//
+//   - three non-adjacent single-word *substitutions* scattered across a
+//     long (18-word) utterance -- every existing multi-substitution entry
+//     in this corpus tops out at two
+//     (hinglish_account_block_query_two_substitutions,
+//     hinglish_long_utterance_two_substitutions_refund_status); this is
+//     the substitution-side counterpart to
+//     hinglish_three_nonadjacent_deletions_complaint_resolution's three
+//     non-adjacent deletions, checking WER alignment isolates three
+//     independent single-word substitutions without conflating any pair
+//     of them into a costlier multi-word edit;
+//
+//   - a contiguous three-word *substitution* block (three adjacent
+//     reference words replaced by three different adjacent hypothesis
+//     words, same length, no insertion or deletion at all) -- distinct
+//     from hinglish_adjacent_word_transposition_balance_check (two
+//     adjacent words merely swapped, i.e. the same two words in reverse
+//     order) and from every scattered multi-substitution entry (isolated,
+//     non-contiguous single-word edits): this models a whole short phrase
+//     mis-heard as a different phrase, not a reorder or independent
+//     single-word slips;
+//
+//   - a genuine hallucination-from-true-silence case: Reference is the
+//     empty string (no speech occurred at all) but the fake ASR still
+//     produces a non-empty Hypothesis -- the mirror image of
+//     hinglish_total_deletion_empty_hypothesis_silence_timeout (real
+//     speech, empty transcript). wer.go's own doc comment notes
+//     "WordErrorRate(reference, \"\") for a non-empty reference returns
+//     1.0", but the symmetric case -- an *empty reference* against a
+//     non-empty hypothesis -- was never pinned down concretely: per
+//     wordErrorRate's n==0 branch this is also a flat 1.0 regardless of
+//     how many words the hallucinated hypothesis contains, which this
+//     entry demonstrates explicitly. Unlike
+//     hinglish_total_deletion_empty_hypothesis_silence_timeout (excluded
+//     from wer_measurement_test.go because its empty *Hypothesis* is
+//     silently dropped by the real Sarvam client), this entry's
+//     Hypothesis is non-empty, so it wires into that fake-ASR-backed
+//     pipeline test normally.
+//
+//   - hinglish_leading_two_word_deletion_call_greeting:                WER 2/8   (2 deletions / 8 words)
+//
+//   - hinglish_reference_repeated_word_collapsed_dhanyavaad:           WER 1/8   (1 deletion / 8 words)
+//
+//   - hinglish_three_nonadjacent_substitutions_payment_confirmation:   WER 3/18  (3 substitutions / 18 words)
+//
+//   - hinglish_contiguous_three_word_substitution_block_refund_status: WER 3/8   (3 substitutions / 8 words)
+//
+//   - hinglish_hallucination_from_true_silence_empty_reference:        WER 1.0   (empty reference, non-empty hypothesis)
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -1187,6 +1263,106 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir aapki complaint register ho gayi hai aur hum jald hi update denge dhanyavaad",
 			Hypothesis: "sir aapki complaint register ho gayi hai aur hum jald hi",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-07-23 (QA) additions below: five more entries
+		// covering error shapes still not represented anywhere in this
+		// corpus -- see this file's FixedCorpus doc comment (Sprint
+		// 2026-07-23 section) for the full rationale behind each.
+
+		{
+			// The fake ASR drops the leading two-word greeting phrase
+			// "namaste sir" entirely, as if it started transcribing a
+			// beat late -- the first entry in this corpus with a
+			// contiguous multi-word deletion block anchored at the very
+			// *start* of the utterance (every other multi-word deletion
+			// entry is either mid-sentence or trailing).
+			Name:       "hinglish_leading_two_word_deletion_call_greeting",
+			Language:   "hi",
+			Reference:  "namaste sir aapka order confirm ho gaya hai",
+			Hypothesis: "aapka order confirm ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The reference itself genuinely repeats a word back to
+			// back ("dhanyavaad dhanyavaad" -- a real speaker actually
+			// saying "thank you thank you"), and the fake ASR collapses
+			// it down to a single occurrence -- the inverse of every
+			// insertion entry in this corpus (which duplicate a word the
+			// reference only has once): here the ground truth already
+			// contains the duplicate, and the deleted hypothesis-missing
+			// word is identical to its own adjacent reference neighbor,
+			// an alignment edge case (two adjacent identical reference
+			// tokens) no other deletion entry in this corpus exercises.
+			Name:       "hinglish_reference_repeated_word_collapsed_dhanyavaad",
+			Language:   "hi",
+			Reference:  "sir dhanyavaad dhanyavaad aapka kaam ho gaya hai",
+			Hypothesis: "sir dhanyavaad aapka kaam ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// Three separate, non-adjacent single-word substitutions
+			// ("successfully"->"successful", "receipt"->"recipe",
+			// "diya"->"kiya") scattered across an 18-word payment-
+			// confirmation sentence -- the substitution-side counterpart
+			// to hinglish_three_nonadjacent_deletions_complaint_resolution's
+			// three non-adjacent deletions. Every existing
+			// multi-substitution entry in this corpus tops out at two;
+			// this checks WER alignment isolates three independent
+			// single-word substitutions in a long utterance without
+			// conflating any pair of them into a costlier multi-word
+			// edit.
+			Name:       "hinglish_three_nonadjacent_substitutions_payment_confirmation",
+			Language:   "hi",
+			Reference:  "sir aapka payment successfully complete ho gaya hai aur receipt aapke email par bhej diya gaya hai dhanyavaad",
+			Hypothesis: "sir aapka payment successful complete ho gaya hai aur recipe aapke email par bhej kiya gaya hai dhanyavaad",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The contiguous three-word phrase "refund process
+			// complete" is replaced wholesale by a different contiguous
+			// three-word phrase "payment abhi pending" -- three adjacent
+			// substitutions with no insertion or deletion at all (both
+			// sentences stay 8 words long), modeling a whole short
+			// phrase mis-heard as an unrelated phrase. Distinct from
+			// hinglish_adjacent_word_transposition_balance_check (the
+			// same two words merely swapped/reordered, not replaced by
+			// different words) and from every scattered
+			// multi-substitution entry (isolated, non-contiguous
+			// single-word edits).
+			Name:       "hinglish_contiguous_three_word_substitution_block_refund_status",
+			Language:   "hi",
+			Reference:  "sir aapka refund process complete ho gaya hai",
+			Hypothesis: "sir aapka payment abhi pending ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// Reference is deliberately the empty string (no speech
+			// occurred at all -- true silence), but the fake ASR still
+			// hallucinates a non-empty transcript. The mirror image of
+			// hinglish_total_deletion_empty_hypothesis_silence_timeout
+			// (real speech, empty transcript): wer.go's doc comment
+			// documents WordErrorRate(reference, "") == 1.0 for a
+			// non-empty reference, but the symmetric empty-reference
+			// case was never pinned down concretely before this entry.
+			// Per wordErrorRate's n==0 branch, WER is a flat 1.0 here
+			// regardless of how many words the hallucinated hypothesis
+			// contains -- unlike
+			// hinglish_total_deletion_empty_hypothesis_silence_timeout,
+			// this entry's Hypothesis is non-empty, so (unlike that
+			// entry) it wires into wer_measurement_test.go's
+			// fake-ASR-backed pipeline normally: the real Sarvam client
+			// only drops empty *transcripts*, and this one isn't empty.
+			Name:       "hinglish_hallucination_from_true_silence_empty_reference",
+			Language:   "hi",
+			Reference:  "",
+			Hypothesis: "haan haan sir bilkul theek hai",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

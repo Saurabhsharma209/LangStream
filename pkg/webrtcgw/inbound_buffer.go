@@ -32,6 +32,37 @@ const inboundBufferDuration = 400 * time.Millisecond
 // specifically so this buffering behavior -- the actual fix for the real
 // bug described in inboundBufferDuration's doc comment -- has a direct
 // unit test that doesn't require a live pion TrackRemote/RTP transport.
+//
+// Frame-alignment audit (2026-07-23, prompted by the same day's
+// pkg/rtp/duplex.go feedTTSPacer chunk-boundary fix -- see DEVLOG.md's
+// 2026-07-22 entry): onFull's payload length is *not* guaranteed to be a
+// multiple of any particular sample/frame size -- add() flushes as soon
+// as len(buffered) >= targetBytes without ever trimming to an exact
+// boundary, and a caller's final flush() (track end/room teardown) can
+// hand over any leftover byte count at all. This is safe, verified
+// against every real downstream consumer on this inbound path (not
+// assumed):
+//   - asr.StreamSession.PushAudio (pkg/asr/interface.go) declares no
+//     alignment requirement, and neither real backend imposes one:
+//     Sarvam's PushAudio wraps each call's PCM into its own
+//     self-contained WAV file (pcm16MonoToWAV), and Deepgram's writeAudio
+//     writes the raw bytes as one WebSocket binary message -- both
+//     accept arbitrary-length PCM per call with no cross-call framing
+//     state.
+//   - langstream.Session's raw-audio ring buffer (audioRingBuffer.push in
+//     pkg/langstream/fallback.go) copies pcm byte-for-byte with no
+//     length/alignment check; passthrough forwarding replays whatever was
+//     stored as-is.
+//
+// This is a materially different contract from ClearStream's
+// InjectBotAudio (see pkg/rtp/duplex.go's ttsFrameBytes doc comment),
+// which silence-pads/truncates any non-sample-aligned trailing partial
+// frame on *every single call* -- that is a property specific to
+// ClearStream's fixed-size RTP playback framing, not a general rule about
+// PCM consumers in this codebase. inboundBuffer deliberately does not
+// pre-align its output to any frame size because nothing on this inbound
+// path needs it to; see TestInboundBuffer_FlushDeliversUnalignedLength
+// for the pinning regression test that locks this finding in.
 type inboundBuffer struct {
 	targetBytes int
 	onFull      func(pcm []byte)

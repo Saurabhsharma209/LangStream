@@ -327,6 +327,44 @@ two of the last three runs have now been workable, only Sprint 12 hit a
 hard wall. Week 4 still cannot meaningfully start without Saurabh's
 decision.
 
+**2026-07-22 (interactive session, Saurabh):** not a scheduled sprint --
+see DEVLOG.md's 2026-07-22 entry. Saurabh reported live-pilot voice
+quality issues and pushed a rough `suggestions` branch as a signal.
+Investigation found and fixed three real bugs (a TTS chunk-boundary
+silence-padding bug causing audible distortion, an unbounded TTS-connect-
+retry timeout, and a Deepgram Hindi code-switching gap on Nova-2 caught
+before shipping) and added two new vendor backends (Gemini MT, Deepgram
+Hindi via Nova-3) properly rather than merging the draft as-is. No
+ROADMAP checklist items closed (this was hardening/bugfix work, not new
+roadmap scope) -- Week 3's one open item and all of Week 4 remain
+unchanged.
+
+**2026-07-23 note (Sprint 15):** still genuinely blocked on Saurabh's
+anchor-customer/live-traffic decision (unchanged since Sprint 8), so
+today again did opportunistic hardening across SRE/Tech/QA rather than
+inventing roadmap scope: SRE closed a real gap where `docker-compose.yml`
+only passed through 4 of the 6 vendor API keys now registered in
+`cmd/langstream/main.go` (`GEMINI_API_KEY` and `ELEVENLABS_API_KEY`,
+added 2026-07-22 and 2026-07-14 respectively, were both silently
+swallowed rather than reaching the container); Tech audited
+`pkg/webrtcgw/inbound_buffer.go` for a frame-alignment bug analogous to
+2026-07-22's `feedTTSPacer` fix (clean negative result -- arbitrary-length
+PCM is genuinely fine on that path, pinned with a new regression test)
+and re-audited all `Session`/`DuplexSession`/`webrtcgw` goroutines for a
+4th instance of the recurring shutdown-ordering bug class (none found);
+QA independently verified both of Tech's findings (not taken on faith --
+confirmed by deliberately re-breaking and re-fixing the alignment case),
+grew the WER corpus 52->57 with 5 new non-overlapping error shapes, and
+ran a clean race-pattern audit focused on the newest code (Gemini,
+Deepgram Hindi, yesterday's chunk-boundary test, today's new inbound-
+buffer test) -- no flakes found. No bugs shipped broken; two real negative
+audit results recorded rather than invented fixes. Sandbox's shared
+`$HOME`/`/sessions` disk was again at 100% full this run (0 bytes free)
+-- worked around by cloning into `/tmp` instead and pointing
+`GOTMPDIR`/`TMPDIR`/`GOCACHE`/`GOPATH` there too, consistent with prior
+runs' documented workaround. Week 4 still cannot meaningfully start
+without Saurabh's decision.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

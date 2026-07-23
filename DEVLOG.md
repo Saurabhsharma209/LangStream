@@ -1,5 +1,145 @@
 # LangStream Dev Log
 
+## 2026-07-23 (Sprint 15: vendor-key wiring gap, webrtcgw frame-alignment audit, shutdown-ordering re-audit, WER corpus growth) — scheduled run
+
+### Agents run
+SRE and Tech in parallel first, then QA sequenced after so it could
+independently verify their real, finished diffs rather than guess at
+them in advance (same sequencing as Sprint 14). PE not needed -- no
+PE-owned (`pkg/asr`/`pkg/translate`/`pkg/tts`) gap was found during
+planning; yesterday's interactive-session Gemini/Deepgram-Hindi work
+already shipped with its own full cost-invariant test coverage, so
+there was nothing outstanding in that workstream today.
+
+### Repo health at start
+Clean on the first try: `go build ./...`, `go vet ./...`, `gofmt -l .`,
+and `go test ./... -race -count=3` (chunked) all passed for the entire
+repo (all 12 buildable packages) before any agent touched anything.
+ClearStream checked (`git ls-remote --tags`): still only `v0.1.0`, no
+`VERSIONING.md` action needed -- today's scope never touched `pkg/rtp`'s
+ClearStream import.
+
+### Sandbox note
+`$HOME` (`/sessions/...`) was again at 100% full, 0 bytes free, for this
+entire run -- same recurring pattern as most sprints since Sprint 9.
+Worked around by cloning into `/tmp/LangStream` instead of `$HOME`
+(`/tmp` is a *different* filesystem here with several GB free) and
+pointing `GOTMPDIR`/`TMPDIR`/`GOCACHE`/`GOPATH` at `/tmp` paths as well
+-- Go's default scratch-dir resolution otherwise still reached for the
+full `/sessions` mount even with `$HOME` itself avoided, exactly as
+Sprint 13/14 documented. Root filesystem held 2+GB free throughout.
+
+### Changes
+
+**SRE -- vendor API key wiring gap closed (`docker-compose.yml`)**
+`cmd/langstream/main.go` registers six real vendor backends today
+(Deepgram/Sarvam ASR, GPT-4o/Gemini MT, Cartesia/ElevenLabs TTS), but
+`docker-compose.yml`'s `environment:` block only ever passed through
+four of the six API keys -- `GEMINI_API_KEY` (backend added
+2026-07-22) and `ELEVENLABS_API_KEY` (backend added 2026-07-14) were
+both silently dropped rather than reaching the container, meaning a
+real deployment setting either env var would have it quietly
+disappear. Added both, and corrected the block's comment (previously
+still said "Deepgram/Sarvam for ASR, GPT-4o for MT, Cartesia for TTS
+shipped in Week 2", missing both newer backends). Audited `Makefile`,
+`.github/workflows/*.yml`, and `pkg/observability/*.go` for the same
+staleness -- none found (no vendor-key references in the first two; the
+dashboard/metrics code takes vendor names as free-form strings, no
+hardcoded enumeration). **Related gap found but out of SRE's ownership,
+not fixed today:** `README.md` (lines 49, 65) still lists only
+"Deepgram, Sarvam, GPT-4o, Cartesia" as the real vendor integrations --
+same two-vendor staleness, needs whoever owns `README.md` to update it.
+
+**Tech -- two audits, both clean negative results, both pinned with
+regression tests (`pkg/webrtcgw/inbound_buffer.go`, `inbound_buffer_test.go`)**
+Yesterday's `feedTTSPacer` fix (2026-07-22) established that ClearStream's
+`InjectBotAudio` silently pads/truncates any non-frame-aligned trailing
+partial chunk on every call. Audited whether `pkg/webrtcgw/inbound_buffer.go`
+(the RTP-derived-audio-in direction, 20ms frames accumulated to ~400ms
+before `Session.Push{Caller,Agent}Audio`) has an analogous risk on its
+output side. **Genuinely does not** -- traced every real downstream
+consumer (Sarvam's `pcm16MonoToWAV`/`PushAudio` self-wraps each call into
+its own WAV file; Deepgram's `writeAudio` sends one WebSocket message per
+call; `langstream.Session`'s passthrough ring buffer copies byte-for-byte)
+and confirmed none require sample- or frame-aligned input -- this is a
+property specific to ClearStream's fixed-size RTP playback framing, not a
+general rule in this codebase. Documented the verified contract in a doc
+comment and added `TestInboundBuffer_FlushDeliversUnalignedLength`,
+confirmed (by temporarily truncating `flush()` to a 320-byte boundary) to
+actually fail without the fix, then restored. Separately re-audited every
+goroutine in `pkg/langstream/session.go` (including Sprint 14's
+`drainDeadLeg`), `pkg/rtp/duplex.go` (`bridgeCleanAudio`, `feedTTSPacer`,
+`runTTSPacer`), and `pkg/webrtcgw` for a 4th instance of the
+shutdown-ordering bug class that has now recurred three times
+(2026-07-12, 2026-07-14, 2026-07-21) -- **none found.** Notably,
+`duplex.go`'s `stopLocked` calls `cancel()` *before* `wg.Wait()`
+(structurally immune to the bug class by construction, unlike
+`Session.Close`'s cancel-after-wait-with-backstop pattern), and
+`pkg/webrtcgw` has no `sync.WaitGroup` at all, so the specific trap
+can't occur there either.
+
+**QA -- independent verification, WER corpus 52->57, race-pattern audit**
+Did not take Tech's negative results on faith: independently re-broke
+and re-fixed the `inbound_buffer.go` alignment case to confirm the new
+test really catches the regression class (`want 2004, got 1920` on the
+broken version), and independently read `duplex.go`'s `stopLocked` and
+`webrtcgw/room.go`'s `leave`/`expireIncomplete` to confirm the
+shutdown-ordering claim first-hand. Grew the WER corpus with 5 new,
+hand-verified, non-overlapping error shapes: a leading (not mid-sentence
+or trailing) 2-word deletion; a genuinely-repeated reference word
+collapsed by the ASR (inverse of the existing phrase-repeat *insertion*
+entries); 3 scattered non-adjacent substitutions in one utterance
+(previous multi-substitution entries topped out at 2); a contiguous
+3-word phrase replaced by a different 3-word phrase with no length
+change (distinct from the existing 2-word transposition and from
+scattered substitutions); and an empty-Reference/non-empty-Hypothesis
+case pinning `wordErrorRate`'s `n==0` branch (the untested mirror of the
+existing empty-Hypothesis entry). `corpus_test.go` and
+`wer_measurement_test.go` updated in sync. Race-pattern audit targeted
+the newest code specifically (Gemini, Deepgram Hindi tests, yesterday's
+chunk-boundary test, today's new inbound-buffer test) -- clean, up to
+`-count=30` on the smaller packages, no flakes.
+
+### Bugs found/fixed
+None -- today produced two real, verified negative audit results
+(webrtcgw frame-alignment, 4th shutdown-ordering instance) and one real,
+previously-silent config gap (docker-compose.yml's missing vendor keys),
+rather than a code bug. Per this repo's established pattern, negative
+results are pinned with regression tests / documented rather than
+discarded.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+- `go test ./... -race -count=3` -- all 12 buildable packages pass, run
+  in chunks (`.`/`pkg/langstream`/`pkg/rtp`; `pkg/asr`/`pkg/translate`/
+  `pkg/qa`; `pkg/tts`/`pkg/observability`/`pkg/webrtcgw`;
+  `cmd/langstream`/`examples/...`)
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- Real-condition jitter-buffer tuning against live PSTN traces -- still
+  needs live/pilot call traffic (Week 4). Unchanged.
+- Week 4 (live pilot, real WER/latency/CSAT, go/no-go) still cannot
+  start without Saurabh's decision on anchor customer(s) / live
+  traffic -- unchanged.
+- `README.md`'s vendor-list staleness (see SRE's finding above) -- not
+  fixed today, out of every current workstream's file ownership as
+  defined; flagging for the next run or for `references/workstreams.md`
+  to explicitly assign.
+- Docker-build verification, legal review of `docs/compliance.md` --
+  both unchanged, still need a human.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that's the top priority and supersedes everything below.
+2. Fix `README.md`'s stale vendor list (Deepgram/Sarvam/GPT-4o/Cartesia
+   only -- missing Gemini and ElevenLabs) -- small, cheap, flagged today
+   but not owned by any of today's spawned workstreams.
+3. Absent higher-priority work: continue opportunistic hardening (WER
+   corpus, race-pattern audits) -- still cheap, high-value, doesn't
+   block on anything.
+
+
 ## 2026-07-22 (interactive session, Saurabh) — voice-distortion root cause, MT/TTS timeout bug, Gemini backend, Deepgram Hindi
 
 Saurabh reported live-pilot issues with translation quality, voice

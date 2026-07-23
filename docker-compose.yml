@@ -24,19 +24,22 @@ services:
       - "8080:8080"
     environment:
       # --- Vendor API keys ---------------------------------------------
-      # Real vendor backends (Deepgram/Sarvam for ASR, GPT-4o for MT,
-      # Cartesia for TTS) shipped in Week 2 and are selected via
-      # --backend/LANGSTREAM_*_BACKEND (see cmd/langstream/main.go);
-      # mock backends remain the default when no key is set. These are
-      # only consumed by `langstream demo`, not by `serve` (the dashboard
-      # server has no vendor backend of its own — it just aggregates
-      # metrics recorded by whatever process feeds its LatencyRecorder).
+      # Six real vendor backends are registered in cmd/langstream/main.go
+      # init() and selected via --backend/LANGSTREAM_*_BACKEND: Deepgram
+      # and Sarvam for ASR, GPT-4o and Gemini for MT, Cartesia and
+      # ElevenLabs for TTS. Mock backends remain the default when no key
+      # is set. These are only consumed by `langstream demo`, not by
+      # `serve` (the dashboard server has no vendor backend of its own —
+      # it just aggregates metrics recorded by whatever process feeds its
+      # LatencyRecorder).
       # Set real values via a local .env file (gitignored) — never commit
       # secrets here.
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
       - SARVAM_API_KEY=${SARVAM_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - CARTESIA_API_KEY=${CARTESIA_API_KEY:-}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
     restart: unless-stopped
     # --- healthcheck ------------------------------------------------------
     # Not adding a `healthcheck:` block: Compose (like Docker's own

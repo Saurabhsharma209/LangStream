@@ -121,3 +121,54 @@ func TestInboundBuffer_FlushOnEmptyBufferIsNoop(t *testing.T) {
 		t.Errorf("flush() on an already-empty buffer called onFull again (now %d times total), want still 1", calls)
 	}
 }
+
+// TestInboundBuffer_FlushDeliversUnalignedLength is the pinning
+// regression test for the 2026-07-23 frame-alignment audit documented in
+// inbound_buffer.go's doc comment: unlike ClearStream's InjectBotAudio
+// (see pkg/rtp/duplex.go's ttsFrameBytes doc comment, and the
+// 2026-07-22 feedTTSPacer chunk-boundary fix it describes), nothing
+// downstream of inboundBuffer requires onFull's payload to land on any
+// particular sample/frame boundary -- so inboundBuffer must never
+// silently pad or truncate to one either. This drives both the
+// threshold-triggered flush and the forced flush() path with byte counts
+// that are deliberately not multiples of 320 (160 samples @ 16-bit) or
+// even 2 (one sample), and asserts the exact byte count survives
+// unchanged in both cases.
+func TestInboundBuffer_FlushDeliversUnalignedLength(t *testing.T) {
+	var calls [][]byte
+	// 125ms @ 8kHz/16-bit mono = 2000 bytes -- not a multiple of 320
+	// (one 160-sample/20ms ClearStream InjectBotAudio frame), so crossing
+	// it lands on a genuinely unaligned boundary.
+	const target = 2000
+	b := newInboundBuffer(125*time.Millisecond, func(pcm []byte) {
+		calls = append(calls, append([]byte{}, pcm...))
+	})
+
+	first := make([]byte, target-3) // deliberately 3 bytes short of target
+	b.add(first)
+	if len(calls) != 0 {
+		t.Fatal("onFull fired before reaching target, want no call yet")
+	}
+
+	second := make([]byte, 7) // odd length; pushes total 4 bytes past target
+	b.add(second)
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 onFull call after crossing target, got %d", len(calls))
+	}
+	wantLen := len(first) + len(second)
+	if len(calls[0]) != wantLen {
+		t.Fatalf("flushed buffer was %d bytes, want %d (unaligned length preserved exactly, not padded/truncated)", len(calls[0]), wantLen)
+	}
+
+	// Forced flush() (track end/room teardown) of a deliberately
+	// odd-length partial buffer must also come through byte-for-byte.
+	partial := make([]byte, 501) // not a multiple of 320 or of 2
+	b.add(partial)
+	b.flush()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 total onFull calls after the forced flush, got %d", len(calls))
+	}
+	if len(calls[1]) != len(partial) {
+		t.Fatalf("forced flush delivered %d bytes, want %d (unaligned length preserved exactly, not padded/truncated)", len(calls[1]), len(partial))
+	}
+}
