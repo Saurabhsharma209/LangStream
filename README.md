@@ -46,8 +46,9 @@ whether this product is usable on a live call.
 
 - Stable Go interfaces for the three pipeline stages: [`pkg/asr`](pkg/asr),
   [`pkg/translate`](pkg/translate), [`pkg/tts`](pkg/tts) — every vendor
-  backend (Deepgram, Sarvam, GPT-4o, Cartesia, ...) implements these and
-  nothing downstream depends on a specific vendor.
+  backend (Deepgram, Sarvam for ASR; GPT-4o, Gemini for MT; Cartesia,
+  ElevenLabs for TTS) implements these and nothing downstream depends on a
+  specific vendor.
 - Deterministic mock backends for all three, so the orchestrator is fully
   testable before any vendor API key exists.
 - [`pkg/langstream`](pkg/langstream): the duplex session orchestrator
@@ -63,8 +64,10 @@ whether this product is usable on a live call.
   a gofmt check on every push.
 
 Real vendor integrations (Deepgram/Sarvam ASR, GPT-4o translation, Cartesia
-TTS) and the duplex RTP extension of ClearStream's session layer land in
-Week 2 — see `ROADMAP.md`.
+TTS) and the duplex RTP extension of ClearStream's session layer landed in
+Week 2 — see `ROADMAP.md`. Two more real backends (Gemini MT, ElevenLabs
+TTS) were added afterward (see `DEVLOG.md`'s 2026-07-14 and 2026-07-22
+entries) — six real vendor backends exist today, not four.
 
 ## Building
 

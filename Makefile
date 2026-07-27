@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet docker docker-run serve ci
+.PHONY: build test fmt fmt-check vet docker docker-run serve ci check-vendor-keys
 
 BINARY := langstream
 CMD_PATH := ./cmd/langstream
@@ -40,8 +40,16 @@ serve:
 docker-run:
 	docker compose up --build
 
+# Guards against the vendor-API-key-drift bug class found in Sprint 15
+# (2026-07-23): a real vendor backend registered in cmd/langstream/main.go's
+# init() whose API key env var isn't (or is no longer) passed through by
+# docker-compose.yml's environment: block. See
+# scripts/check-vendor-keys.sh's own header comment for the full story.
+check-vendor-keys:
+	./scripts/check-vendor-keys.sh
+
 # What CI runs. Keep this in sync with .github/workflows/ci.yml so
 # `make ci` is a reliable local pre-push check. (CI's docker-build job is
 # informational/parallel, not part of the local pre-push gate here - run
 # `make docker` separately if you want to sanity-check the image too.)
-ci: fmt-check vet test build
+ci: fmt-check vet test build check-vendor-keys

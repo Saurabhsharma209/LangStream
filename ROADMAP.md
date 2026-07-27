@@ -365,6 +365,36 @@ audit results recorded rather than invented fixes. Sandbox's shared
 runs' documented workaround. Week 4 still cannot meaningfully start
 without Saurabh's decision.
 
+**2026-07-27 note (Sprint 16):** still genuinely blocked on Saurabh's
+anchor-customer/live-traffic decision (unchanged since Sprint 8; several
+days elapsed since the last scheduled run on 2026-07-23 -- no interactive
+work landed in between per DEVLOG.md). Repo health at start was clean on
+the first try (`go build`/`vet`/`gofmt`/`go test ./... -race -count=3`
+all green across all 12 packages) with ClearStream re-checked and still
+at `v0.1.0` (no `VERSIONING.md` action needed). Today closed a real,
+previously-total gap flagged in PM's own charter -- translation quality
+(WER/BLEU/CSAT) -- of which only the WER half existed: QA added a real
+BLEU-4 translation-quality proxy (`pkg/qa/bleu.go`,
+`pkg/qa/translation_corpus.go`, groundwork-against-fixed-corpus, same
+honesty convention as `wer.go`), grew the WER corpus 57->62 with 5 new
+non-overlapping error shapes, and ran a clean race-pattern audit (no
+flakes). SRE built a CI guard (`scripts/check-vendor-keys.sh`, wired into
+`.github/workflows/ci.yml` and `make ci`) so the exact vendor-key-drift
+bug class fixed in Sprint 15 can never silently reappear -- verified to
+correctly fail in both drift directions before being finalized -- and
+flagged (not fixed, outside SRE's ownership) that `docs/compliance.md`'s
+vendor table was missing Gemini/ElevenLabs, the same staleness pattern
+Sprint 15 found in `docker-compose.yml`. EM fixed `README.md`'s matching
+stale vendor list and added the Gemini/ElevenLabs rows to
+`docs/compliance.md` (same cautious "needs DPA/region confirmation"
+framing as the existing rows -- no new legal claims asserted, still
+pending legal sign-off per that document's own header). No bugs found or
+fixed this run (a first, in a while) -- today's gaps were all
+staleness/missing-coverage, not regressions. Sandbox's shared
+`$HOME`/`/sessions` disk was again at 100% full (0 bytes free) --
+same `/tmp`-based workaround as Sprints 13-15. Week 4 still cannot
+meaningfully start without Saurabh's decision.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

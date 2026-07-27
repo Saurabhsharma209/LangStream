@@ -38,6 +38,9 @@ jobs:
       - name: go test
         run: go test ./... -race
 
+      - name: Vendor API key sync check (main.go init() vs docker-compose.yml)
+        run: ./scripts/check-vendor-keys.sh
+
   docker-build:
     name: Docker build verification
     runs-on: ubuntu-latest

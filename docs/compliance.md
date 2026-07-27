@@ -3,7 +3,10 @@
 **Status:** Preliminary assessment for the pilot scope in `ROADMAP.md`. This
 is not legal advice — before any anchor customer (especially BFSI) goes
 live, this document needs sign-off from Exotel's legal/compliance team, not
-just engineering judgment. Owner: PM. Last updated: 2026-07-09 (Sprint 3).
+just engineering judgment. Owner: PM. Last updated: 2026-07-27 (Sprint 16) — added Gemini/ElevenLabs
+rows below to match the two real vendor backends added since this was
+last reviewed (2026-07-14, 2026-07-22); no change to the underlying legal
+analysis, still pending legal/compliance sign-off.
 
 ## 1. What data actually leaves India in the current pilot design
 
@@ -22,10 +25,12 @@ it's live rather than after.
 | Deepgram | English ASR | Raw caller/agent audio | US-headquartered; region selection depends on plan/contract. **Needs explicit region-pinning in the account/contract**, not assumed from the API alone. |
 | OpenAI GPT-4o | Hindi↔English translation | Transcript text (no raw audio) | US-hosted by default; OpenAI's enterprise/API terms have historically not guaranteed India-region processing for the standard API tier. This is the pilot's clearest residency risk today. |
 | Cartesia | TTS | Translated text, returns synthesized audio | US-based vendor; region guarantees not yet confirmed for this integration. |
+| Gemini | Hindi↔English translation (added 2026-07-22) | Transcript text (no raw audio) | Google-hosted; Google Cloud/Vertex AI offers region-pinning options in principle, but this pilot integration (`pkg/translate/gemini.go`) does not yet pin or contractually confirm a specific processing region — **needs the same DPA/region confirmation as the other vendors above before live BFSI traffic**, not assumed favorable just because regional options exist elsewhere in Google's product line. |
+| ElevenLabs | TTS (added 2026-07-14) | Translated text, returns synthesized audio | US-based vendor (per public documentation); region guarantees not yet confirmed for this integration, same open item as Cartesia above. |
 
-**Bottom line:** as currently scoped, the pilot's translation step (GPT-4o)
-and likely also ASR/TTS route call content through US-hosted
-infrastructure by default. Whether that's *permitted* depends on what kind
+**Bottom line:** as currently scoped, the pilot's translation step (GPT-4o,
+and now also Gemini) and likely also ASR/TTS route call content through
+US- or US-adjacent-hosted infrastructure by default. Whether that's *permitted* depends on what kind
 of data it is and who the anchor customer is — see below.
 
 ## 2. What DPDP (Digital Personal Data Protection Act, 2023) actually requires here

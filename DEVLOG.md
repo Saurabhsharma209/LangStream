@@ -1,5 +1,155 @@
 # LangStream Dev Log
 
+## 2026-07-27 (Sprint 16: BLEU translation-quality proxy, vendor-key CI guard, WER corpus growth, compliance-doc staleness fix) — scheduled run
+
+### Agents run
+QA and SRE in parallel. PE and Tech not spawned -- no PE-owned
+(`pkg/asr`/`pkg/translate`/`pkg/tts`) or Tech-owned
+(`pkg/langstream`/`pkg/rtp`/`pkg/webrtcgw`/`cmd/langstream`) gap was
+identified during planning; the recurring shutdown-ordering and
+frame-alignment audit classes have now each returned four/one clean
+negative results respectively (Sprints 12/14/15/15) with nothing new to
+re-check, so inventing a fifth repeat audit was judged lower-value than
+skipping those two workstreams today.
+
+### Repo health at start
+Clean on the first try: `go build ./...`, `go vet ./...`, `gofmt -l .`,
+and `go test ./... -race -count=3` (chunked by package) all passed for
+the entire repo (all 12 buildable packages) before any agent touched
+anything. ClearStream checked (`git ls-remote --tags`): still only
+`v0.1.0`, no `VERSIONING.md` action needed -- today's scope never touched
+`pkg/rtp`'s ClearStream import. Several days elapsed since the last
+scheduled run (2026-07-23) with no interactive session in between, per
+the absence of any entry between then and now in this file.
+
+### Sandbox note
+`$HOME` (`/sessions/...`) was again at 100% full, 0 bytes free, for this
+entire run -- same recurring pattern as most sprints since Sprint 9
+(Sprint 12 is still the only one that hit a hard wall). Worked around
+exactly as documented in Sprints 13-15: cloned into `/tmp/ls_run_20260727/LangStream`
+instead of `$HOME`, and pointed `GOTMPDIR`/`TMPDIR`/`GOCACHE`/`GOPATH` at
+`/tmp` paths too. Root filesystem held 500MB-1GB free throughout (tighter
+than most prior runs -- ran `go clean -cache` once mid-run to reclaim
+headroom before the fresh-clone verification pass); still fully workable.
+
+### Changes
+
+**QA -- BLEU translation-quality proxy (new capability,
+`pkg/qa/bleu.go`, `pkg/qa/translation_corpus.go`)**
+PM's own charter (`references/workstreams.md`) names "translation quality
+(WER/BLEU/CSAT proxy)" as one of two things that kill this product if
+ignored, but until today only the WER (ASR-accuracy) half of that existed
+-- zero translation-quality measurement of any kind. Added a real BLEU-4
+calculator (n-gram precision up to 4-gram, standard brevity penalty,
+effective-order reduction for short candidates, epsilon smoothing for a
+zero-match order so one missing higher-order match doesn't collapse the
+geometric mean), documented with the same "GROUNDWORK, NOT A LIVE
+MEASUREMENT" honesty convention `wer.go` established, plus a 6-entry
+fixed Hindi->English translation corpus (identical, one-word
+substitution, missing-clause deletion, unrelated candidate, a
+semantically-fine-but-lexically-different paraphrase documented as a
+known unfixed BLEU limitation, and a short-pair brevity-penalty case).
+Full test coverage in `pkg/qa/bleu_test.go` /
+`pkg/qa/translation_corpus_test.go` with hand-computed expected values
+for the identical/unrelated/short cases plus empty-input edge cases.
+
+**QA -- WER corpus growth (57 -> 62,`pkg/qa/corpus.go` +
+`pkg/qa/corpus_test.go` + `wer_measurement_test.go`)**
+Audited all 57 existing entries first to avoid retreading covered
+ground, then added 5 genuinely new, non-overlapping error shapes: three
+non-adjacent *insertions* (deletions/substitutions versions already
+existed), a same-format wrong-value digit misrecognition (vs. existing
+format-mismatch digit entries), a multi-word trailing hallucinated
+clause (vs. the existing single-word trailing repeat), a
+bookend deletion+insertion anchored at opposite ends of the utterance
+(vs. the existing mid-sentence-only version), and a pure-insertion
+WER==1.0 case (completing the set alongside the existing
+pure-substitution and pure-deletion WER==1.0 entries). Wired all 5 into
+the root `wer_measurement_test.go`'s fake-ASR-backed pipeline test,
+bumping its exact-count assertions accordingly.
+
+**QA -- race-pattern audit**
+`go test ./pkg/qa/... -race -count=10` and `go test . ./pkg/qa/...
+./pkg/asr/... -race -count=2` both clean, no flakes on the new code.
+
+**SRE -- CI guard against vendor-key drift (new,
+`scripts/check-vendor-keys.sh`, wired into `.github/workflows/ci.yml`
+and `Makefile`)**
+Sprint 15 found and fixed a real bug: `docker-compose.yml` silently
+dropped 2 of 6 vendor API keys `cmd/langstream/main.go`'s `init()`
+registers. Rather than trust that stays fixed by convention, built a
+script that parses the vendor constructors `main.go`'s `init()` actually
+calls, resolves each to the env var its `pkg/{asr,translate,tts}` file
+reads (correctly handling the non-obvious `gpt4o` ->`OPENAI_API_KEY`
+name mismatch), diffs that set against `docker-compose.yml`'s
+`environment:` block in both directions (a new vendor key missing from
+compose, or a stale key left in compose after a vendor's removed), and
+exits non-zero with an actionable message on any mismatch. Verified it
+actually catches both failure directions on scratch copies (not the real
+repo) before finalizing, then wired it into CI as a new step and into
+`make ci` per the Makefile's own "keep in sync with ci.yml" comment.
+Confirmed the real repo currently passes (all 6 keys present, matching
+Sprint 15's fix holding).
+
+**SRE -- staleness audit (docs/PRD.md, Makefile): clean; found one more
+instance, not own ownership, reported**
+`docs/PRD.md` doesn't exist in this repo (nothing to check); `Makefile`
+had no vendor list to go stale. Found the same staleness pattern Sprint
+15 caught in `docker-compose.yml`, this time in `docs/compliance.md`'s
+vendor table (4 vendors, missing Gemini/ElevenLabs) -- flagged rather
+than fixed, since `docs/` is outside SRE's file ownership (PM's, per that
+document's own header).
+
+**EM -- README.md vendor-list fix + docs/compliance.md Gemini/ElevenLabs
+rows**
+Fixed the exact staleness flagged in Sprint 15's own DEVLOG entry:
+`README.md` lines 49/65 still described only the original four vendors
+as if that were the full current list. Updated both spots and noted the
+two later additions explicitly. Separately, added Gemini/ElevenLabs rows
+to `docs/compliance.md`'s vendor table (per SRE's finding above), using
+the exact same cautious "hosting is X, but this pilot integration hasn't
+pinned/confirmed a specific processing region -- needs a DPA before live
+BFSI traffic" framing the existing four rows already use -- no new legal
+claims asserted, still explicitly pending legal/compliance sign-off per
+the document's own header, which was updated to note today's edit.
+
+### Bugs found/fixed
+None -- today closed real coverage/staleness gaps (BLEU proxy, WER
+growth, vendor-key CI guard, two stale-docs fixes) rather than finding or
+fixing a regression, a first in several sprints.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+- `go test ./... -race -count=3` -- all 12 buildable packages pass, run
+  in chunks (`.`/`pkg/qa`; `pkg/langstream`/`pkg/rtp`; `pkg/asr`/
+  `pkg/translate`; `pkg/tts`/`pkg/observability`/`pkg/webrtcgw`;
+  `cmd/langstream`/`examples/...`)
+- `scripts/check-vendor-keys.sh` / `make check-vendor-keys`: passes
+  against the real repo state
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- Real-condition jitter-buffer tuning against live PSTN traces -- still
+  needs live/pilot call traffic (Week 4). Unchanged.
+- Week 4 (live pilot, real WER/latency/CSAT, go/no-go) still cannot
+  start without Saurabh's decision on anchor customer(s) / live traffic.
+- `docs/compliance.md`'s new Gemini/ElevenLabs rows still need actual
+  legal/compliance sign-off, same as the original four -- flagged, not
+  resolved (EM/PM added the rows, not a DPA).
+- Docker-build verification, legal review of `docs/compliance.md` --
+  both unchanged, still need a human.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that's the top priority and supersedes everything below.
+2. No specific docs/staleness items remain flagged as of this entry
+   (README and compliance.md both addressed today; docs/PRD.md doesn't
+   exist; Makefile was clean).
+3. Absent higher-priority work: continue opportunistic hardening (WER/
+   BLEU corpus growth, race-pattern audits) -- still cheap, high-value,
+   doesn't block on anything.
+
+
 ## 2026-07-23 (Sprint 15: vendor-key wiring gap, webrtcgw frame-alignment audit, shutdown-ordering re-audit, WER corpus growth) — scheduled run
 
 ### Agents run

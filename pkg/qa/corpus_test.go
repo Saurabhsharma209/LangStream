@@ -148,6 +148,13 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // hallucination-from-true-silence case with an empty Reference) — see
 // FixedCorpus's doc comment for each entry's reasoning and hand-computed
 // WER.
+//
+// Sprint 2026-07-27 (QA): includes five further entries (three
+// non-adjacent insertions, a digit-value misrecognition within an
+// unchanged numeral, a trailing hallucinated multi-word clause, a
+// "bookend" leading-deletion-plus-trailing-insertion mix, and a
+// pure-insertion entry reaching WER == 1.0) — see FixedCorpus's doc
+// comment for each entry's reasoning and hand-computed WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -231,6 +238,14 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_three_nonadjacent_substitutions_payment_confirmation":   3.0 / 18.0,
 		"hinglish_contiguous_three_word_substitution_block_refund_status": 3.0 / 8.0,
 		"hinglish_hallucination_from_true_silence_empty_reference":        1.0,
+
+		// Sprint 2026-07-27 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_three_nonadjacent_insertions_appointment_confirmation":        3.0 / 9.0,
+		"hinglish_digit_value_misrecognition_account_number":                    1.0 / 6.0,
+		"hinglish_trailing_hallucinated_clause_insertion_call_closing":          4.0 / 7.0,
+		"hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing": 2.0 / 8.0,
+		"hinglish_insertion_only_wer_equals_one_order_confirmation":             4.0 / 4.0,
 	}
 
 	entries := FixedCorpus()

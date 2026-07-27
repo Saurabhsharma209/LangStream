@@ -303,7 +303,26 @@ func placeholderPCM() []byte {
 //
 //   - hinglish_contiguous_three_word_substitution_block_refund_status: WER 3/8   (3 substitutions / 8 words)
 //
-//   - hinglish_hallucination_from_true_silence_empty_reference:        WER 1.0   (empty reference, non-empty hypothesis)
+// Sprint 2026-07-27 (QA) adds five further entries covering error shapes
+// still not represented anywhere in this corpus: three non-adjacent
+// insertions (completing the "three non-adjacent" trio alongside the
+// existing three-non-adjacent-deletions and three-non-adjacent-
+// substitutions entries), a digit-value misrecognition within an
+// otherwise-unchanged numeral (distinct from this corpus's existing
+// digit-format mismatches), a trailing hallucinated multi-word clause
+// (distinct from the existing trailing single-word repeat), a "bookend"
+// leading-deletion-plus-trailing-insertion mix, and a pure-insertion
+// entry reaching WER == 1.0 exactly (completing the set of "WER lands on
+// exactly 1.0, for a different single reason" entries alongside the
+// existing pure-substitution and pure-deletion-via-empty-hypothesis
+// cases). See the in-body comment above these entries in FixedCorpus for
+// the full rationale behind each:
+//
+//   - hinglish_three_nonadjacent_insertions_appointment_confirmation:       WER 3/9  (3 insertions / 9 words)
+//   - hinglish_digit_value_misrecognition_account_number:                  WER 1/6  (1 substitution / 6 words)
+//   - hinglish_trailing_hallucinated_clause_insertion_call_closing:        WER 4/7  (4 insertions / 7 words)
+//   - hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing: WER 2/8 (1 deletion + 1 insertion / 8 words)
+//   - hinglish_insertion_only_wer_equals_one_order_confirmation:           WER 4/4  (4 insertions / 4 words, WER == 1.0)
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -1363,6 +1382,167 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "",
 			Hypothesis: "haan haan sir bilkul theek hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-07-27 (QA) additions below: five more entries
+		// covering error shapes still not represented anywhere in this
+		// corpus, found while auditing every existing entry's hand-verified
+		// error shape (per this file's own sprint-by-sprint doc-comment
+		// history) for gaps rather than re-treading an already-covered
+		// mechanic under a new name:
+		//
+		//   - three non-adjacent single-word insertions scattered across a
+		//     9-word appointment-confirmation sentence -- this corpus
+		//     already has "three non-adjacent" entries for deletions
+		//     (hinglish_three_nonadjacent_deletions_complaint_resolution)
+		//     and substitutions
+		//     (hinglish_three_nonadjacent_substitutions_payment_confirmation),
+		//     but never for insertions: every existing insertion entry in
+		//     this corpus has at most two insertion points
+		//     (hinglish_two_insertions_confirmation_repeat,
+		//     hinglish_long_utterance_two_insertions_delivery_confirmation).
+		//     This completes that trio at three, checking WER alignment
+		//     isolates three independent single-word insertions without
+		//     conflating any pair into a costlier multi-word edit;
+		//
+		//   - a digit-value misrecognition, where the fake ASR mishears one
+		//     digit *within* a multi-digit account number, producing a
+		//     same-length, same-format numeral with the wrong value
+		//     ("456789" -> "456780") -- distinct from every existing
+		//     digit-related entry in this corpus
+		//     (hinglish_number_word_vs_digit_substitution and
+		//     hinglish_currency_symbol_vs_words_bill_amount are both
+		//     *format* mismatches, word-vs-numeral representations of the
+		//     same value;
+		//     hinglish_digit_sequence_deletion_account_number and
+		//     hinglish_digit_duplication_insertion_registered_mobile_number
+		//     drop/duplicate a whole spoken-digit token rather than
+		//     mishearing a numeral's value): here the representation never
+		//     changes, only the numeral's value does, modeling a realistic
+		//     ASR digit-recognition slip on an account/phone number rather
+		//     than a translation or tokenization mismatch;
+		//
+		//   - a trailing hallucinated multi-word *clause* (not a single
+		//     repeated word) appended after an otherwise perfectly
+		//     transcribed call-closing sentence -- every existing
+		//     trailing-position insertion entry in this corpus
+		//     (hinglish_insertion_trailing_word_repeat_call_end) merely
+		//     duplicates the sentence's own last word; this entry's fake
+		//     ASR instead appends four brand-new words forming a whole
+		//     extra closing remark ("theek hai bye bye") that was never
+		//     part of the reference at all, modeling a real hallucinated
+		//     trailing clause rather than a stutter/repeat artifact;
+		//
+		//   - a "bookend" mixed edit: a leading deletion (the greeting word
+		//     "namaste" dropped from the very start) paired with an
+		//     unrelated trailing insertion (a closing "dhanyavaad" added at
+		//     the very end), with zero substitutions -- distinct from this
+		//     corpus's existing deletion+insertion entry
+		//     (hinglish_deletion_and_insertion_no_substitution_order_confirmation),
+		//     whose deletion and insertion both sit in the interior of the
+		//     sentence: here the two edits are anchored at opposite extremes
+		//     (leading vs. trailing) rather than both mid-sentence, the same
+		//     leading/trailing distinction this corpus already treats as
+		//     meaningfully different for single-type deletion and insertion
+		//     entries individually;
+		//
+		//   - a pure-insertion entry reaching WER == 1.0 exactly (four
+		//     hallucinated words scattered around a four-word reference,
+		//     I == N, S == D == 0) -- this corpus already has WER == 1.0
+		//     reached via pure substitution
+		//     (hinglish_total_substitution_failure_balance_request, S == N)
+		//     and via pure deletion through an empty hypothesis
+		//     (hinglish_total_deletion_empty_hypothesis_silence_timeout,
+		//     D == N), but never via pure insertion with a normal,
+		//     non-empty hypothesis; this completes that three-way set of
+		//     "WER lands on exactly 1.0, but for a different single reason"
+		//     entries.
+		{
+			// Three separate, non-adjacent single-word insertions
+			// ("haan", "theek", "bilkul") scattered across a 9-word
+			// appointment-confirmation sentence -- the insertion-side
+			// counterpart to
+			// hinglish_three_nonadjacent_deletions_complaint_resolution and
+			// hinglish_three_nonadjacent_substitutions_payment_confirmation,
+			// neither of which involves any insertion at all. Every existing
+			// insertion entry in this corpus tops out at two independent
+			// insertion points; this checks WER alignment isolates three.
+			Name:       "hinglish_three_nonadjacent_insertions_appointment_confirmation",
+			Language:   "hi",
+			Reference:  "sir aapka appointment confirm ho gaya hai kal subah",
+			Hypothesis: "sir haan aapka appointment confirm ho theek gaya hai bilkul kal subah",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The fake ASR mishears a single digit inside an otherwise
+			// correctly transcribed six-digit account number ("456789" ->
+			// "456780") -- a same-length, same-format numeral with the wrong
+			// value, distinct from this corpus's existing digit entries,
+			// which are all *format* mismatches (word-vs-numeral
+			// representations of an unchanged value) or whole-token
+			// insertions/deletions of a spoken digit, never a value error
+			// within an unchanged numeral token. Since WordErrorRate
+			// tokenizes on whitespace, the entire numeral is one token, so
+			// this costs exactly one substitution regardless of how many
+			// digits inside it differ.
+			Name:       "hinglish_digit_value_misrecognition_account_number",
+			Language:   "hi",
+			Reference:  "sir aapka account number 456789 hai",
+			Hypothesis: "sir aapka account number 456780 hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The fake ASR appends a whole brand-new four-word closing
+			// remark ("theek hai bye bye") after an otherwise perfectly
+			// transcribed call-closing sentence -- a hallucinated trailing
+			// *clause*, not a duplicated word. Distinct from
+			// hinglish_insertion_trailing_word_repeat_call_end, whose
+			// trailing insertion is a repeat of the sentence's own last
+			// word: none of these four appended words repeat anything
+			// already in the reference.
+			Name:       "hinglish_trailing_hallucinated_clause_insertion_call_closing",
+			Language:   "hi",
+			Reference:  "sir aapka call complete ho gaya hai",
+			Hypothesis: "sir aapka call complete ho gaya hai theek hai bye bye",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A "bookend" mixed edit: the fake ASR drops the leading
+			// greeting word "namaste" entirely (a deletion at the very
+			// start) and separately adds an unrelated trailing "dhanyavaad"
+			// (an insertion at the very end), with zero substitutions.
+			// Distinct from
+			// hinglish_deletion_and_insertion_no_substitution_order_confirmation,
+			// whose deletion and insertion both sit mid-sentence: here the
+			// two edits are anchored at opposite extremes of the utterance.
+			Name:       "hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing",
+			Language:   "hi",
+			Reference:  "namaste sir aapka order confirm ho gaya hai",
+			Hypothesis: "sir aapka order confirm ho gaya hai dhanyavaad",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// Four independent hallucinated words ("haan", "theek", "na",
+			// "bilkul") scattered around an otherwise fully intact four-word
+			// reference -- a pure-insertion entry (I == 4, S == D == 0)
+			// whose edit distance exactly equals the reference length,
+			// giving WER == 1.0. Distinct from
+			// hinglish_total_substitution_failure_balance_request (WER ==
+			// 1.0 via S == N) and
+			// hinglish_total_deletion_empty_hypothesis_silence_timeout (WER
+			// == 1.0 via D == N through an empty hypothesis): this is the
+			// first entry reaching WER == 1.0 purely through insertions
+			// against a normal, non-empty hypothesis.
+			Name:       "hinglish_insertion_only_wer_equals_one_order_confirmation",
+			Language:   "hi",
+			Reference:  "sir order confirm hai",
+			Hypothesis: "haan sir order theek confirm na hai bilkul",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},
