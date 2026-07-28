@@ -323,6 +323,67 @@ func placeholderPCM() []byte {
 //   - hinglish_trailing_hallucinated_clause_insertion_call_closing:        WER 4/7  (4 insertions / 7 words)
 //   - hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing: WER 2/8 (1 deletion + 1 insertion / 8 words)
 //   - hinglish_insertion_only_wer_equals_one_order_confirmation:           WER 4/4  (4 insertions / 4 words, WER == 1.0)
+//
+// Sprint 2026-07-28 (QA) adds five further entries covering error shapes
+// still not represented anywhere in this corpus, found while auditing
+// every existing entry (per this file's own sprint-by-sprint doc-comment
+// history) for gaps rather than retreading an already-covered mechanic
+// under a new name:
+//
+//   - a combined two-deletions-plus-two-insertions entry with zero
+//     substitutions -- extending the existing "one deletion + one
+//     insertion, no substitution" shapes
+//     (hinglish_deletion_and_insertion_no_substitution_order_confirmation,
+//     hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing)
+//     from one of each to two of each, the same "complete the set at a
+//     higher count" precedent this corpus already applied separately to
+//     insertions (one -> two -> three) and deletions (one -> two ->
+//     three);
+//
+//   - a long (21-word) utterance isolating exactly one substitution and
+//     nothing else -- this corpus already has a long entry isolating
+//     exactly one *deletion*
+//     (hinglish_long_utterance_single_deletion_callback, 25 words) but
+//     never a long entry isolating a single substitution alone (every
+//     existing long substitution entry pairs it with a second error or
+//     a second substitution);
+//
+//   - a WER > 1.0 entry driven by a *mix* of one substitution and four
+//     insertions (edit distance 5 against a 4-word reference, WER =
+//     5/4) -- distinct from the corpus's only other WER > 1.0 entry,
+//     hinglish_severe_hallucination_wer_exceeds_one_listen_request,
+//     whose edit distance is driven purely by insertions (I == 5, S ==
+//     0) against a 3-word reference (WER = 5/3); this checks the
+//     over-1.0 case still holds when a real substitution, not just
+//     hallucinated padding, contributes to the distance;
+//
+//   - a reference-side repeated word ("haan haan") where the fake ASR
+//     mishears the *second* occurrence as a different word rather than
+//     dropping it -- the substitution-side counterpart to
+//     hinglish_reference_repeated_word_collapsed_dhanyavaad (which
+//     collapses/deletes the repeated word instead); both entries share
+//     the same "two adjacent identical reference tokens" alignment edge
+//     case, but this one costs a substitution instead of a deletion;
+//
+//   - a long-distance (non-adjacent) two-word swap, where the fake ASR
+//     reports the utterance's first and last words transposed with
+//     several unchanged words in between -- distinct from
+//     hinglish_adjacent_word_transposition_balance_check, whose swapped
+//     pair is immediately adjacent; this confirms WordErrorRate's
+//     alignment still costs exactly two substitutions (not some cheaper
+//     delete/insert combination) once the swapped words are separated
+//     by intervening correctly-matched words rather than sitting next
+//     to each other.
+//
+//   - hinglish_two_deletions_two_insertions_no_substitution_address_update: WER 4/9   (2 deletions + 2 insertions / 9 words)
+//
+//   - hinglish_long_utterance_single_substitution_call_timing_confirmation: WER 1/21  (1 substitution / 21 words)
+//
+//   - hinglish_wer_exceeds_one_mixed_substitution_and_insertions_balance_query: WER 5/4 (1 substitution + 4 insertions / 4 words, WER > 1.0)
+//
+//   - hinglish_reference_repeated_word_substituted_haan_haan:              WER 1/9   (1 substitution / 9 words)
+//
+//   - hinglish_long_distance_word_swap_account_status_request:             WER 2/6   (2 substitutions / 6 words)
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -1543,6 +1604,106 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir order confirm hai",
 			Hypothesis: "haan sir order theek confirm na hai bilkul",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-07-28 (QA) additions below: five more entries
+		// covering error shapes still not represented anywhere in this
+		// corpus. See the doc comment above FixedCorpus for the full
+		// rationale behind each.
+		{
+			// Two non-adjacent deletions ("naya", "par") plus two
+			// bookend insertions ("haan" leading, "bilkul" trailing),
+			// with zero substitutions -- extends the existing "one
+			// deletion + one insertion, no substitution" shapes
+			// (hinglish_deletion_and_insertion_no_substitution_order_confirmation,
+			// hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing)
+			// to two of each. Reference: "sir mera naya address ghar par
+			// update karna hai" (9 words). Hypothesis drops "naya" and
+			// "par" and adds "haan"/"bilkul" at the very start/end, so
+			// none of the deletions and insertions sit adjacent to each
+			// other in a way that could collapse into a cheaper
+			// substitution -- the minimal edit distance is exactly 4
+			// (2 deletions + 2 insertions).
+			Name:       "hinglish_two_deletions_two_insertions_no_substitution_address_update",
+			Language:   "hi",
+			Reference:  "sir mera naya address ghar par update karna hai",
+			Hypothesis: "haan sir mera address ghar update karna hai bilkul",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A single mid-sentence substitution ("phone" -> "mobile")
+			// isolated inside an otherwise perfectly transcribed 21-word
+			// utterance -- the substitution-side counterpart to
+			// hinglish_long_utterance_single_deletion_callback (a long
+			// utterance isolating exactly one deletion). Every existing
+			// long-utterance substitution entry in this corpus pairs it
+			// with a second error or a second substitution; this checks
+			// WordErrorRate correctly reports a proportionally tiny WER
+			// (1/21) for a single-word slip at long-utterance scale.
+			Name:       "hinglish_long_utterance_single_substitution_call_timing_confirmation",
+			Language:   "hi",
+			Reference:  "sir maine aapko subah dus baje call kiya tha lekin aapne phone nahi uthaya isliye main dobara try kar raha hoon",
+			Hypothesis: "sir maine aapko subah dus baje call kiya tha lekin aapne mobile nahi uthaya isliye main dobara try kar raha hoon",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// Demonstrates WER > 1.0 driven by a *mix* of error types --
+			// one real substitution ("balance" -> "shesh") plus four
+			// hallucinated insertions ("haan", "theek", "na", "bilkul")
+			// against a 4-word reference, giving edit distance 5 and WER
+			// = 5/4. Distinct from this corpus's only other WER > 1.0
+			// entry,
+			// hinglish_severe_hallucination_wer_exceeds_one_listen_request,
+			// whose distance is driven purely by insertions (I == 5, S
+			// == 0); here a genuine substitution error contributes to
+			// pushing the distance past the reference length, not just
+			// hallucinated padding around an intact reference
+			// subsequence.
+			Name:       "hinglish_wer_exceeds_one_mixed_substitution_and_insertions_balance_query",
+			Language:   "hi",
+			Reference:  "sir account balance hai",
+			Hypothesis: "haan sir account shesh hai theek na bilkul",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The reference genuinely repeats "haan" back to back ("haan
+			// haan sir aapka order confirm ho gaya hai" -- a real
+			// speaker emphatically saying "yes yes"), and the fake ASR
+			// mishears the *second* occurrence as "theek" instead of
+			// dropping it -- the substitution-side counterpart to
+			// hinglish_reference_repeated_word_collapsed_dhanyavaad,
+			// which collapses/deletes its repeated reference word
+			// instead of mishearing it as something else. Both entries
+			// share the same "two adjacent identical reference tokens"
+			// alignment edge case; this one costs exactly one
+			// substitution rather than one deletion.
+			Name:       "hinglish_reference_repeated_word_substituted_haan_haan",
+			Language:   "hi",
+			Reference:  "haan haan sir aapka order confirm ho gaya hai",
+			Hypothesis: "haan theek sir aapka order confirm ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The fake ASR reports the utterance's first and last words
+			// ("pehle" and "sir") transposed, with four unchanged words
+			// in between -- distinct from
+			// hinglish_adjacent_word_transposition_balance_check, whose
+			// swapped pair sits immediately next to each other.
+			// WordErrorRate's standard Levenshtein alignment still costs
+			// exactly two substitutions here (not some cheaper
+			// delete/insert combination), confirming the intervening
+			// correctly-matched words don't change the alignment's
+			// verdict on the two out-of-place tokens.
+			Name:       "hinglish_long_distance_word_swap_account_status_request",
+			Language:   "hi",
+			Reference:  "pehle mera account status batao sir",
+			Hypothesis: "sir mera account status batao pehle",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

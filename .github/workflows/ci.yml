@@ -41,6 +41,9 @@ jobs:
       - name: Vendor API key sync check (main.go init() vs docker-compose.yml)
         run: ./scripts/check-vendor-keys.sh
 
+      - name: Vendor API key guard regression test (check-vendor-keys.sh itself)
+        run: ./scripts/check-vendor-keys_test.sh
+
   docker-build:
     name: Docker build verification
     runs-on: ubuntu-latest

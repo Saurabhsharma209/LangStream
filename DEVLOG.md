@@ -1,5 +1,146 @@
 # LangStream Dev Log
 
+## 2026-07-28 (Sprint 17: BLEU/WER corpus growth, vendor-key-guard regression test, workstreams.md ownership hygiene) — scheduled run
+
+### Agents run
+QA and SRE in parallel. PE and Tech not spawned -- same reasoning as
+Sprint 16: no PE-owned (`pkg/asr`/`pkg/translate`/`pkg/tts`) or Tech-owned
+(`pkg/langstream`/`pkg/rtp`/`pkg/webrtcgw`/`cmd/langstream`) gap was
+identified during planning, and the recurring shutdown-ordering /
+frame-alignment audit classes have nothing new to re-check since Sprint 15.
+
+### Repo health at start
+Clean on the first try: `go build ./...`, `go vet ./...`, `gofmt -l .` all
+passed before any agent touched anything. `go test ./... -race` (run
+package-by-package, see Sandbox note) passed for all 12 buildable packages
+except `cmd/langstream`'s `TestServeCommand_RealBinary_EndToEnd`, which
+failed purely at the link stage with "no space left on device" -- confirmed
+NOT a code regression by re-running the same package without `-race`
+(passes cleanly, 1.6s). ClearStream re-checked (`git ls-remote --tags`):
+still only `v0.1.0`, no `VERSIONING.md` action needed.
+
+### Sandbox note
+`$HOME`/`/sessions` was completely full (0 bytes free, the mount itself at
+100%) for this entire run, tighter than most prior sprints -- worked
+around by cloning into `/tmp/mywork/LangStream` instead of `$HOME` and
+pointing `GOPATH`/`GOCACHE`/`GOTMPDIR`/`TMPDIR` at `/tmp` paths too, per
+the pattern documented in Sprints 13-16. Root filesystem itself was also
+under real pressure this run (as low as ~130-220MB free at times, versus
+Sprint 16's 500MB-1GB) because ~2GB of orphaned files from earlier runs
+(`/tmp/lswork`, `/tmp/ls_run_20260727`, old `gocache`/`gopath` dirs, etc.)
+are owned by a different sandbox user this run and could not be deleted.
+Reused the pre-existing `/tmp/gotools` Go 1.22.5 toolchain directly rather
+than extracting a second copy, and ran `go clean -cache` several times
+through the run (each reclaiming 150-300MB) to stay workable. Tests were
+run per-package rather than as a single `go test ./...` invocation, both
+to fit each shell command's execution-time budget and to bound each
+compile's disk footprint. `cmd/langstream`'s `-race` real-binary-link test
+is the one place this pressure caused a real (infra, not code) failure --
+see above and Blocked, below.
+
+### Changes
+
+**QA -- BLEU translation corpus growth (6 -> 12 entries,
+`pkg/qa/translation_corpus.go` + `translation_corpus_test.go`)**
+Audited all 6 existing entries first, then added 6 genuinely new,
+non-overlapping shapes with hand-computed expected BLEU scores verified
+against a scratch calculator mirroring `bleu.go`'s algorithm: full
+word-reordering (same bag of words, BLEU still penalizes via n-gram
+order), a first-half-exact-match/second-half-diverges partial-overlap
+case, a hallucinated added clause (the mirror image of the existing
+deletion case), a mid-sentence named-entity substitution (contrasts with
+the existing end-of-sentence currency-mismatch case), a case-only
+difference (documents BLEU's case-sensitivity at corpus granularity), and
+a degenerate 8x-repeated-word candidate (demonstrates n-gram clipping at
+corpus, not just unit-test, granularity). `TestFixedTranslationCorpus_
+EntriesAreWellFormed`'s minimum-count bumped 6->12.
+
+**QA -- WER corpus growth (62 -> 67 entries, `pkg/qa/corpus.go` +
+`corpus_test.go` + `wer_measurement_test.go`)**
+Audited all 62 existing entries plus Sprint 14-16 DEVLOG history for
+covered shapes before adding, then added 5 new non-overlapping cases: a
+two-deletion-two-insertion mix (extends the existing "one of each" case
+to two), a single substitution isolated inside a 21-word utterance, a
+WER>1.0 case via mixed substitution+insertion (vs. the existing
+pure-insertion WER>1.0 case), a repeated reference word substituted
+without being collapsed (counterpart to an existing collapsed-via-deletion
+case), and a non-adjacent first/last-word swap (vs. the existing adjacent
+swap). All 5 wired into `wer_measurement_test.go`'s fake-ASR-backed
+pipeline test with updated exact-count assertions (66 wired entries, one
+corpus entry intentionally excluded from pipeline wiring as before).
+
+**QA -- race-pattern audit**
+`go test ./pkg/qa/... -race -count=5` and `-count=10`, plus
+`go test . -race -count=2` (root package, where the WER pipeline
+integration test lives) -- all clean, no flakes on the new or existing
+code.
+
+**SRE -- regression test for the vendor-key CI guard (new,
+`scripts/check-vendor-keys_test.sh`, wired into `Makefile` and
+`.github/workflows/ci.yml`)**
+Sprint 16's `scripts/check-vendor-keys.sh` was verified manually against
+scratch fixtures before being finalized, but had no automated regression
+test of its own -- meaning a future edit to its grep/awk parsing logic
+could silently break detection with nothing to catch it. Added a bash
+test script that builds three fixture cases (in-sync, key-missing-from-
+compose, stale-key-left-in-compose) fresh in a `mktemp -d` tempdir per
+run, copies the real `check-vendor-keys.sh` into each fixture's own
+`scripts/` subdirectory (so `REPO_ROOT` self-detection still works
+unmodified) and runs it there, asserting the correct exit code and
+message for each case. Proved the harness isn't trivially passing by
+temporarily neutering the stale-key-detection branch in the real script,
+confirming the test then correctly failed, and restoring the original
+(byte-identical via `diff`) before finishing. `check-vendor-keys.sh`
+itself was not modified. Wired as `make test-vendor-key-guard` (added to
+`make ci`) and a new CI step alongside the existing vendor-key-sync check.
+
+**EM -- `references/workstreams.md` ownership hygiene**
+Added `scripts/*.sh` to SRE's ownership line (SRE created
+`check-vendor-keys.sh` on 2026-07-27 and its regression test today) and
+`pkg/qa/*.go` non-test files to QA's ownership line (QA created and has
+owned `wer.go`/`bleu.go`/`corpus.go`/`translation_corpus.go` since Sprints
+prior to today but the doc never said so explicitly) -- same
+extend-the-charter-to-what-you-built pattern already used for
+`pkg/webrtcgw` on 2026-07-14.
+
+### Bugs found/fixed
+None in either agent's own code. No cross-workstream bugs surfaced during
+integration. The one test failure this run (`cmd/langstream`'s
+`TestServeCommand_RealBinary_EndToEnd` under `-race`) is a reproduced,
+already-documented sandbox disk-space limitation, not a regression --
+confirmed by the same package passing cleanly without `-race`.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+- `go test ./... -race -count=3`, run package-by-package: all packages
+  pass except `cmd/langstream`'s real-binary-link test (disk-space-
+  limited, see above); `go test ./cmd/langstream/... -count=3` (no
+  `-race`) passes cleanly, confirming no code regression
+- Fresh-clone-from-GitHub rebuild performed after push (see below)
+
+### Blocked
+- `cmd/langstream`'s `TestServeCommand_RealBinary_EndToEnd` cannot be
+  verified under `-race` in this sandbox today due to root-filesystem
+  space during binary linking (confirmed infra, not code -- passes
+  without `-race`). Worth revisiting if a future run has more headroom
+  (Sprint 16 had 500MB-1GB free at times; today's run saw as little as
+  ~130MB).
+- Real-condition jitter-buffer tuning against live PSTN traces -- still
+  needs live/pilot call traffic (Week 4). Unchanged.
+- Week 4 (live pilot, real WER/latency/CSAT, go/no-go) still cannot start
+  without Saurabh's decision on anchor customer(s) / live traffic.
+- Docker-build verification, legal review of `docs/compliance.md` --
+  both unchanged, still need a human.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that's the top priority and supersedes everything below.
+2. Retry `cmd/langstream`'s `-race` real-binary test if a future run has
+   more disk headroom, to fully close today's one verification gap.
+3. Absent higher-priority work: continue opportunistic hardening (WER/
+   BLEU corpus growth, race-pattern audits) -- still cheap, high-value,
+   doesn't block on anything.
+
 ## 2026-07-27 (Sprint 16: BLEU translation-quality proxy, vendor-key CI guard, WER corpus growth, compliance-doc staleness fix) — scheduled run
 
 ### Agents run

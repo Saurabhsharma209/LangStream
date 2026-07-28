@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet docker docker-run serve ci check-vendor-keys
+.PHONY: build test fmt fmt-check vet docker docker-run serve ci check-vendor-keys test-vendor-key-guard
 
 BINARY := langstream
 CMD_PATH := ./cmd/langstream
@@ -48,8 +48,20 @@ docker-run:
 check-vendor-keys:
 	./scripts/check-vendor-keys.sh
 
+# Regression test for check-vendor-keys.sh itself (Sprint 17, 2026-07-28):
+# that guard was hand-verified once against scratch fixtures and then
+# never pinned, so a future edit to its grep/awk parsing could silently
+# break either drift-detection direction with nobody noticing until a
+# real vendor-key bug slipped through again. This builds throwaway
+# fixture repos in a mktemp -d tempdir and asserts check-vendor-keys.sh's
+# exit code for the in-sync case and both drift directions
+# (missing-from-compose, stale-in-compose) it exists to catch. See
+# scripts/check-vendor-keys_test.sh's own header comment for details.
+test-vendor-key-guard:
+	./scripts/check-vendor-keys_test.sh
+
 # What CI runs. Keep this in sync with .github/workflows/ci.yml so
 # `make ci` is a reliable local pre-push check. (CI's docker-build job is
 # informational/parallel, not part of the local pre-push gate here - run
 # `make docker` separately if you want to sanity-check the image too.)
-ci: fmt-check vet test build check-vendor-keys
+ci: fmt-check vet test build check-vendor-keys test-vendor-key-guard

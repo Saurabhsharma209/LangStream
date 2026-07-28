@@ -395,6 +395,29 @@ staleness/missing-coverage, not regressions. Sandbox's shared
 same `/tmp`-based workaround as Sprints 13-15. Week 4 still cannot
 meaningfully start without Saurabh's decision.
 
+**2026-07-28 note (Sprint 17):** still genuinely blocked on Saurabh's
+anchor-customer/live-traffic decision (unchanged since Sprint 8). Repo
+health at start was clean (`go build`/`vet`/`gofmt` all green; ClearStream
+re-checked, still `v0.1.0`, no `VERSIONING.md` action needed). Today again
+did opportunistic hardening (QA + SRE only, same reasoning as Sprint 16
+for skipping PE/Tech): QA grew the BLEU translation corpus 6->12 and the
+WER corpus 62->67 with genuinely new non-overlapping error shapes, plus a
+clean race-pattern audit; SRE added an automated regression test for
+Sprint 16's vendor-key CI guard script (previously only manually
+verified), proven to actually catch both failure directions by
+deliberately re-breaking and re-fixing the script. EM tidied
+`references/workstreams.md`'s ownership lines (`scripts/*.sh` for SRE,
+`pkg/qa/*.go` non-test files for QA) to match what those workstreams
+already own in practice. No bugs found or fixed. Sandbox disk was tighter
+than usual this run (root filesystem as low as ~130MB free at times,
+`$HOME`/`/sessions` fully exhausted) -- worked around per the established
+`/tmp`-based pattern, but this did cause one real (infra, not code)
+verification gap: `cmd/langstream`'s `TestServeCommand_RealBinary_
+EndToEnd` couldn't be verified under `-race` (link-stage disk exhaustion)
+though it passes cleanly without `-race`, confirming no regression -- see
+DEVLOG.md for detail and a "retry when disk allows" follow-up. Week 4
+still cannot meaningfully start without Saurabh's decision.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

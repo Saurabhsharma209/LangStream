@@ -43,7 +43,10 @@ example, plus `pkg/webrtcgw` (added 2026-07-14, interactive session): a real, tw
 
 ## SRE — Infra / Observability
 **Owns:** `Dockerfile`, `docker-compose.yml`, `Makefile`,
-`.github/workflows/*.yml`, `pkg/observability/*.go`
+`.github/workflows/*.yml`, `pkg/observability/*.go`, `scripts/*.sh` (added
+2026-07-28: SRE created `scripts/check-vendor-keys.sh` on 2026-07-27 and
+its regression test `scripts/check-vendor-keys_test.sh` on 2026-07-28, same
+extend-the-charter-to-what-you-built pattern as `pkg/webrtcgw` above)
 **Charter:** Instrument glass-to-glass latency per stage (ASR first-chunk,
 MT, TTS first-chunk, total) as Prometheus metrics from day one — latency is
 the number that decides whether this product is viable, so it cannot be an
@@ -51,7 +54,9 @@ afterthought. Own CI (build+test on every push), containerization, and
 later, cost-per-minute tracking per vendor.
 
 ## QA — Testing / Accuracy
-**Owns:** `*_test.go` across all packages, `tools/latency_benchmark/*.go`
+**Owns:** `*_test.go` across all packages, `tools/latency_benchmark/*.go`,
+`pkg/qa/*.go` (non-test files too, e.g. `wer.go`/`bleu.go`/`corpus.go`/
+`translation_corpus.go` — QA created and owns the whole package)
 **Charter:** Every new interface implementation ships with a test the same
 day. Build the latency benchmark harness early so PE/Tech changes get
 measured, not guessed at. Own the eventual per-language-pair accuracy

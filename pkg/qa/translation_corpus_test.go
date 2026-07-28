@@ -2,6 +2,7 @@ package qa
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -12,8 +13,8 @@ import (
 // Source/Reference/Candidate text, and names must be unique.
 func TestFixedTranslationCorpus_EntriesAreWellFormed(t *testing.T) {
 	entries := FixedTranslationCorpus()
-	if len(entries) < 6 {
-		t.Fatalf("FixedTranslationCorpus() returned %d entries, want at least 6", len(entries))
+	if len(entries) < 12 {
+		t.Fatalf("FixedTranslationCorpus() returned %d entries, want at least 12", len(entries))
 	}
 
 	seen := make(map[string]bool, len(entries))
@@ -107,6 +108,79 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	// one token): p1 = 1/1 = 1.0. BP = exp(1 - 2/1) = exp(-1).
 	wantShortPair := math.Exp(1.0 - 2.0/1.0)
 
+	// word_reordering_full_reversal_delivery_schedule: 7-word Reference
+	// and Candidate share the identical bag of words, fully reversed.
+	// Every unigram matches (p1 = 7/7 = 1.0), but zero bigrams/trigrams/
+	// 4-grams survive the reversal, so p2/p3/p4 are all epsilon-smoothed
+	// against the candidate's respective n-gram totals (6, 5, 4). BP =
+	// 1.0 (equal length, 7 == 7).
+	reorderP1 := 7.0 / 7.0
+	reorderP2 := 0.1 / 6.0
+	reorderP3 := 0.1 / 5.0
+	reorderP4 := 0.1 / 4.0
+	wantReordering := math.Exp((math.Log(reorderP1) + math.Log(reorderP2) + math.Log(reorderP3) + math.Log(reorderP4)) / 4.0)
+
+	// partial_overlap_first_half_matches_delivery_estimate: 8-word
+	// Reference and Candidate share an exact 5-word prefix and diverge
+	// completely for the trailing 3 words. p1 = 5/8, p2 = 4/7, p3 = 3/6,
+	// p4 = 2/5. BP = 1.0 (equal length, 8 == 8).
+	partialP1 := 5.0 / 8.0
+	partialP2 := 4.0 / 7.0
+	partialP3 := 3.0 / 6.0
+	partialP4 := 2.0 / 5.0
+	wantPartialOverlap := math.Exp((math.Log(partialP1) + math.Log(partialP2) + math.Log(partialP3) + math.Log(partialP4)) / 4.0)
+
+	// hallucinated_added_clause_complaint_registered: 5-word Reference,
+	// 10-word Candidate (the Reference plus a wholly invented 6-word
+	// trailing clause). BP = 1.0 (candidate longer, 10 > 5) -- the
+	// opposite of missing_clause_deletion_within_48_hours, whose
+	// shortfall is entirely brevity-penalty-driven. Here every precision
+	// itself is diluted by the hallucinated words: p1 = 5/10, p2 = 4/9,
+	// p3 = 3/8, p4 = 2/7.
+	hallucinatedP1 := 5.0 / 10.0
+	hallucinatedP2 := 4.0 / 9.0
+	hallucinatedP3 := 3.0 / 8.0
+	hallucinatedP4 := 2.0 / 7.0
+	wantHallucinatedClause := math.Exp((math.Log(hallucinatedP1) + math.Log(hallucinatedP2) + math.Log(hallucinatedP3) + math.Log(hallucinatedP4)) / 4.0)
+
+	// named_entity_mismatch_relationship_manager_name: 11-word Reference
+	// and Candidate differing only in one mid-sentence proper noun
+	// (word 4 of 11: "rahul" vs "suresh"). Unlike
+	// one_word_substitution_currency_mismatch's last-word mismatch (which
+	// only ever breaks one n-gram per order), a mid-sentence mismatch
+	// breaks every n-gram overlapping that position: p1 = 10/11, p2 =
+	// 8/10, p3 = 6/9, p4 = 4/8. BP = 1.0 (equal length, 11 == 11).
+	namedEntityP1 := 10.0 / 11.0
+	namedEntityP2 := 8.0 / 10.0
+	namedEntityP3 := 6.0 / 9.0
+	namedEntityP4 := 4.0 / 8.0
+	wantNamedEntityMismatch := math.Exp((math.Log(namedEntityP1) + math.Log(namedEntityP2) + math.Log(namedEntityP3) + math.Log(namedEntityP4)) / 4.0)
+
+	// case_only_difference_payment_capitalization: 8-word Reference and
+	// Candidate identical except one word's capitalization ("payment" vs
+	// "Payment"). BLEUScore performs no case-folding, so this counts as a
+	// full token mismatch at every order it touches: p1 = 7/8, p2 = 5/7,
+	// p3 = 4/6, p4 = 3/5. BP = 1.0 (equal length, 8 == 8).
+	caseOnlyP1 := 7.0 / 8.0
+	caseOnlyP2 := 5.0 / 7.0
+	caseOnlyP3 := 4.0 / 6.0
+	caseOnlyP4 := 3.0 / 5.0
+	wantCaseOnlyDifference := math.Exp((math.Log(caseOnlyP1) + math.Log(caseOnlyP2) + math.Log(caseOnlyP3) + math.Log(caseOnlyP4)) / 4.0)
+
+	// over_repeated_word_clipping_billing_transfer: 8-word Reference
+	// containing "the" exactly twice, 8-word Candidate that is just "the"
+	// repeated eight times. Clipping caps unigram matches at the
+	// reference's own count of "the" (2), not the candidate's raw repeat
+	// count (8): p1 = 2/8. No repeated-"the" bigram/trigram/4-gram exists
+	// in the reference, so p2/p3/p4 are all epsilon-smoothed against the
+	// candidate's n-gram totals (7, 6, 5). BP = 1.0 (equal length, 8 ==
+	// 8).
+	clippingP1 := 2.0 / 8.0
+	clippingP2 := 0.1 / 7.0
+	clippingP3 := 0.1 / 6.0
+	clippingP4 := 0.1 / 5.0
+	wantOverRepeatedClipping := math.Exp((math.Log(clippingP1) + math.Log(clippingP2) + math.Log(clippingP3) + math.Log(clippingP4)) / 4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -114,6 +188,15 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"completely_unrelated_candidate":                   wantUnrelated,
 		"paraphrase_semantically_fine_lexically_different": wantParaphrase,
 		"very_short_pair_yes_sir":                          wantShortPair,
+
+		// Sprint 2026-07-28 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"word_reordering_full_reversal_delivery_schedule":      wantReordering,
+		"partial_overlap_first_half_matches_delivery_estimate": wantPartialOverlap,
+		"hallucinated_added_clause_complaint_registered":       wantHallucinatedClause,
+		"named_entity_mismatch_relationship_manager_name":      wantNamedEntityMismatch,
+		"case_only_difference_payment_capitalization":          wantCaseOnlyDifference,
+		"over_repeated_word_clipping_billing_transfer":         wantOverRepeatedClipping,
 	}
 
 	entries := FixedTranslationCorpus()
@@ -196,4 +279,86 @@ func TestFixedTranslationCorpus_QualitativeExpectations(t *testing.T) {
 	if !bleuApproxEqual(shortPairBLEU, wantShortPairBLEU) {
 		t.Errorf("very_short_pair_yes_sir: BLEUScore = %v, want %v", shortPairBLEU, wantShortPairBLEU)
 	}
+
+	// word_reordering_full_reversal_delivery_schedule must show perfect
+	// unigram precision (the vocabulary is identical) despite scoring
+	// nearly as low as the completely-unrelated entry overall, since a
+	// full reversal shares zero higher-order n-grams with the reference.
+	reordering := entries["word_reordering_full_reversal_delivery_schedule"]
+	reorderingBLEU := BLEUScore(reordering.Reference, reordering.Candidate)
+	if reorderingBLEU > 0.1 {
+		t.Errorf("word_reordering_full_reversal_delivery_schedule: BLEUScore = %v, want near 0 (<= 0.1) despite identical vocabulary -- reordering should collapse higher-order n-gram precision", reorderingBLEU)
+	}
+	refWords := len(splitFields(reordering.Reference))
+	candWords := len(splitFields(reordering.Candidate))
+	if refWords != candWords {
+		t.Fatalf("word_reordering_full_reversal_delivery_schedule: reference has %d words, candidate has %d -- this entry is supposed to be a pure reordering of the same bag of words", refWords, candWords)
+	}
+
+	// partial_overlap_first_half_matches_delivery_estimate must land
+	// strictly between the identical (1.0) and unrelated (~0.023)
+	// extremes -- the middle-ground case no other entry in this corpus
+	// occupies.
+	partial := entries["partial_overlap_first_half_matches_delivery_estimate"]
+	partialBLEU := BLEUScore(partial.Reference, partial.Candidate)
+	if partialBLEU <= unrelatedBLEU || partialBLEU >= 1.0 {
+		t.Errorf("partial_overlap_first_half_matches_delivery_estimate: BLEUScore = %v, want strictly between completely_unrelated_candidate's %v and 1.0", partialBLEU, unrelatedBLEU)
+	}
+
+	// hallucinated_added_clause_complaint_registered is the brevity-
+	// penalty mirror image of missing_clause_deletion_within_48_hours:
+	// its candidate is longer than the reference, so BP must be exactly
+	// 1.0 (no brevity penalty at all), with the entire shortfall below
+	// 1.0 coming from precision dilution instead.
+	hallucinated := entries["hallucinated_added_clause_complaint_registered"]
+	hallucinatedBLEU := BLEUScore(hallucinated.Reference, hallucinated.Candidate)
+	if len(splitFields(hallucinated.Candidate)) <= len(splitFields(hallucinated.Reference)) {
+		t.Fatalf("hallucinated_added_clause_complaint_registered: candidate must be longer than reference (BP = 1.0 requires it) — got reference %q, candidate %q", hallucinated.Reference, hallucinated.Candidate)
+	}
+	if hallucinatedBLEU >= 1.0 {
+		t.Errorf("hallucinated_added_clause_complaint_registered: BLEUScore = %v, want < 1.0 (the hallucinated clause must cost precision even though BP == 1.0)", hallucinatedBLEU)
+	}
+
+	// named_entity_mismatch_relationship_manager_name: a single
+	// mid-sentence proper-noun substitution should cost noticeably more
+	// than one_word_substitution_currency_mismatch's last-word
+	// substitution, since a mid-sentence error contaminates more
+	// n-grams at every order.
+	namedEntity := entries["named_entity_mismatch_relationship_manager_name"]
+	namedEntityBLEU := BLEUScore(namedEntity.Reference, namedEntity.Candidate)
+	oneWordSub := entries["one_word_substitution_currency_mismatch"]
+	oneWordSubBLEU := BLEUScore(oneWordSub.Reference, oneWordSub.Candidate)
+	if namedEntityBLEU >= oneWordSubBLEU {
+		t.Errorf("named_entity_mismatch_relationship_manager_name: BLEUScore = %v, want lower than one_word_substitution_currency_mismatch's %v (a mid-sentence mismatch should break more n-grams than a last-word one)", namedEntityBLEU, oneWordSubBLEU)
+	}
+	if namedEntityBLEU >= 1.0 {
+		t.Errorf("named_entity_mismatch_relationship_manager_name: BLEUScore = %v, want < 1.0", namedEntityBLEU)
+	}
+
+	// case_only_difference_payment_capitalization: a single word's
+	// capitalization difference must be scored as a real mismatch (no
+	// case-folding), so this must be well below 1.0 despite being a
+	// semantically perfect translation.
+	caseOnly := entries["case_only_difference_payment_capitalization"]
+	caseOnlyBLEU := BLEUScore(caseOnly.Reference, caseOnly.Candidate)
+	if caseOnlyBLEU >= 1.0 {
+		t.Errorf("case_only_difference_payment_capitalization: BLEUScore = %v, want < 1.0 (BLEUScore is case-sensitive, no folding is performed)", caseOnlyBLEU)
+	}
+
+	// over_repeated_word_clipping_billing_transfer: clipping must prevent
+	// a degenerate all-one-word candidate from scoring anywhere near as
+	// well as its raw (unclipped) unigram overlap might suggest -- it
+	// should land close to the unrelated entry's near-zero score.
+	overRepeated := entries["over_repeated_word_clipping_billing_transfer"]
+	overRepeatedBLEU := BLEUScore(overRepeated.Reference, overRepeated.Candidate)
+	if overRepeatedBLEU > 0.1 {
+		t.Errorf("over_repeated_word_clipping_billing_transfer: BLEUScore = %v, want near 0 (<= 0.1) -- clipping should prevent the repeated word from inflating the score", overRepeatedBLEU)
+	}
+}
+
+// splitFields is a tiny local helper so
+// TestFixedTranslationCorpus_QualitativeExpectations can compare word
+// counts without importing strings solely for Fields in this test file.
+func splitFields(s string) []string {
+	return strings.Fields(s)
 }

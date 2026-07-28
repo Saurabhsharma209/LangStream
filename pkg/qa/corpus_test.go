@@ -155,6 +155,14 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // "bookend" leading-deletion-plus-trailing-insertion mix, and a
 // pure-insertion entry reaching WER == 1.0) — see FixedCorpus's doc
 // comment for each entry's reasoning and hand-computed WER.
+//
+// Sprint 2026-07-28 (QA): includes five further entries (a combined
+// two-deletions-plus-two-insertions entry, a long utterance isolating
+// exactly one substitution, a WER > 1.0 entry driven by a mix of one
+// substitution and four insertions, a reference-side repeated word
+// misheard as a substitution rather than collapsed, and a long-distance
+// non-adjacent two-word swap) — see FixedCorpus's doc comment for each
+// entry's reasoning and hand-computed WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -246,6 +254,14 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_trailing_hallucinated_clause_insertion_call_closing":          4.0 / 7.0,
 		"hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing": 2.0 / 8.0,
 		"hinglish_insertion_only_wer_equals_one_order_confirmation":             4.0 / 4.0,
+
+		// Sprint 2026-07-28 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_two_deletions_two_insertions_no_substitution_address_update":     4.0 / 9.0,
+		"hinglish_long_utterance_single_substitution_call_timing_confirmation":     1.0 / 21.0,
+		"hinglish_wer_exceeds_one_mixed_substitution_and_insertions_balance_query": 5.0 / 4.0,
+		"hinglish_reference_repeated_word_substituted_haan_haan":                   1.0 / 9.0,
+		"hinglish_long_distance_word_swap_account_status_request":                  2.0 / 6.0,
 	}
 
 	entries := FixedCorpus()
