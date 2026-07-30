@@ -418,6 +418,21 @@ though it passes cleanly without `-race`, confirming no regression -- see
 DEVLOG.md for detail and a "retry when disk allows" follow-up. Week 4
 still cannot meaningfully start without Saurabh's decision.
 
+**2026-07-30 note (Sprint 18): no roadmap progress -- sandbox disk
+exhaustion blocked verification entirely.** This run could not confirm
+`go build ./...`/`go vet ./...`/`go test ./...` for any package (only
+`gofmt -l .` ran clean); the root filesystem bottomed out at single-digit
+MB free even building single packages in isolation, worse than Sprint
+12's (2026-07-18) and Sprint 17's prior worst points. Per Sprint 12's
+standing precedent, no workstream agents were spawned and no code was
+committed -- this DEVLOG/ROADMAP update is the only change. This is now a
+repeated, worsening pattern (Sprint 12, tight Sprint 17, hard-blocked
+Sprint 18) that needs a privileged cleanup of accumulated cross-session
+`/tmp`/`/var/tmp` cruft -- not something further scheduled-run workarounds
+can keep absorbing. See DEVLOG.md's 2026-07-30 entry for full detail.
+Week 3's one open item and all of Week 4 remain unchanged and still need
+Saurabh's decision independent of this infra issue.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

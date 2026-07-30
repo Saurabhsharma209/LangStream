@@ -1,5 +1,120 @@
 # LangStream Dev Log
 
+## 2026-07-30 (Sprint 18: sandbox disk exhaustion — no code shipped, gofmt-only verification) — scheduled run
+
+### Agents run
+None. No PE/Tech/SRE/QA workstream agents were spawned this run -- same
+call as Sprint 12 (2026-07-18), for the same reason: this run could not
+verify `go build ./...`, so spawning agents to produce changes nobody
+could confirm build-clean would be irresponsible.
+
+### Repo health at start
+Could not be established beyond `gofmt`. ClearStream checked
+(`git ls-remote --tags`): still only `v0.1.0`, no `VERSIONING.md` action
+needed (today's scope never touched `pkg/rtp`/duplex-RTP either way).
+
+**What was verified clean:** `gofmt -l .` across the entire repo --
+no output, i.e. clean. Nothing else.
+
+**What could not be verified at all this run:** `go build ./...`,
+`go vet ./...`, and `go test ./...` for every package, including the
+seven non-`pion` packages (`pkg/asr`, `pkg/translate`, `pkg/tts`,
+`pkg/rtp`, `pkg/observability`, `pkg/qa`, `pkg/langstream`) that Sprint 12
+was still able to verify individually. This run's sandbox ran out of disk
+space compiling even single, narrowly-scoped packages one at a time --
+only `pkg/qa` built without a "no space left on device" error (likely
+because its dependencies were already warm in cache from an earlier
+package's partial compile); `pkg/asr`, `pkg/translate`, `pkg/tts`,
+`pkg/observability`, and `pkg/langstream` each hit the same error
+mid-build. `pkg/webrtcgw`, `cmd/langstream`, `pkg/rtp`'s `pion`-dependent
+paths, `examples/`, and `tools/` were not attempted at all. This is an
+infrastructure ceiling, not a code problem -- nothing in this entry
+implies any package is broken, only that this sandbox could not build
+almost anything today to check.
+
+### Sandbox disk crisis -- escalated, not just recurring
+Sprint 12 (2026-07-18) first called this a "hard blocker, not just a
+warning" after root filesystem free space dropped to ~85MB mid-build.
+Sprints 13-17 each routed around continuing pressure (methods: clone into
+`/tmp` instead of `$HOME`/`/sessions`, reuse the pre-extracted Go
+toolchain, `go clean -cache` repeatedly, build/test package-by-package).
+Today those same workarounds were not enough to verify anything beyond
+formatting:
+
+- `$HOME` (`/sessions/tender-serene-gauss`, excluding the `mnt/` bindfs
+  paths) was at **100% full, 0 bytes free**, confirmed via `df`, same as
+  recent sprints.
+- The **root filesystem started at 98% full (~255MB free)** before this
+  run touched anything, and repeatedly bottomed out at **single-digit MB
+  free** (as low as 3.7MB observed) during even single-package build
+  attempts, despite `go clean -cache`/`-modcache` between attempts. This
+  is meaningfully worse than Sprint 12's worst recorded point (~85MB)
+  and Sprint 17's (~130MB).
+- `/tmp` and `/var/tmp` together hold several GB of leftover directories
+  from many past sprints (`gocache`/`gopath` copies, `lswork`,
+  `ls_run_20260727`, `verify*`, `csbuild*`, stray `.go`/`.py`/`.b64`
+  scratch files, etc.), essentially all owned by `nobody`/other UIDs this
+  run's user cannot delete (`rm -rf` fails file-by-file with
+  `Permission denied`; `sudo` refuses to run in this container --
+  confirmed, same as every prior sprint that checked). This run found
+  meaningfully more orphaned volume than Sprint 17 described, consistent
+  with the trend worsening run over run rather than stabilizing.
+- The Cowork outputs-mounted folder was not used as scratch space at all
+  this run, per the standing rule (git/file operations there can silently
+  break due to the folder's no-delete/no-rename restriction) -- confirmed
+  again not to be a workaround for this problem, not attempted further.
+- No new large files were left behind by this run; all of this run's own
+  scratch usage (`/tmp/work_ls/...`) was cleaned back down after each
+  failed attempt to avoid making the next run's starting point worse.
+
+**Decision:** consistent with Sprint 12's standing precedent, this run did
+**not** spawn workstream agents and did **not** commit or push any code
+change. Shipping unverified changes to compensate for a broken sandbox
+would be a worse outcome than skipping a sprint. This DEVLOG entry is the
+only change this run makes, and it needs no build to be safe to push.
+
+### Bugs found/fixed
+None -- no code was touched this run.
+
+### Verified
+- `gofmt -l .`: clean, whole repo.
+- ClearStream: still tagged only `v0.1.0`, unchanged; `VERSIONING.md`'s
+  pin is still accurate, no update needed.
+- Everything else: **not verified this run** (disk exhaustion, see
+  above). No reason to believe anything is broken -- nothing was touched,
+  and Sprint 17 left the repo fully green -- but that is an inference
+  from Sprint 17's clean state, not a measurement taken today.
+
+### Blocked
+- Everything Sprint 17 already listed as blocked (real-condition
+  jitter-buffer tuning, Week 4, legal review of `docs/compliance.md`) --
+  all unchanged, still need either live traffic or a human decision.
+- **The sandbox disk-pressure pattern has now crossed from "blocks full
+  verification" (Sprint 12) to "blocks nearly all verification, including
+  single narrowly-scoped packages" (today).** This is the top priority
+  for whoever owns this automation's sandbox environment. A privileged
+  cleanup of the accumulated cross-session `/tmp`/`/var/tmp`/`/sessions`
+  cruft (this run's user cannot do it -- no delete permission on any of
+  it) is very likely necessary before the next scheduled run can ship
+  anything at all, let alone the ~3-roadmap-day pace this automation is
+  designed for.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that supersedes everything below (unchanged since Sprint 8).
+2. **Before any more feature work:** confirm whether the sandbox disk
+   situation has improved. If it has not, the next run should say so
+   plainly again rather than spend its whole time budget re-discovering
+   the same ceiling -- this is now three-plus consecutive severe
+   incidents (Sprint 12, Sprint 17's tighter-than-usual run, today) and
+   needs an actual infra fix, not another workaround attempt.
+3. Absent an infra fix, the next run should retry the full-repo build
+   early (before spending time on anything else) to measure whether the
+   situation has improved, stayed the same, or worsened further, and
+   report that delta explicitly, same as Sprint 12 asked for and never
+   really got resolved.
+
+
 ## 2026-07-28 (Sprint 17: BLEU/WER corpus growth, vendor-key-guard regression test, workstreams.md ownership hygiene) — scheduled run
 
 ### Agents run
