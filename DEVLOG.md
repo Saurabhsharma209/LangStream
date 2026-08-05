@@ -1,6 +1,134 @@
 # LangStream Dev Log
 
 
+## 2026-08-05 (Sprint 20: sandbox disk exhaustion — no code shipped, docs-only, fifth occurrence) — scheduled run
+
+### Agents run
+None. Same reasoning as Sprint 12 (2026-07-18), Sprint 18 (2026-07-30),
+and Sprint 19 (2026-08-03): this run could not verify `go build ./...`,
+so spawning PE/Tech/SRE/QA to produce changes nobody could confirm
+build-clean would be irresponsible.
+
+### Repo health at start
+`gofmt -l .`: clean, whole repo — the only check this run could complete.
+ClearStream re-checked via `git ls-remote --tags
+https://github.com/Saurabhsharma209/ClearStream.git`: still only `v0.1.0`
+(same two tag refs as every prior sprint), so `VERSIONING.md`'s pin needs
+no update.
+
+`go build ./...`: **failed, confirmed infra not code, same class as
+Sprints 12/18/19.** Sequence this run:
+1. Cloned into `$HOME` per the runbook's default path — failed outright,
+   `mkdir`/`git clone` both hit "No space left on device" immediately
+   (`/sessions`, `$HOME`'s filesystem, measured at 0 bytes free).
+2. Tried Sprint 19's new `/dev/shm` (tmpfs) approach — clone and Go
+   toolchain extraction both succeeded there, but this environment's
+   `/dev/shm` contents do not persist between separate shell
+   invocations (each is a fresh mount), which makes tmpfs unusable for
+   a multi-step workflow (read state, build, spawn agents, integrate,
+   commit) that spans many commands — a constraint Sprint 19 didn't
+   hit only because its tmpfs use was a single self-contained
+   docs-only push. Abandoned this path for anything beyond a quick
+   sanity check.
+3. Fell back to the established `/tmp`-based workaround (Sprints
+   13-19): cloned into a fresh `/tmp` directory (this run's own UID, so
+   actually deletable), reused the pre-existing, read+execute-accessible
+   Go 1.22.5 toolchain at `/tmp/gotools/go/bin/go` (owned by `nobody`
+   from a past sprint, but world-executable, so no fresh extraction
+   needed), and pointed `GOCACHE`/`GOPATH`/`GOTMPDIR` at fresh writable
+   dirs under this run's own `/tmp` clone.
+4. `go build ./...` ran for real — started downloading actual module
+   dependencies (`golang.org/x/*`, `github.com/pion/*`, `stretchr/testify`,
+   the pinned ClearStream pseudo-version, etc., ~35+ distinct modules
+   visible in the output) — and failed with repeated "no space left on
+   device" errors across dozens of module-cache writes/unzips, ending
+   with the root filesystem at 4KB free (from a ~33MB starting point).
+   This is a real, in-progress dependency download hitting a real
+   ceiling, not a hang or a misconfiguration.
+
+### Sandbox disk crisis — fifth consecutive severe occurrence, unresolved
+Sprint 12 (2026-07-18) first called this a hard blocker; Sprint 17
+(2026-07-28), Sprint 18 (2026-07-30), and Sprint 19 (2026-08-03) each hit
+it again. Today, measured directly:
+
+- `$HOME`/`/sessions` (`/dev/nvme0n1`, 9.8GB): **100% full, 0 bytes free**
+  — unchanged from every recent sprint.
+- Root filesystem (`/dev/nvme1n1p1`, 9.6GB): **100% full**, started this
+  run around **33-36MB free**, and a single `go build ./...` attempt
+  drove it down to **4KB free** before this run's own cleanup recovered
+  it to **~12MB free**. In the same severe range as Sprints 18-19.
+- Root cause, re-confirmed: `/tmp` holds several GB of leftover
+  directories from many past sprints (`lswork`, `ls_run_20260727`,
+  multiple `gocache*`/`gopath*` copies, `csbuild*`, `verify*`, stray
+  scratch files back to at least 2026-07-22), essentially all owned by
+  `nobody`/other UIDs. `rm -rf` on this cruft fails file-by-file
+  (`Permission denied`, sticky-bit-protected `/tmp`); `sudo` refuses
+  (`"no new privileges" flag is set, which prevents sudo from running
+  as root`) — identical to every prior sprint that checked. This run's
+  own scratch usage was cleaned back down after the failed build attempt
+  (verified via `df` before/after), so nothing new was left behind for
+  tomorrow.
+- The Cowork outputs-mounted bindfs (tens of GB free) was confirmed
+  present but, per the standing 2026-07-07 rule, not used for git or
+  build scratch.
+- **New finding this run:** Sprint 19's `/dev/shm` fallback, while still
+  valid for a single self-contained command, does **not** persist
+  between separate shell invocations in this environment — each
+  `mcp__workspace__bash` call gets its own fresh tmpfs mount. That
+  makes it unsuitable for anything beyond a one-shot check or a single
+  atomic commit-and-push; it cannot host a multi-step build-and-test
+  workflow. The `/tmp`-based approach (own-UID directory, reused
+  world-executable Go toolchain) remains the only viable path for
+  actual multi-step work, and it is now consistently too disk-starved
+  to complete a full dependency download for this repo's `pion/webrtc`
+  tree.
+
+**Decision:** consistent with Sprint 12/18/19's precedent, this run did
+**not** spawn workstream agents and did **not** commit or push any code
+change. This DEVLOG entry plus the matching ROADMAP.md note (pushed via
+the `/tmp`-based clone, no full build needed for a docs-only diff) are
+the only changes this run makes.
+
+### Bugs found/fixed
+None — no code was touched this run.
+
+### Verified
+- `gofmt -l .`: clean, whole repo.
+- ClearStream: still tagged only `v0.1.0`, unchanged; `VERSIONING.md`'s
+  pin remains accurate, no update needed.
+- Disk state and `/tmp` ownership: re-measured directly this run (see
+  above), consistent with Sprints 18-19's findings, not assumed.
+- Everything else (`go build`/`go vet`/`go test ./...` for any package):
+  **not verified this run** — confirmed infeasible, with a real (not
+  simulated) dependency-download attempt as evidence.
+
+### Blocked
+- Everything Sprints 18-19 already listed (real-condition jitter-buffer
+  tuning, Week 4, legal review of `docs/compliance.md`) — all unchanged,
+  still need either live traffic or a human decision from Saurabh.
+- **The sandbox disk-pressure pattern is now five consecutive severe
+  occurrences (Sprint 12, tight Sprint 17, hard-blocked Sprint 18, Sprint
+  19, and today) with no improvement — if anything `/tmp`'s orphaned
+  volume can only grow, since nothing can ever delete it from inside
+  this automation's own permissions.** This needs a privileged cleanup
+  (or a fresh sandbox image) from whoever owns this automation's
+  infrastructure. Absent that, treat every future run as disk-blocked by
+  default until proven otherwise, rather than assuming the `/tmp`
+  workaround will keep working — it is trending toward being
+  insufficient even for that.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that supersedes everything below (unchanged since Sprint 8).
+2. **Top priority, again:** confirm whether the sandbox disk situation
+   has actually improved via an infra-level fix. This cannot be
+   meaningfully re-diagnosed by another scheduled run — the cause and
+   its permission boundaries are now well understood and documented
+   across five sprints.
+3. If disk headroom does improve, retry the full-repo build immediately
+   and report the delta explicitly, same standing ask as Sprints 12,
+   18, and 19.
+
 ## 2026-08-03 (Sprint 19: sandbox disk exhaustion — no code shipped, docs-only, fourth occurrence) — scheduled run
 
 ### Agents run

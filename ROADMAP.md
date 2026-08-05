@@ -433,6 +433,36 @@ can keep absorbing. See DEVLOG.md's 2026-07-30 entry for full detail.
 Week 3's one open item and all of Week 4 remain unchanged and still need
 Saurabh's decision independent of this infra issue.
 
+**2026-08-03 note (Sprint 19: sandbox disk exhaustion — no code shipped,
+fourth occurrence, DEVLOG-only that run).** Same disk wall as Sprint 18,
+still unresolved; that run also proved `/dev/shm` (tmpfs) is a viable
+fallback for at least a docs-only push when the root disk and
+`$HOME`/`/sessions` are both fully exhausted, but confirmed tmpfs's 512MB
+ceiling is itself too small for this repo's full `pion/webrtc`-heavy
+dependency tree. No ROADMAP update was made that run (DEVLOG only) — see
+DEVLOG.md's 2026-08-03 entry.
+
+**2026-08-05 note (Sprint 20): still blocked, fifth consecutive severe
+occurrence, no roadmap progress.** Repo state read fine (ClearStream
+re-checked via `git ls-remote --tags`: still only `v0.1.0`, no
+`VERSIONING.md` action needed; Week 3's one open item and all of Week 4
+remain genuinely blocked on Saurabh's anchor-customer/live-traffic
+decision, unchanged since Sprint 8). But verification is not: `$HOME`/
+`/sessions` measured 100% full, 0 bytes free; the root filesystem started
+around 33-36MB free and was driven to single-digit-KB free by a single
+`go build ./...` attempt (confirmed via `go mod download`/build output —
+real vendor dependency downloads, not a hang) before recovering to ~12MB
+after cleanup. `gofmt -l .` is the only check that could run clean. Per
+Sprint 12/18/19's standing precedent, no workstream agents were spawned
+and no code was committed this run — only this ROADMAP note and the
+matching DEVLOG.md entry were pushed (a small enough diff to fit in the
+remaining disk headroom). This is now five occurrences of the same
+unresolved infrastructure ceiling (Sprint 12, 17, 18, 19, 20) with no
+sign of improvement between them; see DEVLOG.md's 2026-08-05 entry for
+full detail, including why Sprint 19's `/dev/shm` fallback also isn't
+sufficient for a full build (512MB ceiling < this repo's real dependency
+footprint).
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored
