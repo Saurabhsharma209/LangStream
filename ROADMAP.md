@@ -463,6 +463,30 @@ full detail, including why Sprint 19's `/dev/shm` fallback also isn't
 sufficient for a full build (512MB ceiling < this repo's real dependency
 footprint).
 
+**2026-08-10 note (Sprint 21): disk exhaustion resolved this run —
+opportunistic hardening resumed, no roadmap items closed.** Still
+genuinely blocked on Saurabh's anchor-customer/live-traffic decision for
+Week 3's one open item and all of Week 4 (unchanged since Sprint 8).
+Good news on the standing infra issue: this run's sandbox had 2.5GB+ free
+on the root filesystem throughout (vs. Sprints 18-20's single-digit-to-
+tens-of-MB), so the full `/tmp`-based workaround worked without strain —
+`go build ./... && go vet ./... && go test ./... -race -count=3 &&
+gofmt -l .` passed clean on the first try, including `cmd/langstream`'s
+`TestServeCommand_RealBinary_EndToEnd` under `-race`, which had been
+link-stage disk-blocked since Sprint 17 (2026-07-28) and is now confirmed
+passing reliably (5/5 under `-race -count=5` in isolation). Whether this
+is a genuine infra fix or just a better-provisioned sandbox instance
+isn't knowable from inside this automation -- treat future runs as
+disk-blocked by default until proven otherwise, per Sprint 20's standing
+guidance, rather than assuming today's headroom persists. With real
+verification possible again, QA grew the WER corpus 67->75 and the BLEU
+corpus 12->18 with new non-overlapping error shapes (no bugs found), and
+SRE ran a full audit of vendor-key sync, CI workflow coherence, and
+Makefile targets accumulated since Sprint 17 -- a clean result, nothing
+had drifted during the three disk-blocked sprints in between. PE/Tech
+were not spawned: no owned-file gap was identified during planning (same
+reasoning as Sprints 16-17). See DEVLOG.md's 2026-08-10 entry for detail.
+
 ## Week 4 — Pilot Launch (Roadmap Days 16-20, target: ~Jul 14-16)
 
 - [ ] Live pilot with 1-2 anchor customers, Hindi↔English, engineer-monitored

@@ -1,6 +1,142 @@
 # LangStream Dev Log
 
 
+## 2026-08-10 (Sprint 21: disk exhaustion resolved, WER/BLEU corpus growth, clean SRE audit) — scheduled run
+
+### Agents run
+QA and SRE in parallel. PE and Tech not spawned — no PE-owned
+(`pkg/asr`/`pkg/translate`/`pkg/tts`) or Tech-owned (`pkg/langstream`/
+`pkg/rtp`/`pkg/webrtcgw`/`cmd/langstream`) gap was identified during
+planning (same reasoning as Sprints 16-17): coverage, circuit breakers,
+retry/backoff, and cost-recording are already complete across all 6
+vendor backends, and the recurring shutdown-ordering/frame-alignment
+audit classes had nothing new to re-check since Sprint 15.
+
+### Repo health at start
+Cloned into `/tmp` per the standing workaround (`$HOME`/`/sessions`
+measured 100% full, 0 bytes free, immediately hit "No space left on
+device" on the very first `git clone` attempt — same as every recent
+sprint). Unlike Sprints 18-20, the root filesystem itself was healthy
+this run: 2.9GB free at the start, 2.5GB+ free throughout, never dropping
+below that even during `go build`'s full module download
+(`pion/webrtc`'s ~35-module dependency tree, the same download that drove
+Sprint 20's root filesystem to single-digit KB free). One real hiccup:
+the Go toolchain download's default `go1.22.5.linux-amd64.tar.gz` failed
+with "Exec format error" on first run — this sandbox's CPU is `aarch64`,
+not `x86_64` (unlike prior sprints, unstated whether by coincidence or a
+different sandbox image); switched to `go1.22.5.linux-arm64.tar.gz` and
+it ran clean. Also needed `TMPDIR=/tmp` (not just `GOTMPDIR`) exported
+before `cgo` would stop writing its scratch files to the still-full
+`$HOME`/`/sessions` mount and failing with the same "no space left on
+device" error one level down in the toolchain.
+
+With that resolved, `go build ./... && go vet ./... && go test ./...
+-race && gofmt -l .` all passed clean on the first try, including
+`cmd/langstream`'s `TestServeCommand_RealBinary_EndToEnd` under `-race`
+— link-stage disk-blocked in every sprint since Sprint 17 (2026-07-28),
+now re-run in isolation at `-race -count=5` and passing 5/5 in 2.69s.
+ClearStream re-checked via `git ls-remote --tags`: still only `v0.1.0`
+(same two refs as every prior sprint) — no `VERSIONING.md` action needed.
+
+### Changes
+
+**QA — WER corpus growth (67 → 75 entries, `pkg/qa/corpus.go` +
+`corpus_test.go` + `wer_measurement_test.go`)**
+Audited all 67 existing entries and the DEVLOG history of shapes already
+covered (Sprints 11-17) before adding 8 new non-overlapping cases,
+hand-verified by edit-distance reasoning: an isolated single insertion in
+a long (21-word) utterance; a contiguous 2-word non-repeated insertion
+block; a reference-repeated-word fully deleted (both occurrences, not
+just collapsed to one); a 3-word phrase collapsing into 1 unrelated word;
+a cross-language acoustic homophone ("kal" heard as "call"); a contiguous
+2-word substitution block (filling the gap between the existing 3-word
+block and the existing non-adjacent 2-substitution entry); a 100x
+magnitude confusion ("lakh" vs "hazar"); and a Romanization/transliteration
+spelling variant ("dhanyavad" vs "dhanyawad"). `wer_measurement_test.go`'s
+minimum-count and wired-entry-count assertions updated (75, 74).
+
+**QA — BLEU translation corpus growth (12 → 18 entries,
+`pkg/qa/translation_corpus.go` + `translation_corpus_test.go`)**
+Added 6 new shapes, each hand-computed against `bleu.go`'s exact
+precision/clipping/brevity-penalty formulas: a localized 2-word adjacent
+swap (contrasts with the existing full-reversal entry); two scattered
+substitutions positioned so a single 4-gram window overlaps both (tests
+clipping when broken n-gram windows overlap rather than staying
+independent); a short pair with a leading hallucinated word; a single
+extra repeat of the reference's own last word (mild disfluency, contrasts
+with the existing degenerate 8x-repeat entry); a very short (2-word)
+substitution pair (fills the "effective order 2" gap between existing
+order-1 and order-4 short entries); and a combined substitution +
+trailing hallucination. Minimum-count assertion updated to 18.
+
+**QA — heavier race verification now that disk allows it**
+`go test ./... -race -count=5` (all 11 buildable packages, including
+`cmd/langstream`): all pass, 1m14.7s. `cmd/langstream`'s previously
+disk-blocked real-binary-link test: 5/5 under `-race -count=5` in
+isolation, 2.69s — closes the "retry when disk allows" item standing
+since Sprint 17. `pkg/qa/... -race -count=10` and root package
+`-race -count=10` (the WER pipeline integration test): both clean, no
+flakes.
+
+**SRE — full audit of vendor-key sync, CI, and Makefile targets (no
+changes needed)**
+Ran `scripts/check-vendor-keys.sh` and `scripts/check-vendor-keys_test.sh`
+directly (both pass); manually cross-checked `cmd/langstream/main.go`'s
+`init()` against `docker-compose.yml`'s environment block by hand (6
+vendor constructors, 6 matching `XXX_API_KEY` passthroughs, no drift);
+confirmed `docs/compliance.md`'s vendor table still lists all 6 vendors
+with the same cautious DPA/region-confirmation framing added Sprint 16;
+reviewed `.github/workflows/ci.yml` end to end (build-test + docker-build
+jobs both still coherent with the current package layout); ran every
+Makefile target that doesn't require `docker` (`fmt-check`, `vet`,
+`build`, `test`, `check-vendor-keys`, `test-vendor-key-guard`, `ci`) — all
+pass. `docker`/`make docker` itself is not runnable in this sandbox (no
+docker daemon installed); Dockerfile/docker-compose.yml were reviewed by
+inspection only and found consistent (builder Go version matches
+`go.mod`, distroless runtime, compose's `command:` override is correct).
+Nothing had drifted during the three disk-blocked sprints (18-20) in
+between — a clean audit, no fixes made.
+
+### Bugs found/fixed
+None. No flakes, races, or wrong assertions surfaced in any test run; no
+config drift found in the SRE audit.
+
+### Verified
+- Full repo: `go build ./...`, `go vet ./...`, `gofmt -l .` clean
+  (re-run by EM after both agents finished, not just taken on their word)
+- `go test ./... -race -count=3` (EM's own full-repo integration run):
+  all 11 packages pass, no flakes, 46.6s wall time
+- `git status --short` after both agents finished: only QA's 5 owned
+  files touched (`pkg/qa/corpus.go`, `pkg/qa/corpus_test.go`,
+  `pkg/qa/translation_corpus.go`, `pkg/qa/translation_corpus_test.go`,
+  `wer_measurement_test.go`) — SRE found nothing to fix, so no diff from
+  that workstream, confirming both agents stayed inside their charters.
+- Fresh-clone-from-GitHub rebuild performed after push (see below).
+
+### Blocked
+- Real-condition jitter-buffer tuning against live PSTN traces — still
+  needs live/pilot call traffic (Week 4). Unchanged since Sprint 8.
+- Week 4 (live pilot, real WER/latency/CSAT, go/no-go) still cannot start
+  without Saurabh's decision on anchor customer(s) / live traffic.
+- Docker-build verification beyond CI's own GitHub-Actions job — this
+  sandbox has no docker daemon, so `make docker` itself stays untestable
+  here (CI's separate `docker-build` job is the actual coverage for this).
+- Legal review of `docs/compliance.md` — still needs a human.
+- Whether today's disk headroom reflects a real infra fix or just a
+  better-provisioned sandbox instance is not knowable from inside this
+  automation — see the standing caution in ROADMAP.md's 2026-08-10 note.
+
+### Tomorrow
+1. If Saurabh has an anchor-customer/live-traffic decision for Week 4,
+   that supersedes everything below (unchanged since Sprint 8).
+2. Confirm whether tomorrow's sandbox still has disk headroom before
+   assuming the `/tmp`-based workaround will be as painless as today —
+   don't assume today's 2.5GB+ free is now the norm.
+3. Absent higher-priority work: continue opportunistic hardening (WER/
+   BLEU corpus growth is not close to exhausted as a cheap, high-value
+   task; a PE/Tech gap may exist that today's planning didn't surface —
+   worth a fresh look rather than defaulting to "QA+SRE only" every time).
+
 ## 2026-08-05 (Sprint 20: sandbox disk exhaustion — no code shipped, docs-only, fifth occurrence) — scheduled run
 
 ### Agents run

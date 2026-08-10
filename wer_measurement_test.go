@@ -126,6 +126,17 @@
 // None of these five has an empty Reference or Hypothesis, so all five
 // wire into this fake-ASR-backed pipeline normally, same as every other
 // non-excluded entry.
+//
+// Sprint 2026-08-10 (QA) wires in all eight entries added that sprint (a
+// long-utterance single insertion, a contiguous two-word insertion
+// block, a fully-deleted repeated reference word, a three-word-phrase
+// collapse, a cross-language homophone, a contiguous two-word
+// substitution block, a magnitude-word substitution, and a
+// transliteration spelling-variant mismatch) the same way — see
+// pkg/qa/corpus.go's FixedCorpus doc comment for each entry's reasoning.
+// None of these eight has an empty Reference or Hypothesis, so all
+// eight wire into this fake-ASR-backed pipeline normally, same as every
+// other non-excluded entry.
 package langstream_test
 
 import (
@@ -148,8 +159,8 @@ import (
 // arithmetic against itself.
 func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 	entries := qa.FixedCorpus()
-	if len(entries) < 67 {
-		t.Fatalf("qa.FixedCorpus() returned %d entries, want at least 67", len(entries))
+	if len(entries) < 75 {
+		t.Fatalf("qa.FixedCorpus() returned %d entries, want at least 75", len(entries))
 	}
 
 	// Precomputed expected WER for the entries this test wires up,
@@ -269,6 +280,18 @@ func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 		"hinglish_wer_exceeds_one_mixed_substitution_and_insertions_balance_query": 5.0 / 4.0,
 		"hinglish_reference_repeated_word_substituted_haan_haan":                   1.0 / 9.0,
 		"hinglish_long_distance_word_swap_account_status_request":                  2.0 / 6.0,
+
+		// Sprint 2026-08-10 (QA) additions - see pkg/qa/corpus.go's
+		// FixedCorpus doc comment for each entry's reasoning and
+		// hand-computed WER.
+		"hinglish_long_utterance_single_insertion_isolated_delivery_status":        1.0 / 21.0,
+		"hinglish_contiguous_two_word_insertion_block_hold_music_apology":          2.0 / 8.0,
+		"hinglish_reference_repeated_word_fully_deleted_bilkul_bilkul":             2.0 / 9.0,
+		"hinglish_three_word_phrase_collapsed_to_one_word_customer_care_executive": 3.0 / 10.0,
+		"hinglish_cross_language_homophone_call_kal_confusion":                     1.0 / 6.0,
+		"hinglish_two_word_contiguous_substitution_block_status_query":             2.0 / 8.0,
+		"hinglish_magnitude_word_substitution_lakh_hazar_confusion":                1.0 / 10.0,
+		"hinglish_transliteration_spelling_variant_dhanyavad_mismatch":             1.0 / 7.0,
 	}
 
 	tested := 0
@@ -328,7 +351,7 @@ func TestWERMeasurement_FixedCorpusAgainstFakeASRBackedPipeline(t *testing.T) {
 		})
 	}
 
-	if tested != 66 {
-		t.Fatalf("wired up %d corpus entries against the fake-ASR pipeline, want exactly 66 (identical_greeting, one_word_substitution, one_word_deletion, hinglish_identical_order_status, hinglish_one_word_substitution, hinglish_one_word_deletion, hinglish_midsentence_switch_payment_status, hinglish_loanword_recharge_request, hinglish_numbers_bill_amount_and_date, hinglish_order_number_spoken_in_english_digits, hinglish_filler_words_address_update, hinglish_otp_request_insertion, hinglish_call_disconnect_network_issue, hinglish_account_block_query_two_substitutions, hinglish_callback_request_deletion_and_filler, hinglish_two_word_deletion_travel_booking_confirmation, hinglish_proper_noun_brand_substitution_recharge, hinglish_proper_noun_person_name_substitution_order, hinglish_number_word_vs_digit_substitution, hinglish_long_utterance_single_deletion_callback, hinglish_content_word_deletion_parcel_delivery_date, hinglish_insertion_hallucinated_filler_word, english_dominant_embedded_hindi_courtesy_agent_transfer, hinglish_digit_sequence_deletion_account_number, hinglish_long_utterance_two_substitutions_refund_status, hinglish_negation_deletion_service_unavailable, hinglish_acronym_kyc_homophone_substitution, hinglish_two_insertions_confirmation_repeat, hinglish_acronym_ivr_homophone_substitution, hinglish_long_utterance_two_deletions_kyc_document_submission, hinglish_acronym_emi_homophone_substitution, hinglish_digit_duplication_insertion_registered_mobile_number, hinglish_insertion_trailing_word_repeat_call_end, hinglish_long_utterance_substitution_and_deletion_mixed_complaint_escalation, hinglish_long_utterance_two_insertions_delivery_confirmation, hinglish_insertion_leading_word_repeat_call_open, hinglish_word_splitting_helpline_compound, hinglish_word_merging_update_profile_request, hinglish_adjacent_word_transposition_balance_check, hinglish_case_sensitivity_capitalized_sir_mismatch, hinglish_severe_hallucination_wer_exceeds_one_listen_request, hinglish_punctuation_only_mismatch_confirm_query, hinglish_three_error_types_mixed_appointment_reschedule, hinglish_currency_symbol_vs_words_bill_amount, hinglish_total_substitution_failure_balance_request, hinglish_homophone_to_too_confirmation_query, hinglish_three_nonadjacent_deletions_complaint_resolution, hinglish_deletion_and_insertion_no_substitution_order_confirmation, hinglish_three_word_phrase_repeat_insertion_order_confirmation, hinglish_systematic_repeated_word_substitution_hai_hain_verb_agreement, hinglish_trailing_three_word_deletion_call_cutoff_complaint_update, hinglish_leading_two_word_deletion_call_greeting, hinglish_reference_repeated_word_collapsed_dhanyavaad, hinglish_three_nonadjacent_substitutions_payment_confirmation, hinglish_contiguous_three_word_substitution_block_refund_status, hinglish_hallucination_from_true_silence_empty_reference, hinglish_three_nonadjacent_insertions_appointment_confirmation, hinglish_digit_value_misrecognition_account_number, hinglish_trailing_hallucinated_clause_insertion_call_closing, hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing, hinglish_insertion_only_wer_equals_one_order_confirmation, hinglish_two_deletions_two_insertions_no_substitution_address_update, hinglish_long_utterance_single_substitution_call_timing_confirmation, hinglish_wer_exceeds_one_mixed_substitution_and_insertions_balance_query, hinglish_reference_repeated_word_substituted_haan_haan, hinglish_long_distance_word_swap_account_status_request -- and deliberately NOT hinglish_total_deletion_empty_hypothesis_silence_timeout, see this file's package doc comment) - update wantWER alongside pkg/qa.FixedCorpus if entries changed", tested)
+	if tested != 74 {
+		t.Fatalf("wired up %d corpus entries against the fake-ASR pipeline, want exactly 74 (identical_greeting, one_word_substitution, one_word_deletion, hinglish_identical_order_status, hinglish_one_word_substitution, hinglish_one_word_deletion, hinglish_midsentence_switch_payment_status, hinglish_loanword_recharge_request, hinglish_numbers_bill_amount_and_date, hinglish_order_number_spoken_in_english_digits, hinglish_filler_words_address_update, hinglish_otp_request_insertion, hinglish_call_disconnect_network_issue, hinglish_account_block_query_two_substitutions, hinglish_callback_request_deletion_and_filler, hinglish_two_word_deletion_travel_booking_confirmation, hinglish_proper_noun_brand_substitution_recharge, hinglish_proper_noun_person_name_substitution_order, hinglish_number_word_vs_digit_substitution, hinglish_long_utterance_single_deletion_callback, hinglish_content_word_deletion_parcel_delivery_date, hinglish_insertion_hallucinated_filler_word, english_dominant_embedded_hindi_courtesy_agent_transfer, hinglish_digit_sequence_deletion_account_number, hinglish_long_utterance_two_substitutions_refund_status, hinglish_negation_deletion_service_unavailable, hinglish_acronym_kyc_homophone_substitution, hinglish_two_insertions_confirmation_repeat, hinglish_acronym_ivr_homophone_substitution, hinglish_long_utterance_two_deletions_kyc_document_submission, hinglish_acronym_emi_homophone_substitution, hinglish_digit_duplication_insertion_registered_mobile_number, hinglish_insertion_trailing_word_repeat_call_end, hinglish_long_utterance_substitution_and_deletion_mixed_complaint_escalation, hinglish_long_utterance_two_insertions_delivery_confirmation, hinglish_insertion_leading_word_repeat_call_open, hinglish_word_splitting_helpline_compound, hinglish_word_merging_update_profile_request, hinglish_adjacent_word_transposition_balance_check, hinglish_case_sensitivity_capitalized_sir_mismatch, hinglish_severe_hallucination_wer_exceeds_one_listen_request, hinglish_punctuation_only_mismatch_confirm_query, hinglish_three_error_types_mixed_appointment_reschedule, hinglish_currency_symbol_vs_words_bill_amount, hinglish_total_substitution_failure_balance_request, hinglish_homophone_to_too_confirmation_query, hinglish_three_nonadjacent_deletions_complaint_resolution, hinglish_deletion_and_insertion_no_substitution_order_confirmation, hinglish_three_word_phrase_repeat_insertion_order_confirmation, hinglish_systematic_repeated_word_substitution_hai_hain_verb_agreement, hinglish_trailing_three_word_deletion_call_cutoff_complaint_update, hinglish_leading_two_word_deletion_call_greeting, hinglish_reference_repeated_word_collapsed_dhanyavaad, hinglish_three_nonadjacent_substitutions_payment_confirmation, hinglish_contiguous_three_word_substitution_block_refund_status, hinglish_hallucination_from_true_silence_empty_reference, hinglish_three_nonadjacent_insertions_appointment_confirmation, hinglish_digit_value_misrecognition_account_number, hinglish_trailing_hallucinated_clause_insertion_call_closing, hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing, hinglish_insertion_only_wer_equals_one_order_confirmation, hinglish_two_deletions_two_insertions_no_substitution_address_update, hinglish_long_utterance_single_substitution_call_timing_confirmation, hinglish_wer_exceeds_one_mixed_substitution_and_insertions_balance_query, hinglish_reference_repeated_word_substituted_haan_haan, hinglish_long_distance_word_swap_account_status_request, hinglish_long_utterance_single_insertion_isolated_delivery_status, hinglish_contiguous_two_word_insertion_block_hold_music_apology, hinglish_reference_repeated_word_fully_deleted_bilkul_bilkul, hinglish_three_word_phrase_collapsed_to_one_word_customer_care_executive, hinglish_cross_language_homophone_call_kal_confusion, hinglish_two_word_contiguous_substitution_block_status_query, hinglish_magnitude_word_substitution_lakh_hazar_confusion, hinglish_transliteration_spelling_variant_dhanyavad_mismatch -- and deliberately NOT hinglish_total_deletion_empty_hypothesis_silence_timeout, see this file's package doc comment) - update wantWER alongside pkg/qa.FixedCorpus if entries changed", tested)
 	}
 }

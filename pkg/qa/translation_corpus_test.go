@@ -13,8 +13,8 @@ import (
 // Source/Reference/Candidate text, and names must be unique.
 func TestFixedTranslationCorpus_EntriesAreWellFormed(t *testing.T) {
 	entries := FixedTranslationCorpus()
-	if len(entries) < 12 {
-		t.Fatalf("FixedTranslationCorpus() returned %d entries, want at least 12", len(entries))
+	if len(entries) < 18 {
+		t.Fatalf("FixedTranslationCorpus() returned %d entries, want at least 18", len(entries))
 	}
 
 	seen := make(map[string]bool, len(entries))
@@ -181,6 +181,115 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	clippingP4 := 0.1 / 5.0
 	wantOverRepeatedClipping := math.Exp((math.Log(clippingP1) + math.Log(clippingP2) + math.Log(clippingP3) + math.Log(clippingP4)) / 4.0)
 
+	// word_order_adjacent_swap_end_delivery_schedule: 6-word Reference
+	// and Candidate share the identical bag of words with only the
+	// final two words ("delivered", "tomorrow") swapped. p1 = 6/6 = 1.0
+	// (every unigram matches). Bigrams: 5 total in each; ref bigrams are
+	// "your order","order will","will be","be delivered","delivered
+	// tomorrow"; candidate bigrams are "your order","order
+	// will","will be","be tomorrow","tomorrow delivered" -- the first
+	// three match, the last two (touching the swapped pair) don't ->
+	// p2 = 3/5. Trigrams: 4 total each; the first two ("your order
+	// will","order will be") match, the last two don't -> p3 = 2/4 =
+	// 1/2. 4-grams: 3 total each; only the first ("your order will be")
+	// matches -> p4 = 1/3. BP = 1.0 (equal length, 6 == 6).
+	swapEndP1 := 6.0 / 6.0
+	swapEndP2 := 3.0 / 5.0
+	swapEndP3 := 2.0 / 4.0
+	swapEndP4 := 1.0 / 3.0
+	wantSwapEnd := math.Exp((math.Log(swapEndP1) + math.Log(swapEndP2) + math.Log(swapEndP3) + math.Log(swapEndP4)) / 4.0)
+
+	// two_scattered_substitutions_currency_and_status_refund: 9-word
+	// Reference and Candidate, equal length, differing at word 6
+	// ("rupees"->"dollars") and word 9 ("processed"->"completed"), no
+	// other repeated/overlapping vocabulary. At each n-gram order, the
+	// "broken" n-grams are exactly those whose window overlaps either
+	// error position:
+	//   n=1: total 9, broken {6,9} -> match 7 -> p1 = 7/9.
+	//   n=2: total 8, broken starts touching pos 6 {5,6} or pos 9 {8}
+	//        -> 3 distinct -> match 5 -> p2 = 5/8.
+	//   n=3: total 7, broken starts touching pos 6 {4,5,6} or pos 9 {7}
+	//        -> 4 distinct -> match 3 -> p3 = 3/7.
+	//   n=4: total 6, broken starts touching pos 6 {3,4,5,6} or pos 9
+	//        {6} -> 4 distinct (start 6 covers both positions at once)
+	//        -> match 2 -> p4 = 2/6 = 1/3.
+	// BP = 1.0 (equal length, 9 == 9).
+	scatteredP1 := 7.0 / 9.0
+	scatteredP2 := 5.0 / 8.0
+	scatteredP3 := 3.0 / 7.0
+	scatteredP4 := 2.0 / 6.0
+	wantScatteredSubstitutions := math.Exp((math.Log(scatteredP1) + math.Log(scatteredP2) + math.Log(scatteredP3) + math.Log(scatteredP4)) / 4.0)
+
+	// short_pair_leading_word_insertion_call_disconnected: 3-word
+	// Reference "call is disconnected", 4-word Candidate "the call is
+	// disconnected" (one hallucinated leading word). Effective order
+	// reaches the full 4 (candidate has >= 4 tokens):
+	//   n=1: 4 total, matches call/is/disconnected (3), "the" doesn't
+	//        -> p1 = 3/4.
+	//   n=2: 3 total ("the call","call is","is disconnected"), 2 match
+	//        -> p2 = 2/3.
+	//   n=3: 2 total ("the call is","call is disconnected"), 1 matches
+	//        (the reference's only trigram) -> p3 = 1/2.
+	//   n=4: 1 total ("the call is disconnected"), reference has zero
+	//        4-grams (length 3 < 4) so 0 match -> epsilon-smoothed
+	//        p4 = 0.1/1.
+	// BP = 1.0 (candidate longer than reference, 4 > 3).
+	shortInsertP1 := 3.0 / 4.0
+	shortInsertP2 := 2.0 / 3.0
+	shortInsertP3 := 1.0 / 2.0
+	shortInsertP4 := 0.1 / 1.0
+	wantShortPairLeadingInsertion := math.Exp((math.Log(shortInsertP1) + math.Log(shortInsertP2) + math.Log(shortInsertP3) + math.Log(shortInsertP4)) / 4.0)
+
+	// stutter_duplicated_trailing_word_confirmed_confirmed: 5-word
+	// Reference "your order has been confirmed", 6-word Candidate
+	// repeating the final word once more ("...confirmed confirmed").
+	// Clipping caps the credited match for "confirmed" at the
+	// reference's own count (1), not the candidate's count (2):
+	//   n=1: 6 total, "your"/"order"/"has"/"been" match (4) plus
+	//        "confirmed" clipped to 1 -> match 5 -> p1 = 5/6.
+	//   n=2: 5 total ("your order","order has","has been","been
+	//        confirmed","confirmed confirmed"), first four match, the
+	//        fifth doesn't -> p2 = 4/5.
+	//   n=3: 4 total, first three match, the fourth doesn't -> p3 =
+	//        3/4.
+	//   n=4: 3 total, first two match, the third doesn't -> p4 = 2/3.
+	// BP = 1.0 (candidate longer, 6 > 5).
+	stutterP1 := 5.0 / 6.0
+	stutterP2 := 4.0 / 5.0
+	stutterP3 := 3.0 / 4.0
+	stutterP4 := 2.0 / 3.0
+	wantStutterDuplication := math.Exp((math.Log(stutterP1) + math.Log(stutterP2) + math.Log(stutterP3) + math.Log(stutterP4)) / 4.0)
+
+	// very_short_pair_substitution_yes_maam: 2-word Reference "yes
+	// sir", 2-word Candidate "yes ma'am" (substituting the address
+	// term, unlike very_short_pair_yes_sir's deletion). Effective order
+	// reaches 2 (candidate has exactly 2 tokens): p1 = 1/2 ("yes"
+	// matches, "ma'am" doesn't); the candidate's only bigram ("yes
+	// ma'am") doesn't match the reference's ("yes sir") -> epsilon-
+	// smoothed p2 = 0.1/1. BP = 1.0 (equal length, 2 == 2).
+	shortSubP1 := 1.0 / 2.0
+	shortSubP2 := 0.1 / 1.0
+	wantShortPairSubstitution := math.Exp((math.Log(shortSubP1) + math.Log(shortSubP2)) / 2.0)
+
+	// combined_substitution_and_trailing_hallucination_complaint_resolved_closed:
+	// 5-word Reference "your complaint has been resolved", 6-word
+	// Candidate substituting the final word and appending one more
+	// ("your complaint has been closed now"):
+	//   n=1: 6 total, "your"/"complaint"/"has"/"been" match (4),
+	//        "closed"/"now" don't -> p1 = 4/6.
+	//   n=2: 5 total, "your complaint","complaint has","has been"
+	//        match (3), "been closed","closed now" don't -> p2 = 3/5.
+	//   n=3: 4 total, "your complaint has","complaint has been" match
+	//        (2), the other two don't -> p3 = 2/4 = 1/2.
+	//   n=4: 3 total, only "your complaint has been" matches -> p4 =
+	//        1/3.
+	// BP = 1.0 (candidate longer, 6 > 5).
+	combinedP1 := 4.0 / 6.0
+	combinedP2 := 3.0 / 5.0
+	combinedP3 := 2.0 / 4.0
+	combinedP4 := 1.0 / 3.0
+	wantCombinedSubstitutionAndHallucination := math.Exp((math.Log(combinedP1) + math.Log(combinedP2) + math.Log(combinedP3) + math.Log(combinedP4)) / 4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -197,6 +306,15 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"named_entity_mismatch_relationship_manager_name":      wantNamedEntityMismatch,
 		"case_only_difference_payment_capitalization":          wantCaseOnlyDifference,
 		"over_repeated_word_clipping_billing_transfer":         wantOverRepeatedClipping,
+
+		// Sprint 2026-08-10 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"word_order_adjacent_swap_end_delivery_schedule":                             wantSwapEnd,
+		"two_scattered_substitutions_currency_and_status_refund":                     wantScatteredSubstitutions,
+		"short_pair_leading_word_insertion_call_disconnected":                        wantShortPairLeadingInsertion,
+		"stutter_duplicated_trailing_word_confirmed_confirmed":                       wantStutterDuplication,
+		"very_short_pair_substitution_yes_maam":                                      wantShortPairSubstitution,
+		"combined_substitution_and_trailing_hallucination_complaint_resolved_closed": wantCombinedSubstitutionAndHallucination,
 	}
 
 	entries := FixedTranslationCorpus()

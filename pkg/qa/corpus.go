@@ -384,6 +384,98 @@ func placeholderPCM() []byte {
 //   - hinglish_reference_repeated_word_substituted_haan_haan:              WER 1/9   (1 substitution / 9 words)
 //
 //   - hinglish_long_distance_word_swap_account_status_request:             WER 2/6   (2 substitutions / 6 words)
+//
+// Sprint 2026-08-10 (QA) adds eight further entries, again found by
+// auditing every existing entry (and this file's own sprint-by-sprint
+// doc-comment history) for gaps rather than re-treading an
+// already-covered mechanic under a new name:
+//
+//   - an isolated single-word insertion inside a 21-word utterance --
+//     this corpus already has long-utterance entries isolating exactly
+//     one deletion (hinglish_long_utterance_single_deletion_callback)
+//     and exactly one substitution
+//     (hinglish_long_utterance_single_substitution_call_timing_confirmation),
+//     but never a long entry isolating a single insertion alone (every
+//     existing long insertion entry pairs it with a second insertion);
+//
+//   - a contiguous two-word insertion block of two brand-new,
+//     non-repeated words ("ek minute") -- distinct from
+//     hinglish_three_word_phrase_repeat_insertion_order_confirmation
+//     (which repeats an existing three-word phrase verbatim) and
+//     hinglish_digit_duplication_insertion_registered_mobile_number (a
+//     narrow digit-specific duplication): this is a plain two-word
+//     hallucinated clause with no relationship to any word already in
+//     the reference;
+//
+//   - a reference-side repeated word ("bilkul bilkul") where the fake
+//     ASR drops *both* occurrences entirely (two deletions) -- the
+//     full-collapse counterpart to
+//     hinglish_reference_repeated_word_collapsed_dhanyavaad (which
+//     drops only one of the two repeated occurrences) and
+//     hinglish_reference_repeated_word_substituted_haan_haan (which
+//     mishears one occurrence as a different word rather than dropping
+//     either);
+//
+//   - a three-word reference phrase ("customer care executive")
+//     collapsed into a single unrelated hypothesis word ("agent") --
+//     distinct from hinglish_word_splitting_helpline_compound and
+//     hinglish_word_merging_update_profile_request, whose splits/merges
+//     are both one-word-to-two-word (or vice versa); this is a larger
+//     three-to-one phrase collapse, costing one substitution plus two
+//     deletions (edit distance between a three-word and a one-word
+//     sequence with zero shared words is exactly max(3,1) = 3);
+//
+//   - a cross-language acoustic homophone: the fake ASR mishears the
+//     Hindi word "kal" ("tomorrow") as the English word "call" already
+//     present later in the same sentence -- distinct from every
+//     existing acronym/homophone entry in this corpus (KYC/IVR/EMI,
+//     "to"/"too"), which all confuse two same-language tokens; this
+//     confuses a Hindi token for an English one that happens to sound
+//     similar, the realistic cross-language mishearing Hinglish ASR is
+//     especially prone to;
+//
+//   - a contiguous two-word substitution block ("pata karna" -> "check
+//     kar") -- this corpus already has a contiguous *three*-word
+//     substitution block
+//     (hinglish_contiguous_three_word_substitution_block_refund_status)
+//     and a *non-adjacent* two-substitution entry
+//     (hinglish_account_block_query_two_substitutions), but never a
+//     contiguous two-word block, the size in between;
+//
+//   - a magnitude-word substitution ("lakh", 100,000 -> "hazar", 1,000)
+//     -- contrasts with hinglish_number_word_vs_digit_substitution's
+//     representation-only mismatch (same value, word vs. digit); here
+//     the ASR error changes the stated value's order of magnitude by
+//     100x while keeping the same word-vs-word representation, a
+//     realistic and financially consequential Hinglish ASR failure mode
+//     this corpus hadn't isolated on its own;
+//
+//   - a transliteration spelling-variant mismatch ("dhanyavad" ->
+//     "dhanyawad", the same Hindi word for "thank you" romanized with a
+//     v vs. a w) -- distinct from
+//     hinglish_case_sensitivity_capitalized_sir_mismatch (a
+//     capitalization difference) and
+//     hinglish_punctuation_only_mismatch_confirm_query (a punctuation
+//     difference): Hindi has no single standard Romanization, so two
+//     equally "correct" transliterations of the same spoken word
+//     differing only in one letter is a distinct, realistic Hinglish
+//     ASR/transcription mismatch this corpus hadn't covered.
+//
+//   - hinglish_long_utterance_single_insertion_isolated_delivery_status:       WER 1/21 (1 insertion / 21 words)
+//
+//   - hinglish_contiguous_two_word_insertion_block_hold_music_apology:         WER 1/4  (2 insertions / 8 words)
+//
+//   - hinglish_reference_repeated_word_fully_deleted_bilkul_bilkul:            WER 2/9  (2 deletions / 9 words)
+//
+//   - hinglish_three_word_phrase_collapsed_to_one_word_customer_care_executive: WER 3/10 (1 substitution + 2 deletions / 10 words)
+//
+//   - hinglish_cross_language_homophone_call_kal_confusion:                    WER 1/6  (1 substitution / 6 words)
+//
+//   - hinglish_two_word_contiguous_substitution_block_status_query:           WER 1/4  (2 substitutions / 8 words)
+//
+//   - hinglish_magnitude_word_substitution_lakh_hazar_confusion:               WER 1/10 (1 substitution / 10 words)
+//
+//   - hinglish_transliteration_spelling_variant_dhanyavad_mismatch:            WER 1/7  (1 substitution / 7 words)
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -1704,6 +1796,150 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "pehle mera account status batao sir",
 			Hypothesis: "sir mera account status batao pehle",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-08-10 (QA) additions below: eight more entries
+		// covering error shapes still not represented anywhere in this
+		// corpus. See the doc comment above FixedCorpus for the full
+		// rationale behind each.
+		{
+			// A single hallucinated word ("bilkul") inserted mid-utterance
+			// inside an otherwise perfectly transcribed 21-word sentence --
+			// this corpus already isolates a single deletion
+			// (hinglish_long_utterance_single_deletion_callback) and a
+			// single substitution
+			// (hinglish_long_utterance_single_substitution_call_timing_confirmation)
+			// at long-utterance scale, but never a single isolated
+			// insertion alone.
+			Name:       "hinglish_long_utterance_single_insertion_isolated_delivery_status",
+			Language:   "hi",
+			Reference:  "sir aapka order kal shaam tak deliver ho jayega aur agar koi problem ho to aap humein call kar sakte hain",
+			Hypothesis: "sir aapka order kal shaam tak deliver ho jayega bilkul aur agar koi problem ho to aap humein call kar sakte hain",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A contiguous two-word hallucinated block ("ek minute", "one
+			// minute") inserted mid-sentence -- both words are brand new,
+			// not a repeat of any existing reference word or phrase,
+			// distinct from
+			// hinglish_three_word_phrase_repeat_insertion_order_confirmation
+			// (repeats an existing phrase) and
+			// hinglish_digit_duplication_insertion_registered_mobile_number
+			// (a narrow digit-duplication shape).
+			Name:       "hinglish_contiguous_two_word_insertion_block_hold_music_apology",
+			Language:   "hi",
+			Reference:  "sir hold kijiye main check kar raha hoon",
+			Hypothesis: "sir hold kijiye ek minute main check kar raha hoon",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The reference genuinely repeats "bilkul" back to back
+			// ("bilkul bilkul"), and the fake ASR drops *both* occurrences
+			// entirely -- the full-collapse counterpart to
+			// hinglish_reference_repeated_word_collapsed_dhanyavaad (drops
+			// only one of the two) and
+			// hinglish_reference_repeated_word_substituted_haan_haan
+			// (mishears one as a different word instead of dropping
+			// either).
+			Name:       "hinglish_reference_repeated_word_fully_deleted_bilkul_bilkul",
+			Language:   "hi",
+			Reference:  "bilkul bilkul sir aapka order confirm ho gaya hai",
+			Hypothesis: "sir aapka order confirm ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// The three-word reference phrase "customer care executive"
+			// collapses into the single, wholly different hypothesis word
+			// "agent" -- a larger phrase collapse than
+			// hinglish_word_splitting_helpline_compound and
+			// hinglish_word_merging_update_profile_request, both of which
+			// are one-word-to-two-word (or vice versa). Since none of the
+			// three reference words share any token with "agent" or with
+			// each other, the minimal edit distance between the two
+			// three-word/one-word spans is exactly max(3,1) = 3 (one
+			// substitution, two deletions); the two-word prefix and
+			// five-word suffix on either side of the changed span are
+			// byte-identical in both strings, so they contribute zero
+			// additional edits.
+			Name:       "hinglish_three_word_phrase_collapsed_to_one_word_customer_care_executive",
+			Language:   "hi",
+			Reference:  "sir aapko customer care executive se baat karni hai kya",
+			Hypothesis: "sir aapko agent se baat karni hai kya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A cross-language acoustic homophone: the fake ASR mishears
+			// the Hindi word "kal" ("tomorrow") as the English word "call"
+			// that already appears later, unchanged, in the same sentence
+			// -- distinct from every existing acronym/homophone entry in
+			// this corpus (KYC/IVR/EMI, "to"/"too"), all of which confuse
+			// two same-language tokens; this confuses a Hindi token for an
+			// English one purely on acoustic similarity, a realistic
+			// Hinglish-specific ASR failure mode.
+			Name:       "hinglish_cross_language_homophone_call_kal_confusion",
+			Language:   "hi",
+			Reference:  "sir mujhe kal call karna hai",
+			Hypothesis: "sir mujhe call call karna hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A contiguous two-word substitution block ("pata karna", "to
+			// find out" -> "check kar", "to check") -- the size in between
+			// this corpus's existing contiguous three-word block
+			// (hinglish_contiguous_three_word_substitution_block_refund_status)
+			// and its existing non-adjacent two-substitution entry
+			// (hinglish_account_block_query_two_substitutions, whose two
+			// substitutions sit far apart in the sentence rather than next
+			// to each other).
+			Name:       "hinglish_two_word_contiguous_substitution_block_status_query",
+			Language:   "hi",
+			Reference:  "sir mera order status pata karna hai abhi",
+			Hypothesis: "sir mera order status check kar hai abhi",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A magnitude-word substitution: the fake ASR mishears "lakh"
+			// (100,000) as "hazar" (1,000) inside an otherwise correctly
+			// transcribed loan-amount sentence -- unlike
+			// hinglish_number_word_vs_digit_substitution (a
+			// representation-only mismatch, same value spoken as a word
+			// vs. transcribed as a digit), this substitution changes the
+			// stated value's order of magnitude by 100x while keeping the
+			// same word-vs-word representation, a realistic and
+			// financially consequential Hinglish ASR failure mode this
+			// corpus hadn't isolated before.
+			Name:       "hinglish_magnitude_word_substitution_lakh_hazar_confusion",
+			Language:   "hi",
+			Reference:  "sir aapka loan amount paanch lakh rupaye approved ho gaya",
+			Hypothesis: "sir aapka loan amount paanch hazar rupaye approved ho gaya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A transliteration spelling-variant mismatch: the fake ASR
+			// transcribes the Hindi word for "thank you" as "dhanyawad"
+			// where the reference spells it "dhanyavad" -- the same
+			// spoken word, romanized with a w instead of a v. Hindi has no
+			// single standard Romanization, so two equally "correct"
+			// transliterations of the same word differing by one letter
+			// is a distinct, realistic Hinglish transcription mismatch,
+			// not covered by
+			// hinglish_case_sensitivity_capitalized_sir_mismatch
+			// (capitalization) or
+			// hinglish_punctuation_only_mismatch_confirm_query
+			// (punctuation).
+			Name:       "hinglish_transliteration_spelling_variant_dhanyavad_mismatch",
+			Language:   "hi",
+			Reference:  "dhanyavad sir aapka order confirm ho gaya",
+			Hypothesis: "dhanyawad sir aapka order confirm ho gaya",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

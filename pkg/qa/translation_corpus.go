@@ -228,6 +228,85 @@ type TranslationCorpusEntry struct {
 //     demonstrating clipping prevents this degenerate repetition from
 //     scoring anywhere near as well as its raw (unclipped) unigram
 //     overlap might otherwise suggest.
+//
+// Sprint 2026-08-10 (QA) adds six further entries covering
+// translation-quality failure shapes the original twelve didn't
+// exercise:
+//
+//   - word_order_adjacent_swap_end_delivery_schedule: a localized
+//     two-word adjacent swap at the very end of a 6-word sentence
+//     ("delivered tomorrow" -> "tomorrow delivered"), the counterpart to
+//     word_reordering_full_reversal_delivery_schedule's full-sentence
+//     reversal -- here every unigram still matches (p1 = 1.0, the
+//     vocabulary is identical) but, unlike the full reversal (which
+//     collapses every higher-order precision to the epsilon floor),
+//     only the n-grams overlapping the swapped pair are broken, so
+//     p2/p3/p4 degrade gracefully (3/5, 1/2, 1/3) instead of collapsing
+//     entirely. BP = 1.0 (equal length). Demonstrates that BLEU's
+//     sensitivity to reordering scales with how much of the sentence is
+//     disturbed, not just whether any reordering occurred at all;
+//
+//   - two_scattered_substitutions_currency_and_status_refund: two
+//     independent single-word substitutions ("rupees"->"dollars" at
+//     word 6, "processed"->"completed" at word 9 of a 9-word sentence)
+//     placed close enough together that a single 4-gram spans both --
+//     distinct from named_entity_mismatch_relationship_manager_name and
+//     one_word_substitution_currency_mismatch (each exactly one
+//     substitution): p1 = 7/9, p2 = 5/8, p3 = 3/7, p4 = 2/6, each
+//     computed by counting exactly which n-grams overlap either error
+//     position (with the 4-gram order's two error-touching windows
+//     overlapping into one, not two, broken 4-gram, since both errors
+//     fall within a single 4-word span). BP = 1.0 (equal length).
+//     Verifies BLEUScore's clipping/counting behaves correctly once two
+//     independent errors' broken-n-gram windows overlap, not just when
+//     they're far enough apart to be independent;
+//
+//   - short_pair_leading_word_insertion_call_disconnected: a 3-word
+//     reference ("call is disconnected") against a 4-word candidate
+//     with one hallucinated leading word ("the call is disconnected")
+//     -- exercises the full effective order (maxN = min(4, 4) = 4, all
+//     four precisions computed) at short-sentence scale, contrasting
+//     with very_short_pair_yes_sir (effective order 1, a 1-word
+//     candidate) and very_short_pair_substitution_yes_maam below
+//     (effective order 2): p1 = 3/4, p2 = 2/3, p3 = 1/2, and p4 is
+//     epsilon-smoothed (0.1/1) since the candidate's only 4-gram
+//     ("the call is disconnected") has zero matches in a reference too
+//     short to contain any 4-gram at all. BP = 1.0 (candidate longer
+//     than reference, 4 > 3);
+//
+//   - stutter_duplicated_trailing_word_confirmed_confirmed: a 5-word
+//     reference with its own final word repeated once more by the
+//     candidate ("...confirmed" -> "...confirmed confirmed") -- a
+//     realistic single-repeat MT/ASR-style disfluency, contrasting with
+//     over_repeated_word_clipping_billing_transfer's much more
+//     degenerate 8x-repeated-single-token candidate. Clipping still
+//     caps the credited match for "confirmed" at the reference's own
+//     count (1), not the candidate's count (2): p1 = 5/6, p2 = 4/5,
+//     p3 = 3/4, p4 = 2/3. BP = 1.0 (candidate longer, 6 > 5).
+//     Demonstrates clipping matters even for the mildest possible
+//     over-repetition (one extra copy), not just the extreme
+//     all-one-word case;
+//
+//   - very_short_pair_substitution_yes_maam: a 2-word reference ("yes
+//     sir") against a 2-word candidate substituting the address term
+//     ("yes sir" -> "yes ma'am") -- unlike very_short_pair_yes_sir
+//     (a deletion, effective order 1), this keeps the candidate at the
+//     reference's own length so effective order reaches 2 (both p1 and
+//     p2 are computed): p1 = 1/2, p2 is epsilon-smoothed (0.1/1) since
+//     the candidate's only bigram doesn't match the reference's. BP =
+//     1.0 (equal length). Fills the "effective order 2" gap between
+//     the existing effective-order-1 and effective-order-4 short
+//     entries;
+//
+//   - combined_substitution_and_trailing_hallucination_complaint_resolved_closed:
+//     a 5-word reference with both a substitution ("resolved" ->
+//     "closed") and a hallucinated trailing word ("now") appended by
+//     the candidate -- distinct from every existing single-mechanism
+//     entry (a pure substitution at unchanged length, or a pure
+//     length-only change with perfect precision): p1 = 4/6, p2 = 3/5,
+//     p3 = 1/2, p4 = 1/3, each precision dragged down by both the
+//     substitution and the trailing dilution together rather than by
+//     either mechanism alone. BP = 1.0 (candidate longer, 6 > 5).
 func FixedTranslationCorpus() []TranslationCorpusEntry {
 	return []TranslationCorpusEntry{
 		{
@@ -330,6 +409,58 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Source:         "please mujhe billing department mein transfer kar dijiye",
 			Reference:      "please transfer the call to the billing department",
 			Candidate:      "the the the the the the the the",
+		},
+
+		// --- Sprint 2026-08-10 (QA) additions below: six more entries.
+		// See the doc comment above for each entry's full rationale and
+		// hand-computed BLEU.
+		{
+			Name:           "word_order_adjacent_swap_end_delivery_schedule",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka order kal shaam tak deliver ho jayega",
+			Reference:      "your order will be delivered tomorrow",
+			Candidate:      "your order will be tomorrow delivered",
+		},
+		{
+			Name:           "two_scattered_substitutions_currency_and_status_refund",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka refund paanch sau rupaye process ho gaya hai",
+			Reference:      "your refund of five hundred rupees has been processed",
+			Candidate:      "your refund of five hundred dollars has been completed",
+		},
+		{
+			Name:           "short_pair_leading_word_insertion_call_disconnected",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "call cut gaya hai",
+			Reference:      "call is disconnected",
+			Candidate:      "the call is disconnected",
+		},
+		{
+			Name:           "stutter_duplicated_trailing_word_confirmed_confirmed",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka order confirm ho gaya hai",
+			Reference:      "your order has been confirmed",
+			Candidate:      "your order has been confirmed confirmed",
+		},
+		{
+			Name:           "very_short_pair_substitution_yes_maam",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "haan madam",
+			Reference:      "yes sir",
+			Candidate:      "yes ma'am",
+		},
+		{
+			Name:           "combined_substitution_and_trailing_hallucination_complaint_resolved_closed",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapki complaint resolve ho gayi hai",
+			Reference:      "your complaint has been resolved",
+			Candidate:      "your complaint has been closed now",
 		},
 	}
 }
