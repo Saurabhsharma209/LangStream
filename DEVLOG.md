@@ -3227,3 +3227,92 @@ cmd/langstream/*.go, examples/` charter in spirit even though the literal
 glob doesn't list it yet -- worth a small workstreams.md update next
 scheduled run to add `pkg/webrtcgw/*.go` explicitly), and continue normal
 Week 3/4 assessment unaffected by this addition.
+
+## 2026-08-11 (scheduled run, Sprint 22) — QA corpus growth + SRE clean audit, no roadmap items closed
+
+Still genuinely blocked on Saurabh's anchor-customer/live-traffic decision
+for Week 3's one open item (real-PSTN jitter tuning) and all of Week 4
+(unchanged since Sprint 8). Repo health at start: root filesystem had
+2+GB free throughout this run (no disk-exhaustion wall this time), and
+`go build ./... && go vet ./... && go test ./... -race -count=3 &&
+gofmt -l .` all passed clean on the first try, across all 11 packages.
+ClearStream re-checked (`git ls-remote --tags`): still only `v0.1.0`, no
+`VERSIONING.md` action needed.
+
+PE and Tech were not spawned this run — planning found no owned-file gap
+in `pkg/asr`, `pkg/translate`, `pkg/tts`, `pkg/langstream`, `pkg/rtp`, or
+`pkg/webrtcgw`/`cmd/langstream` worth a dedicated agent, same reasoning as
+Sprints 16/17/21.
+
+### Shipped
+
+**QA** — grew `pkg/qa/corpus.go` (WER) 75→81 and
+`pkg/qa/translation_corpus.go` (BLEU) 18→24, six new non-overlapping error
+shapes each:
+- WER: mid-sentence hallucinated insertion (vs. edge-only previously),
+  spoken-date-words vs. digit mismatch, whole-sentence word-order reversal
+  (WER counterpart to an existing BLEU reversal entry), Hindi gender/case
+  agreement homophone substitution, meaning-flipping negation
+  *substitution* (distinct from the existing negation *deletion* entry),
+  semantically-correct acronym expansion still penalized by WER.
+- BLEU: word-splitting, word-merging, mid-sentence transposition (vs. an
+  existing end-of-sentence swap), code-switching residue left
+  untranslated, target-language homophone confusion (their/there — BLEU
+  counterpart to an existing WER to/too entry), 12hr vs 24hr time
+  formatting.
+
+All 12 new entries' precomputed WER/BLEU values were hand-derived and
+pass `TestFixedCorpus_PrecomputedWERMatches` /
+`TestFixedTranslationCorpus_PrecomputedBLEUMatches`.
+
+QA also ran a clean race-pattern audit: grepped all 68 `go func(...)`
+launch sites repo-wide (product + test code) and manually verified
+synchronization at each against the "assert immediately after a
+background goroutine's unsynchronized channel send" bug class found in
+earlier sprints. Result: clean — every site uses a consistent
+channel-close-then-receive or `sync.WaitGroup` idiom with the
+receive/Wait strictly preceding any assertion. No fix needed, a real
+negative result.
+
+**SRE** — full audit, fourth consecutive clean result on the vendor-key
+front, first full pass also covering CI/Makefile package coverage and
+observability `RecordCost` coverage specifically:
+- `scripts/check-vendor-keys.sh` confirmed still passing (`OK -- 6 vendor
+  API key(s) ... all present ... with no stale entries`) — all 6 real
+  vendor keys (`DEEPGRAM_API_KEY`, `SARVAM_API_KEY`, `OPENAI_API_KEY`,
+  `GEMINI_API_KEY`, `CARTESIA_API_KEY`, `ELEVENLABS_API_KEY`) in sync
+  across `cmd/langstream/main.go`, `docker-compose.yml`, and the guard
+  script itself; its regression test
+  (`scripts/check-vendor-keys_test.sh`) also passed all 3 cases.
+- `.github/workflows/ci.yml` and `Makefile` both use `./...`-style
+  whole-module targets, so newer packages (`pkg/webrtcgw`, `pkg/qa`) are
+  automatically covered with no explicit per-package wiring needed —
+  confirmed, not assumed. `gofmt` check wired into both. `make ci`'s
+  target list matches CI's steps 1:1.
+- All 6 real vendor clients (Deepgram, Sarvam, GPT-4o, Gemini, Cartesia,
+  ElevenLabs) confirmed calling `RecordCost` with correct per-vendor cost
+  models; glass-to-glass latency recording confirmed at the
+  pipeline-session level (`pkg/langstream/session.go`/`fallback.go`),
+  which is architecturally correct (end-to-end, not per-backend-call).
+  No gap found.
+
+No code/config changes were needed from SRE this run — a clean audit, not
+manufactured busywork.
+
+### Bugs found/fixed
+None this run.
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 11 packages after EM integration of both
+  agents' changes.
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, need Saurabh's anchor-customer/live-traffic decision.
+
+### Tomorrow
+- No specific carry-over items from this run (both audits clean). Next
+  scheduled run should re-check disk headroom before assuming it persists
+  (per Sprint 20's standing guidance) and continue opportunistic
+  hardening / corpus growth until Week 4 is unblocked.

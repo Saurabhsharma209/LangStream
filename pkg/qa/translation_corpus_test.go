@@ -290,6 +290,72 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	combinedP4 := 1.0 / 3.0
 	wantCombinedSubstitutionAndHallucination := math.Exp((math.Log(combinedP1) + math.Log(combinedP2) + math.Log(combinedP3) + math.Log(combinedP4)) / 4.0)
 
+	// word_splitting_helpline_compound_translation: 7-word Reference,
+	// 8-word Candidate splitting "helpline" into "help line". p1 = 6/8
+	// ("please","call","our","number","for","support" match; "help" and
+	// "line" don't), p2 = 4/7, p3 = 2/6, p4 is epsilon-smoothed (0.1/5)
+	// -- no 4-gram survives the split intact. BP = 1.0 (candidate
+	// longer, 8 > 7).
+	splitP1 := 6.0 / 8.0
+	splitP2 := 4.0 / 7.0
+	splitP3 := 2.0 / 6.0
+	splitP4 := 0.1 / 5.0
+	wantWordSplitting := math.Exp((math.Log(splitP1) + math.Log(splitP2) + math.Log(splitP3) + math.Log(splitP4)) / 4.0)
+
+	// word_merging_signup_process_confirmation: 7-word Reference,
+	// 6-word Candidate merging "sign up" into "signup". p1 = 5/6, p2 =
+	// 3/5, p3 = 1/2, p4 = 1/3. BP = exp(1 - 7/6) since the merged
+	// Candidate is one word shorter than the Reference.
+	mergeP1 := 5.0 / 6.0
+	mergeP2 := 3.0 / 5.0
+	mergeP3 := 1.0 / 2.0
+	mergeP4 := 1.0 / 3.0
+	mergeBP := math.Exp(1.0 - 7.0/6.0)
+	wantWordMerging := mergeBP * math.Exp((math.Log(mergeP1)+math.Log(mergeP2)+math.Log(mergeP3)+math.Log(mergeP4))/4.0)
+
+	// transposition_mid_sentence_will_be_delivered: 8-word Reference and
+	// Candidate share the identical bag of words with "will be" swapped
+	// to "be will" in the middle of the sentence. p1 = 8/8 = 1.0, p2 =
+	// 4/7, p3 = 1/3, p4 = 1/5. BP = 1.0 (equal length, 8 == 8).
+	transpositionP1 := 8.0 / 8.0
+	transpositionP2 := 4.0 / 7.0
+	transpositionP3 := 1.0 / 3.0
+	transpositionP4 := 1.0 / 5.0
+	wantTransposition := math.Exp((math.Log(transpositionP1) + math.Log(transpositionP2) + math.Log(transpositionP3) + math.Log(transpositionP4)) / 4.0)
+
+	// code_switching_untranslated_source_word_khata: 7-word Reference
+	// and Candidate, equal length, with the Reference's "account"
+	// replaced by the untranslated Hindi word "khata" at word 5. p1 =
+	// 6/7, p2 = 4/6, p3 = 2/5, p4 = 1/4. BP = 1.0 (equal length,
+	// 7 == 7).
+	codeSwitchP1 := 6.0 / 7.0
+	codeSwitchP2 := 4.0 / 6.0
+	codeSwitchP3 := 2.0 / 5.0
+	codeSwitchP4 := 1.0 / 4.0
+	wantCodeSwitching := math.Exp((math.Log(codeSwitchP1) + math.Log(codeSwitchP2) + math.Log(codeSwitchP3) + math.Log(codeSwitchP4)) / 4.0)
+
+	// homophone_confusion_target_language_their_there: 8-word Reference
+	// and Candidate, equal length, substituting the homophone "their"
+	// for "there" at word 5. p1 = 7/8, p2 = 5/7, p3 = 1/2, p4 = 1/5.
+	// BP = 1.0 (equal length, 8 == 8).
+	homophoneP1 := 7.0 / 8.0
+	homophoneP2 := 5.0 / 7.0
+	homophoneP3 := 1.0 / 2.0
+	homophoneP4 := 1.0 / 5.0
+	wantHomophoneConfusion := math.Exp((math.Log(homophoneP1) + math.Log(homophoneP2) + math.Log(homophoneP3) + math.Log(homophoneP4)) / 4.0)
+
+	// number_date_formatting_difference_24hr_vs_12hr: 7-word Reference,
+	// 6-word Candidate collapsing the spoken 12-hour time "5 pm" into
+	// the 24-hour numeral "17:00". p1 = 5/6, p2 = 3/5, p3 = 1/2,
+	// p4 = 1/3. BP = exp(1 - 7/6) since the reformatted Candidate is one
+	// word shorter than the Reference.
+	dateFormatP1 := 5.0 / 6.0
+	dateFormatP2 := 3.0 / 5.0
+	dateFormatP3 := 1.0 / 2.0
+	dateFormatP4 := 1.0 / 3.0
+	dateFormatBP := math.Exp(1.0 - 7.0/6.0)
+	wantDateFormatting := dateFormatBP * math.Exp((math.Log(dateFormatP1)+math.Log(dateFormatP2)+math.Log(dateFormatP3)+math.Log(dateFormatP4))/4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -315,6 +381,15 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"stutter_duplicated_trailing_word_confirmed_confirmed":                       wantStutterDuplication,
 		"very_short_pair_substitution_yes_maam":                                      wantShortPairSubstitution,
 		"combined_substitution_and_trailing_hallucination_complaint_resolved_closed": wantCombinedSubstitutionAndHallucination,
+
+		// Sprint 2026-08-11 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"word_splitting_helpline_compound_translation":    wantWordSplitting,
+		"word_merging_signup_process_confirmation":        wantWordMerging,
+		"transposition_mid_sentence_will_be_delivered":    wantTransposition,
+		"code_switching_untranslated_source_word_khata":   wantCodeSwitching,
+		"homophone_confusion_target_language_their_there": wantHomophoneConfusion,
+		"number_date_formatting_difference_24hr_vs_12hr":  wantDateFormatting,
 	}
 
 	entries := FixedTranslationCorpus()

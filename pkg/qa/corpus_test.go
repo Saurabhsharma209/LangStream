@@ -282,6 +282,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_two_word_contiguous_substitution_block_status_query":             2.0 / 8.0,
 		"hinglish_magnitude_word_substitution_lakh_hazar_confusion":                1.0 / 10.0,
 		"hinglish_transliteration_spelling_variant_dhanyavad_mismatch":             1.0 / 7.0,
+
+		// Sprint 2026-08-11 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_mid_sentence_hallucinated_insertion_crosstalk":            1.0 / 7.0,
+		"hinglish_date_format_digit_vs_spoken_words_mismatch":               2.0 / 6.0,
+		"hinglish_full_word_order_reversal_no_substitution_parcel_delivery": 6.0 / 7.0,
+		"hinglish_gender_agreement_homophone_unka_unke_substitution":        1.0 / 5.0,
+		"hinglish_negation_flip_substitution_nahi_ho_refund_status":         1.0 / 6.0,
+		"hinglish_acronym_expansion_substitution_emi_installment":           1.0 / 7.0,
 	}
 
 	entries := FixedCorpus()

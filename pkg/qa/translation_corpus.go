@@ -307,6 +307,56 @@ type TranslationCorpusEntry struct {
 //     p3 = 1/2, p4 = 1/3, each precision dragged down by both the
 //     substitution and the trailing dilution together rather than by
 //     either mechanism alone. BP = 1.0 (candidate longer, 6 > 5).
+//
+// Sprint 2026-08-11 (QA) adds six further entries covering
+// translation-quality failure shapes the existing eighteen didn't
+// exercise:
+//
+//   - word_splitting_helpline_compound_translation: the Candidate splits
+//     the Reference's single compound token "helpline" into two words
+//     "help line" -- the BLEU counterpart to corpus.go's
+//     hinglish_word_splitting_helpline_compound, not previously
+//     exercised on the translation-quality side. p1 = 6/8, p2 = 4/7,
+//     p3 = 2/6, p4 is epsilon-smoothed (0.1/5) since no 4-gram survives
+//     the split intact. BP = 1.0 (candidate longer, 8 > 7);
+//
+//   - word_merging_signup_process_confirmation: the mirror image --
+//     the Candidate merges the Reference's two words "sign up" into
+//     one token "signup". p1 = 5/6, p2 = 3/5, p3 = 1/2, p4 = 1/3. BP =
+//     exp(1 - 7/6) since the merged Candidate is one word shorter than
+//     the Reference;
+//
+//   - transposition_mid_sentence_will_be_delivered: an adjacent two-word
+//     swap ("will be" -> "be will") sitting in the middle of an 8-word
+//     sentence, not at the edge like
+//     word_order_adjacent_swap_end_delivery_schedule's end-of-sentence
+//     swap -- p1 = 1.0 (identical bag of words), p2 = 4/7, p3 = 1/3,
+//     p4 = 1/5. BP = 1.0 (equal length, 8 == 8);
+//
+//   - code_switching_untranslated_source_word_khata: a code-switching
+//     residue failure -- the Candidate leaves one Hindi word ("khata")
+//     untranslated in the middle of an otherwise-perfect English
+//     translation, in place of the Reference's "account". Distinct from
+//     named_entity_mismatch_relationship_manager_name (a wrong proper
+//     noun, still fully translated) since this token was never
+//     translated at all. p1 = 6/7, p2 = 4/6, p3 = 2/5, p4 = 1/4. BP =
+//     1.0 (equal length, 7 == 7);
+//
+//   - homophone_confusion_target_language_their_there: the Candidate
+//     substitutes the homophone "their" for the Reference's "there" --
+//     the target-language counterpart to corpus.go's
+//     hinglish_homophone_to_too_confirmation_query, not previously
+//     exercised for BLEU. p1 = 7/8, p2 = 5/7, p3 = 1/2, p4 = 1/5. BP =
+//     1.0 (equal length, 8 == 8);
+//
+//   - number_date_formatting_difference_24hr_vs_12hr: the Candidate
+//     collapses the Reference's spoken 12-hour time "5 pm" (two words)
+//     into a 24-hour numeral "17:00" (one word) -- a number/date
+//     formatting difference, distinct from every substitution/deletion
+//     entry above since no wrong value is stated, only a different
+//     representation of the same time. p1 = 5/6, p2 = 3/5, p3 = 1/2,
+//     p4 = 1/3. BP = exp(1 - 7/6) since the reformatted Candidate is one
+//     word shorter than the Reference.
 func FixedTranslationCorpus() []TranslationCorpusEntry {
 	return []TranslationCorpusEntry{
 		{
@@ -461,6 +511,58 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Source:         "sir aapki complaint resolve ho gayi hai",
 			Reference:      "your complaint has been resolved",
 			Candidate:      "your complaint has been closed now",
+		},
+
+		// --- Sprint 2026-08-11 (QA) additions below: six more entries.
+		// See the doc comment above for each entry's full rationale and
+		// hand-computed BLEU.
+		{
+			Name:           "word_splitting_helpline_compound_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya sahayata ke liye hamare helpline number par call karein",
+			Reference:      "please call our helpline number for support",
+			Candidate:      "please call our help line number for support",
+		},
+		{
+			Name:           "word_merging_signup_process_confirmation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya naye process ke liye sign up karein",
+			Reference:      "please sign up for the new process",
+			Candidate:      "please signup for the new process",
+		},
+		{
+			Name:           "transposition_mid_sentence_will_be_delivered",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka parcel shaam tak deliver ho jayega",
+			Reference:      "your parcel will be delivered by evening today",
+			Candidate:      "your parcel be will delivered by evening today",
+		},
+		{
+			Name:           "code_switching_untranslated_source_word_khata",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya apna bank khata number ab share karein",
+			Reference:      "please share your bank account number now",
+			Candidate:      "please share your bank khata number now",
+		},
+		{
+			Name:           "homophone_confusion_target_language_their_there",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya parcel darwaze par wahan rakh dein",
+			Reference:      "please leave the package there at the door",
+			Candidate:      "please leave the package their at the door",
+		},
+		{
+			Name:           "number_date_formatting_difference_24hr_vs_12hr",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka appointment kal shaam paanch baje hai",
+			Reference:      "your appointment is at 5 pm tomorrow",
+			Candidate:      "your appointment is at 17:00 tomorrow",
 		},
 	}
 }

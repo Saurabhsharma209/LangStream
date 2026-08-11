@@ -476,6 +476,74 @@ func placeholderPCM() []byte {
 //   - hinglish_magnitude_word_substitution_lakh_hazar_confusion:               WER 1/10 (1 substitution / 10 words)
 //
 //   - hinglish_transliteration_spelling_variant_dhanyavad_mismatch:            WER 1/7  (1 substitution / 7 words)
+//
+// Sprint 2026-08-11 (QA) adds six further entries covering error shapes
+// not yet exercised by any entry above:
+//
+//   - a mid-sentence hallucinated single-word insertion modeling
+//     crosstalk (an extra word appearing in the *middle* of an
+//     otherwise correctly transcribed utterance) -- distinct from every
+//     existing insertion entry in this corpus, whose insertions all sit
+//     at the leading or trailing edge of the utterance
+//     (hinglish_insertion_leading_word_repeat_call_open,
+//     hinglish_insertion_trailing_word_repeat_call_end) or are isolated
+//     mid-utterance repeats of an existing word/phrase rather than a
+//     genuinely unrelated interjected token;
+//
+//   - a date-format mismatch where the fake ASR transcribes a spoken
+//     date ("pandrah august", two words) as a numeral date ("15/08",
+//     one word) -- a number/date *formatting* difference distinct from
+//     hinglish_number_word_vs_digit_substitution (a same-shape
+//     word-vs-digit substitution for a plain quantity, not a date) and
+//     hinglish_magnitude_word_substitution_lakh_hazar_confusion (a
+//     magnitude error, not a formatting one); costs one substitution
+//     plus one deletion since two reference words collapse into one
+//     hypothesis token;
+//
+//   - a full word-order reversal with zero substitutions/deletions/
+//     insertions in the bag-of-words sense (every word from the
+//     reference appears exactly once in the hypothesis, just
+//     completely reordered) -- the WER counterpart to
+//     translation_corpus.go's
+//     word_reordering_full_reversal_delivery_schedule; distinct from
+//     hinglish_long_distance_word_swap_account_status_request (which
+//     swaps only two words, not the entire sentence);
+//
+//   - a grammatical-gender homophone substitution ("unka" -> "unke",
+//     both meaning roughly "his/her/their" but differing in case
+//     agreement) -- distinct from every existing homophone/acronym
+//     entry (KYC/IVR/EMI, "to"/"too", "call"/"kal"), none of which
+//     involve Hindi grammatical gender/case agreement;
+//
+//   - a critical negation-flip substitution ("nahi" -> "ho", flipping
+//     "will not be processed" into a nonsensical/positive-leaning
+//     phrase) -- distinct from hinglish_negation_deletion_service_unavailable
+//     (which *drops* a negation word entirely) since this substitutes
+//     the negation for a different word rather than deleting it, the
+//     realistic "ASR mishears a one-syllable negation" failure mode
+//     that flips meaning without changing the word count at all;
+//
+//   - an acronym-expansion substitution ("emi" -> "installment", a
+//     semantically equivalent expansion of the acronym rather than a
+//     wrong word) -- distinct from
+//     hinglish_acronym_emi_homophone_substitution (which mishears the
+//     acronym for an unrelated similar-sounding word, not a synonym
+//     expansion of it): this models an ASR/NLU layer "helpfully"
+//     normalizing an acronym to its expansion, which WordErrorRate
+//     still scores as a full token mismatch despite being semantically
+//     correct.
+//
+//   - hinglish_mid_sentence_hallucinated_insertion_crosstalk:                  WER 1/7  (1 insertion / 7 words)
+//
+//   - hinglish_date_format_digit_vs_spoken_words_mismatch:                     WER 1/3  (1 substitution + 1 deletion / 6 words)
+//
+//   - hinglish_full_word_order_reversal_no_substitution_parcel_delivery:       WER 6/7  (6 substitutions / 7 words)
+//
+//   - hinglish_gender_agreement_homophone_unka_unke_substitution:              WER 1/5  (1 substitution / 5 words)
+//
+//   - hinglish_negation_flip_substitution_nahi_ho_refund_status:               WER 1/6  (1 substitution / 6 words)
+//
+//   - hinglish_acronym_expansion_substitution_emi_installment:                 WER 1/7  (1 substitution / 7 words)
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -1940,6 +2008,58 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "dhanyavad sir aapka order confirm ho gaya",
 			Hypothesis: "dhanyawad sir aapka order confirm ho gaya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-08-11 (QA) additions below: six more entries.
+		// See the doc comment above FixedCorpus for each entry's full
+		// rationale and hand-computed WER.
+		{
+			Name:       "hinglish_mid_sentence_hallucinated_insertion_crosstalk",
+			Language:   "hi",
+			Reference:  "sir aapka order confirm ho gaya hai",
+			Hypothesis: "sir aapka order excuse confirm ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			Name:       "hinglish_date_format_digit_vs_spoken_words_mismatch",
+			Language:   "hi",
+			Reference:  "aapka appointment pandrah august ko hai",
+			Hypothesis: "aapka appointment 15/08 ko hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			Name:       "hinglish_full_word_order_reversal_no_substitution_parcel_delivery",
+			Language:   "hi",
+			Reference:  "sir aapka parcel kal tak pahuch jayega",
+			Hypothesis: "jayega pahuch tak kal parcel aapka sir",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			Name:       "hinglish_gender_agreement_homophone_unka_unke_substitution",
+			Language:   "hi",
+			Reference:  "sir unka account block hai",
+			Hypothesis: "sir unke account block hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			Name:       "hinglish_negation_flip_substitution_nahi_ho_refund_status",
+			Language:   "hi",
+			Reference:  "sir aapka refund process nahi hoga",
+			Hypothesis: "sir aapka refund process ho hoga",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			Name:       "hinglish_acronym_expansion_substitution_emi_installment",
+			Language:   "hi",
+			Reference:  "sir aapki emi due date kal hai",
+			Hypothesis: "sir aapki installment due date kal hai",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},
