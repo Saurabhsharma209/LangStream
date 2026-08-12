@@ -291,6 +291,16 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_gender_agreement_homophone_unka_unke_substitution":        1.0 / 5.0,
 		"hinglish_negation_flip_substitution_nahi_ho_refund_status":         1.0 / 6.0,
 		"hinglish_acronym_expansion_substitution_emi_installment":           1.0 / 7.0,
+
+		// Sprint 2026-08-12 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_honorific_marker_ji_deletion":                       1.0 / 7.0,
+		"hinglish_unit_of_measurement_kilometer_miles_substitution":   1.0 / 7.0,
+		"hinglish_numeral_comma_grouping_formatting_substitution":     1.0 / 6.0,
+		"hinglish_alphanumeric_bank_code_ifsc_substitution":           1.0 / 6.0,
+		"hinglish_politeness_register_aap_tum_downgrade_substitution": 1.0 / 7.0,
+		"hinglish_currency_subunit_paise_rupee_substitution":          1.0 / 8.0,
+		"hinglish_devanagari_numeral_script_substitution":             1.0 / 6.0,
 	}
 
 	entries := FixedCorpus()

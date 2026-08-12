@@ -3316,3 +3316,98 @@ None this run.
   scheduled run should re-check disk headroom before assuming it persists
   (per Sprint 20's standing guidance) and continue opportunistic
   hardening / corpus growth until Week 4 is unblocked.
+
+## 2026-08-12 (scheduled run, Sprint 23) — QA corpus growth + SRE clean audit, no roadmap items closed
+
+Repo health at start: root filesystem had ~1.8GB free (tighter than
+Sprint 21/22 but workable); `go build ./... && go vet ./... && go test
+./... -race && gofmt -l .` all passed clean on the first try, across all
+12 packages. Note: this run's sandbox instance had a pre-existing
+`/tmp/gocache` directory owned by `nobody:nogroup` (356MB, unwritable) —
+worked around by pointing `GOCACHE` at a fresh `/tmp/gocache_new`
+instead of trying to reuse or `chmod` the stale one. Also needed
+`TMPDIR=/tmp/gotmp`/`GOTMPDIR=/tmp/gotmp` explicitly — the default `$TMPDIR`
+resolved under the full `/sessions` filesystem and caused
+`go build`'s work-dir creation to fail with "no space left on device"
+even though `/tmp` itself had headroom. ClearStream re-checked
+(`git ls-remote --tags`): still only `v0.1.0`, no `VERSIONING.md` action
+needed.
+
+PE and Tech were not spawned this run — planning found no owned-file gap
+worth a dedicated agent, same reasoning as Sprints 16/17/21/22.
+
+### Shipped
+
+**QA** — grew `pkg/qa/corpus.go` (WER) 81→88 and
+`pkg/qa/translation_corpus.go` (BLEU) 24→31, seven new non-overlapping
+error shapes each:
+- WER: Hindi honorific-marker "ji" deletion, km/miles unit-of-measurement
+  substitution, numeral comma-grouping formatting mismatch, IFSC-style
+  alphanumeric bank-code misrecognition, aap/tum politeness-register
+  downgrade, paise/rupees currency-subunit substitution, Devanagari-vs-
+  Latin numeral script substitution.
+- BLEU: honorific-marker deletion, km/miles unit substitution, numeral
+  word-to-digit collapse, IFSC-style alphanumeric bank-code substitution,
+  paise/rupees currency-subunit substitution, acronym-expansion mismatch
+  (KYC expanded to full form, distinct from the WER corpus's acronym
+  shape), mid-sentence filler-word insertion.
+
+All 14 new entries' precomputed WER/BLEU values were hand-derived (BLEU
+values additionally cross-checked against a from-scratch reimplementation
+of the clipped n-gram + brevity-penalty algorithm) and pass
+`TestFixedCorpus_PrecomputedWERMatches` /
+`TestFixedTranslationCorpus_PrecomputedBLEUMatches`.
+
+QA also ran a fresh race-pattern audit across all `go func(` launch sites
+repo-wide (16 non-test sites, ~50 across test files) — reviewed every
+non-test site (ASR/TTS vendor read loops, RTP duplex bridging, WebRTC
+gateway peer bridges, session teardown, CLI server lifecycles) and
+spot-checked the highest-risk concurrent test patterns. Result: clean —
+no instance of the "assert immediately after a background goroutine's
+unsynchronized channel send" bug class found.
+
+**SRE** — full fresh audit, fifth consecutive clean result on the
+vendor-key/CI front:
+- `scripts/check-vendor-keys.sh` confirmed still passing (6/6 vendor keys
+  in sync across `cmd/langstream/main.go`, `docker-compose.yml`, and the
+  guard script).
+- `docs/compliance.md`'s vendor table cross-checked against the 6
+  registered backends in `cmd/langstream/main.go` — in sync, no
+  staleness.
+- Per-vendor `RecordCost` math spot-checked (not just presence) across
+  all 6 real vendor clients (Deepgram, Sarvam, GPT-4o, Gemini, Cartesia,
+  ElevenLabs) — correct minute/character/token-based cost models
+  confirmed. Observability dashboard endpoints (`/`, `/dashboard.json`,
+  `/metrics`) confirmed built and covered by `dashboard_test.go`'s 14
+  test functions.
+- `.github/workflows/ci.yml` and `Makefile` confirmed step-for-step
+  parity (`make ci` == CI's 6-step sequence), both `./...`-style so
+  newly added packages are automatically covered with no drift possible.
+- Searched for one genuine improvement within owned files; found none
+  worth making — Dockerfile's `HEALTHCHECK NONE` is a deliberate,
+  already-documented prior decision (not a gap), CI caching and the
+  vendor-key-guard regression test already cover what they claim to.
+  Declined to invent busywork.
+
+No code/config changes were needed from SRE this run — a clean audit, not
+manufactured busywork.
+
+### Bugs found/fixed
+None this run.
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 12 packages after EM integration of QA's
+  changes (SRE made no changes this run).
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, need Saurabh's anchor-customer/live-traffic decision.
+
+### Tomorrow
+- No specific carry-over items from this run (both audits clean). Next
+  scheduled run should re-check disk headroom (per Sprint 20's standing
+  guidance) and continue opportunistic hardening / corpus growth until
+  Week 4 is unblocked. If a fresh sandbox instance again has a stale,
+  unwritable `/tmp/gocache` left by a prior run/user, point `GOCACHE` at
+  a new directory rather than trying to reclaim the old one.

@@ -2063,5 +2063,138 @@ func FixedCorpus() []CorpusEntry {
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},
+
+		// --- Sprint 2026-08-12 (QA) additions below: seven more entries
+		// covering error shapes none of the entries above exercise --
+		// see FixedCorpus's doc comment for each entry's full rationale
+		// and hand-computed WER.
+		{
+			// A Hindi honorific/politeness particle ("ji", appended
+			// after a name or as a standalone respectful marker) is
+			// dropped entirely by the fake ASR -- a category none of
+			// the deletion entries above cover, since every prior
+			// deletion drops a content, filler, or negation word, never
+			// a pure politeness marker. A single trailing deletion:
+			// WER 1/7 (1 deletion / 7 words).
+			Name:       "hinglish_honorific_marker_ji_deletion",
+			Language:   "hi",
+			Reference:  "sir aapka refund ho gaya hai ji",
+			Hypothesis: "sir aapka refund ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A unit-of-measurement substitution: the fake ASR mishears
+			// "kilometer" as "miles" -- a wrong unit rather than a wrong
+			// quantity, magnitude word (hinglish_magnitude_word_
+			// substitution_lakh_hazar_confusion), or digit
+			// (hinglish_digit_value_misrecognition_account_number), a
+			// distinct realistic error class for distance/weight/
+			// volume-bearing contact-center utterances (delivery ETAs,
+			// courier tracking). A single substitution: WER 1/7
+			// (1 substitution / 7 words).
+			Name:       "hinglish_unit_of_measurement_kilometer_miles_substitution",
+			Language:   "hi",
+			Reference:  "sir aapka parcel dus kilometer door hai",
+			Hypothesis: "sir aapka parcel dus miles door hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A numeral-formatting inconsistency: the fake ASR
+			// transcribes the comma-grouped numeral "10,000" as the
+			// ungrouped "10000" -- since WordErrorRate tokenizes on
+			// whitespace only (no punctuation normalization, per
+			// wer.go's doc comment), these are different tokens even
+			// though they represent the identical value, distinct from
+			// hinglish_number_word_vs_digit_substitution (spelled-out
+			// word vs digit) and hinglish_date_format_digit_vs_spoken_
+			// words_mismatch (date representation) since both value and
+			// digit-ness are unchanged here -- only the grouping
+			// punctuation differs. A single substitution: WER 1/6
+			// (1 substitution / 6 words).
+			Name:       "hinglish_numeral_comma_grouping_formatting_substitution",
+			Language:   "hi",
+			Reference:  "sir aapka bill 10,000 rupaye hai",
+			Hypothesis: "sir aapka bill 10000 rupaye hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// An alphanumeric bank/branch code (an IFSC code) is
+			// misrecognized digit-for-digit -- a distinct error class
+			// from hinglish_digit_sequence_deletion_account_number
+			// (whole sequence dropped) and hinglish_digit_value_
+			// misrecognition_account_number (a plain numeric account
+			// number) since an IFSC code mixes letters and digits in one
+			// token and a single wrong character anywhere in it makes
+			// the whole token a mismatch under whitespace tokenization.
+			// A single substitution: WER 1/6 (1 substitution / 6 words).
+			Name:       "hinglish_alphanumeric_bank_code_ifsc_substitution",
+			Language:   "hi",
+			Reference:  "sir aapka ifsc code hdfc0001234 hai",
+			Hypothesis: "sir aapka ifsc code hdfc0004321 hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A politeness-register downgrade: the fake ASR mishears
+			// the formal/respectful Hindi second-person pronoun "aap"
+			// as the informal "tum" -- a register/formality error
+			// distinct from hinglish_gender_agreement_homophone_unka_
+			// unke_substitution (grammatical gender/case, not
+			// formality) and from the "ji" honorific-marker deletion
+			// above (a dropped particle, not a substituted pronoun),
+			// realistic for contact-center QA since addressing a
+			// customer informally is a tone/compliance concern separate
+			// from raw transcription accuracy. A single substitution:
+			// WER 1/7 (1 substitution / 7 words).
+			Name:       "hinglish_politeness_register_aap_tum_downgrade_substitution",
+			Language:   "hi",
+			Reference:  "sir aap apna account block karwa dijiye",
+			Hypothesis: "sir tum apna account block karwa dijiye",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A currency-subunit confusion: the fake ASR mishears the
+			// subunit "paise" (1/100th of a rupee) as the main unit
+			// "rupaye" -- a distinct error class from
+			// hinglish_currency_symbol_vs_words_bill_amount (symbol vs
+			// spelled-out words for the same unit) and from the
+			// one_word_substitution-style currency-mismatch entries
+			// elsewhere, since here both reference and hypothesis use
+			// spelled-out currency words throughout and the error is
+			// specifically main-unit-for-subunit, a realistic ASR
+			// confusion for amounts spoken with both rupees and paise.
+			// A single substitution: WER 1/8 (1 substitution / 8 words).
+			Name:       "hinglish_currency_subunit_paise_rupee_substitution",
+			Language:   "hi",
+			Reference:  "sir aapka balance pachaas rupaye das paise hai",
+			Hypothesis: "sir aapka balance pachaas rupaye das rupaye hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A Devanagari-vs-Latin numeral script mismatch: the
+			// reference has the quantity written in Devanagari digits
+			// ("५०००"), and the fake ASR instead
+			// outputs the same value in Latin/Arabic digits ("5000") --
+			// distinct from hinglish_numeral_comma_grouping_formatting_
+			// substitution above (same script, different grouping
+			// punctuation) and from hinglish_transliteration_spelling_
+			// variant_dhanyavad_mismatch (a spelling variant of a word,
+			// not a numeral script), a realistic shape for Hindi-script
+			// transcripts where digits are sometimes rendered in
+			// Devanagari and sometimes in the far more common Latin
+			// numerals. A single substitution: WER 1/6
+			// (1 substitution / 6 words).
+			Name:       "hinglish_devanagari_numeral_script_substitution",
+			Language:   "hi",
+			Reference:  "sir aapka bill ५००० rupaye hai",
+			Hypothesis: "sir aapka bill 5000 rupaye hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
 	}
 }

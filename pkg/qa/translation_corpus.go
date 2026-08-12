@@ -564,5 +564,67 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Reference:      "your appointment is at 5 pm tomorrow",
 			Candidate:      "your appointment is at 17:00 tomorrow",
 		},
+
+		// --- Sprint 2026-08-12 (QA) additions below: seven more entries
+		// covering translation-quality failure shapes none of the
+		// entries above exercise. See the doc comment above
+		// FixedTranslationCorpus for each entry's full rationale and
+		// hand-computed BLEU.
+		{
+			Name:           "honorific_marker_deletion_sir_dropped",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka order confirm ho gaya hai",
+			Reference:      "sir your order has been confirmed",
+			Candidate:      "your order has been confirmed",
+		},
+		{
+			Name:           "unit_of_measurement_km_miles_substitution_trailing",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapke ghar ki doori dus kilometer hai",
+			Reference:      "sir the distance to your house is ten kilometers",
+			Candidate:      "sir the distance to your house is ten miles",
+		},
+		{
+			Name:           "numeral_formatting_inconsistency_word_to_digit_collapse",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapke bill ki rakam das hazar rupaye hai",
+			Reference:      "sir your bill amount is ten thousand rupees",
+			Candidate:      "sir your bill amount is 10000 rupees",
+		},
+		{
+			Name:           "alphanumeric_bank_code_substitution_ifsc",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka ifsc code hdfc0001234 hai",
+			Reference:      "sir your ifsc code is hdfc0001234",
+			Candidate:      "sir your ifsc code is hdfc0004321",
+		},
+		{
+			Name:           "currency_subunit_paise_rupees_substitution_trailing",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka balance pachaas rupaye das paise hai",
+			Reference:      "sir your balance is fifty rupees and ten paise",
+			Candidate:      "sir your balance is fifty rupees and ten rupees",
+		},
+		{
+			Name:           "acronym_expansion_mismatch_kyc_full_form",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya apna kyc verification aaj hi complete karein",
+			Reference:      "please complete your kyc verification today",
+			Candidate:      "please complete your know your customer verification today",
+		},
+		{
+			Name:           "filler_word_insertion_midsentence_actually",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka refund process ho gaya hai",
+			Reference:      "sir your refund has been processed",
+			Candidate:      "sir your refund has actually been processed",
+		},
 	}
 }

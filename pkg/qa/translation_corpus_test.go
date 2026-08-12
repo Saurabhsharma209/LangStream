@@ -356,6 +356,93 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	dateFormatBP := math.Exp(1.0 - 7.0/6.0)
 	wantDateFormatting := dateFormatBP * math.Exp((math.Log(dateFormatP1)+math.Log(dateFormatP2)+math.Log(dateFormatP3)+math.Log(dateFormatP4))/4.0)
 
+	// honorific_marker_deletion_sir_dropped: 6-word Reference "sir your
+	// order has been confirmed", 5-word Candidate dropping the leading
+	// honorific "sir" entirely. Every remaining Candidate n-gram is a
+	// contiguous substring of the Reference (only a leading-edge word was
+	// removed), so all four precisions are 1.0: p1 = 5/5, p2 = 4/4,
+	// p3 = 3/3, p4 = 2/2. BP = exp(1 - 6/5) since the Candidate is one
+	// word shorter than the Reference.
+	wantHonorificDeletion := math.Exp(1.0 - 6.0/5.0)
+
+	// unit_of_measurement_km_miles_substitution_trailing: 9-word
+	// Reference and Candidate, equal length, differing only in the
+	// trailing unit word ("kilometers" -> "miles") -- a wrong unit of
+	// measurement, not a wrong quantity or currency. p1 = 8/9, p2 = 7/8,
+	// p3 = 6/7, p4 = 5/6. BP = 1.0 (equal length, 9 == 9).
+	kmMilesP1 := 8.0 / 9.0
+	kmMilesP2 := 7.0 / 8.0
+	kmMilesP3 := 6.0 / 7.0
+	kmMilesP4 := 5.0 / 6.0
+	wantKmMilesSubstitution := math.Exp((math.Log(kmMilesP1) + math.Log(kmMilesP2) + math.Log(kmMilesP3) + math.Log(kmMilesP4)) / 4.0)
+
+	// numeral_formatting_inconsistency_word_to_digit_collapse: 8-word
+	// Reference "sir your bill amount is ten thousand rupees", 7-word
+	// Candidate collapsing the spelled-out "ten thousand" into the
+	// single digit token "10000". p1 = 6/7, p2 = 4/6, p3 = 3/5, p4 = 2/4.
+	// BP = exp(1 - 8/7) since the Candidate is one word shorter than the
+	// Reference.
+	numeralFormatP1 := 6.0 / 7.0
+	numeralFormatP2 := 4.0 / 6.0
+	numeralFormatP3 := 3.0 / 5.0
+	numeralFormatP4 := 2.0 / 4.0
+	numeralFormatBP := math.Exp(1.0 - 8.0/7.0)
+	wantNumeralFormatting := numeralFormatBP * math.Exp((math.Log(numeralFormatP1)+math.Log(numeralFormatP2)+math.Log(numeralFormatP3)+math.Log(numeralFormatP4))/4.0)
+
+	// alphanumeric_bank_code_substitution_ifsc: 6-word Reference and
+	// Candidate, equal length, differing only in the trailing
+	// alphanumeric IFSC code token ("hdfc0001234" -> "hdfc0004321").
+	// p1 = 5/6, p2 = 4/5, p3 = 3/4, p4 = 2/3. BP = 1.0 (equal length,
+	// 6 == 6).
+	ifscP1 := 5.0 / 6.0
+	ifscP2 := 4.0 / 5.0
+	ifscP3 := 3.0 / 4.0
+	ifscP4 := 2.0 / 3.0
+	wantIfscSubstitution := math.Exp((math.Log(ifscP1) + math.Log(ifscP2) + math.Log(ifscP3) + math.Log(ifscP4)) / 4.0)
+
+	// currency_subunit_paise_rupees_substitution_trailing: 9-word
+	// Reference and Candidate, equal length, differing only in the
+	// trailing currency-subunit word ("paise" -> "rupees") -- a
+	// main-unit-for-subunit confusion, distinct from a wrong currency or
+	// wrong quantity. p1 = 8/9, p2 = 7/8, p3 = 6/7, p4 = 5/6. BP = 1.0
+	// (equal length, 9 == 9).
+	subunitP1 := 8.0 / 9.0
+	subunitP2 := 7.0 / 8.0
+	subunitP3 := 6.0 / 7.0
+	subunitP4 := 5.0 / 6.0
+	wantCurrencySubunitSubstitution := math.Exp((math.Log(subunitP1) + math.Log(subunitP2) + math.Log(subunitP3) + math.Log(subunitP4)) / 4.0)
+
+	// acronym_expansion_mismatch_kyc_full_form: 6-word Reference "please
+	// complete your kyc verification today", 8-word Candidate expanding
+	// the acronym "kyc" into its full form "know your customer" instead
+	// of leaving it as-is. Candidate unigrams (clipped against Reference
+	// counts): please, complete, your (Reference has "your" once,
+	// Candidate has it twice -> clipped to 1), verification, today all
+	// match (5 total); know/customer don't -> p1 = 5/8. Candidate
+	// bigrams: only "please complete" and "complete your" and
+	// "verification today" survive -> p2 = 3/7. Candidate trigrams: only
+	// "please complete your" survives -> p3 = 1/6. Candidate 4-grams:
+	// none survive, epsilon-smoothed -> p4 = 0.1/5. BP = 1.0 (Candidate
+	// longer, 8 > 6).
+	kycP1 := 5.0 / 8.0
+	kycP2 := 3.0 / 7.0
+	kycP3 := 1.0 / 6.0
+	kycP4 := 0.1 / 5.0
+	wantKycExpansionMismatch := math.Exp((math.Log(kycP1) + math.Log(kycP2) + math.Log(kycP3) + math.Log(kycP4)) / 4.0)
+
+	// filler_word_insertion_midsentence_actually: 6-word Reference "sir
+	// your refund has been processed", 7-word Candidate inserting the
+	// filler word "actually" mid-sentence (before "been"). p1 = 6/7
+	// (every Reference word still appears once); p2 = 4/6 (the two
+	// bigrams touching the inserted word, "has actually" and "actually
+	// been", don't match); p3 = 2/5; p4 = 1/4. BP = 1.0 (Candidate
+	// longer, 7 > 6).
+	fillerInsertP1 := 6.0 / 7.0
+	fillerInsertP2 := 4.0 / 6.0
+	fillerInsertP3 := 2.0 / 5.0
+	fillerInsertP4 := 1.0 / 4.0
+	wantFillerInsertion := math.Exp((math.Log(fillerInsertP1) + math.Log(fillerInsertP2) + math.Log(fillerInsertP3) + math.Log(fillerInsertP4)) / 4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -390,6 +477,16 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"code_switching_untranslated_source_word_khata":   wantCodeSwitching,
 		"homophone_confusion_target_language_their_there": wantHomophoneConfusion,
 		"number_date_formatting_difference_24hr_vs_12hr":  wantDateFormatting,
+
+		// Sprint 2026-08-12 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"honorific_marker_deletion_sir_dropped":                   wantHonorificDeletion,
+		"unit_of_measurement_km_miles_substitution_trailing":      wantKmMilesSubstitution,
+		"numeral_formatting_inconsistency_word_to_digit_collapse": wantNumeralFormatting,
+		"alphanumeric_bank_code_substitution_ifsc":                wantIfscSubstitution,
+		"currency_subunit_paise_rupees_substitution_trailing":     wantCurrencySubunitSubstitution,
+		"acronym_expansion_mismatch_kyc_full_form":                wantKycExpansionMismatch,
+		"filler_word_insertion_midsentence_actually":              wantFillerInsertion,
 	}
 
 	entries := FixedTranslationCorpus()
