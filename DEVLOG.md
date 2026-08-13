@@ -3411,3 +3411,112 @@ None this run.
   Week 4 is unblocked. If a fresh sandbox instance again has a stale,
   unwritable `/tmp/gocache` left by a prior run/user, point `GOCACHE` at
   a new directory rather than trying to reclaim the old one.
+
+## 2026-08-13 (scheduled run, Sprint 24) — QA corpus growth + SRE Makefile/CI parity fix
+
+Repo health at start: root filesystem had ~1.4GB free at clone time
+(down to ~760MB by the end of the run, still workable); `go build ./...
+&& go vet ./... && go test ./... -race && gofmt -l .` all passed clean on
+the first try, across all 12 packages. This sandbox instance's `$HOME`/
+`/sessions` filesystem was completely full (0 bytes free) from the start
+-- worked around per the established pattern by cloning into a fresh
+`/tmp/LangStream2` directory instead (the default `/tmp/LangStream` and
+`/tmp/gocache`/`/tmp/gotmp` from a prior run/user were present but owned
+by a different UID and not removable/writable by this run's user; rather
+than fight that, used new directory names throughout). ClearStream
+re-checked (`git ls-remote --tags`): still only `v0.1.0`, no
+`VERSIONING.md` action needed.
+
+PE and Tech were not spawned this run -- planning found no owned-file gap
+worth a dedicated agent, same reasoning as Sprints 16-17/21-23.
+
+### Shipped
+
+**QA** -- grew `pkg/qa/corpus.go` (WER) 88->94 and
+`pkg/qa/translation_corpus.go` (BLEU) 31->37, six new non-overlapping
+error shapes each:
+- WER: contraction expansion ("wont" -> "will not"), ordinal word-vs-digit
+  substitution ("teesri" -> "3rd"), spoken phone-number digit-grouping
+  collapse, mid-word ASR truncation on call drop, full-utterance echo
+  duplication (WER 1.0), sentence-final confirmation-particle ("na")
+  deletion.
+- BLEU: negation deletion (meaning-flipping), ordinal word-vs-digit
+  translation, phone-number digit-grouping collapse, full-utterance echo
+  duplication, contraction expansion, and a lakh/thousand
+  magnitude-confusion case (distinct from the WER corpus's shapes this
+  run).
+
+All 12 new entries' precomputed WER/BLEU values were cross-checked by
+extracting the exact `WordErrorRate`/`BLEUScore` algorithms into a
+scratch Go program and running them against the exact entry strings
+(rather than hand-estimating), then formatted to match the existing
+`corpus_test.go`/`translation_corpus_test.go` precomputed-value style. An
+early edit-script mistake (a missing opening `{` before the first new
+struct entry in each file) was caught immediately by `go build` and
+fixed before anything else proceeded.
+
+QA also ran a fresh race-pattern audit across all 65 `go func(` launch
+sites repo-wide (test + production), specifically re-checking the files
+previously fixed for the "assert immediately after a background
+goroutine's unsynchronized channel send" bug class
+(`duplex_shutdown_test.go`'s `lifecycleMu` guard, circuit-breaker tests,
+vsip adapter tests). Result: clean -- every site still uses a `done`-channel
+with bounded `select`/`time.After`, a `sync.WaitGroup.Wait()`, or a
+mutex-protected read before any assertion. No fix needed, a real negative
+result.
+
+**SRE** -- full audit, found and fixed one real, previously-unnoticed
+gap: `Makefile`'s `build` target only compiled `./cmd/langstream`
+(`go build -o bin/langstream ./cmd/langstream`), while
+`.github/workflows/ci.yml`'s `build-test` job runs `go build ./...`
+(whole-module). This meant a break in `examples/` or
+`tools/latency_benchmark` would pass `make ci` locally but fail in real
+CI -- silently defeating the point of `make ci` as a reliable local
+pre-push mirror of CI, the same class of drift the vendor-key guard
+(Sprint 16) and its regression test (Sprint 17) were built to prevent
+for a different surface. Fixed: `make build` now runs `go build ./...`
+first (matching CI's full-repo compile coverage) and then still produces
+`bin/langstream` for `make docker`/`make serve` to consume, unchanged.
+Verified `make build` still works end-to-end.
+
+Everything else SRE checks was still in sync, a clean result (sixth
+consecutive clean vendor-key/CI-parity audit, this time catching the one
+genuine drift within it rather than a fully negative pass):
+`scripts/check-vendor-keys.sh` still passes (6/6 vendor keys in sync
+across `cmd/langstream/main.go`, `docker-compose.yml`, and the guard
+script itself); `docs/compliance.md`'s vendor table still matches the 6
+registered backends, no new/orphaned entries; per-vendor `RecordCost`
+math spot-checked as still correct across all 6 real vendor clients
+(minute-based for Deepgram/Sarvam, character-based for
+Cartesia/ElevenLabs, token-based for GPT-4o/Gemini); observability
+dashboard endpoints (`/`, `/dashboard.json`, `/metrics`) confirmed still
+covered by existing tests including 404 and end-to-end cases.
+
+### Bugs found/fixed
+`Makefile`'s `build`/`make ci` target only covered `./cmd/langstream`,
+not the whole module like CI's `go build ./...` -- fixed (see SRE above).
+This is an infra/CI-parity bug, not a product-code regression; no live
+behavior was broken, but a future product-code break outside
+`cmd/langstream` could have silently passed local `make ci` while
+failing real CI.
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 12 packages after EM integration of both
+  agents' changes.
+- `make build` re-run standalone after the Makefile fix, confirmed it
+  still produces `bin/langstream` correctly alongside the new
+  whole-module compile step.
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, need Saurabh's anchor-customer/live-traffic decision.
+
+### Tomorrow
+- No specific carry-over items from this run. Next scheduled run should
+  continue opportunistic hardening / corpus growth until Week 4 is
+  unblocked, and should expect the shared `/tmp`/`$HOME`/`/sessions`
+  sandbox disk to be tight or fully exhausted by default -- clone into a
+  fresh, uniquely-named `/tmp` directory rather than assuming a prior
+  run's `/tmp/LangStream` or `/tmp/gocache*` paths are reusable, since
+  they may be owned by a different sandbox user and unwritable/unremovable.

@@ -544,6 +544,73 @@ func placeholderPCM() []byte {
 //   - hinglish_negation_flip_substitution_nahi_ho_refund_status:               WER 1/6  (1 substitution / 6 words)
 //
 //   - hinglish_acronym_expansion_substitution_emi_installment:                 WER 1/7  (1 substitution / 7 words)
+//
+// Sprint 2026-08-13 (QA) adds six further entries covering error shapes
+// not yet exercised by any entry above:
+//
+//   - a contraction-collapse substitution where the fake ASR merges the
+//     reference's two-word negation "will not" into the single
+//     contracted token "wont" -- distinct from every existing
+//     negation entry (hinglish_negation_deletion_service_unavailable
+//     drops the negation word entirely; hinglish_negation_flip_
+//     substitution_nahi_ho_refund_status substitutes it for an
+//     unrelated word) since here the negation survives, just collapsed
+//     into a differently-tokenized contraction, costing one
+//     substitution ("will" -> "wont") plus one deletion ("not")
+//     under minimum edit distance;
+//
+//   - an ordinal-number word-vs-digit substitution ("teesri" -> "3rd")
+//     -- distinct from hinglish_number_word_vs_digit_substitution
+//     (a cardinal quantity, not an ordinal) since ordinals carry
+//     different morphology/agreement than cardinals and are a
+//     realistic separate ASR normalization failure mode;
+//
+//   - a phone-number spaced-digit-grouping collapse, where five
+//     individually spoken digit words in the reference ("nine eight
+//     seven six five") are collapsed by the fake ASR into a single
+//     concatenated digit token ("98765") -- distinct from
+//     hinglish_numeral_comma_grouping_formatting_substitution (a
+//     thousands-separator punctuation difference on an already-numeral
+//     quantity, not digit-by-digit speech collapsing into one token)
+//     and from hinglish_digit_sequence_deletion_account_number (a pure
+//     deletion, not a collapse-with-substitution); five reference words
+//     collapsing into one hypothesis token costs one substitution plus
+//     four deletions;
+//
+//   - a mid-word transcription truncation where the fake ASR cuts off
+//     the final word of the utterance partway through ("disconnect" ->
+//     "disconn"), modeling an abrupt call-drop mid-transcription --
+//     distinct from every existing deletion/substitution entry, none of
+//     which model a partial/truncated token rather than a whole-word
+//     error;
+//
+//   - a full-utterance echo duplication where the fake ASR repeats the
+//     *entire* reference sentence twice back to back -- the whole-
+//     utterance-level counterpart to the existing phrase-repeat and
+//     single-word-repeat insertion entries
+//     (hinglish_three_word_phrase_repeat_insertion_order_confirmation,
+//     hinglish_insertion_trailing_word_repeat_call_end), none of which
+//     duplicate the complete sentence; costs exactly reflen insertions,
+//     landing WER at exactly 1.0;
+//
+//   - a sentence-final confirmation-seeking discourse particle ("na")
+//     deletion -- distinct from hinglish_honorific_marker_ji_deletion
+//     (an honorific/respect marker, not a discourse particle seeking
+//     confirmation) since "na" carries a different grammatical function
+//     entirely (a tag-question-like confirmation seek, not politeness).
+//
+//   - hinglish_contraction_expansion_wont_will_not_substitution:              WER 2/8
+//
+//   - hinglish_ordinal_number_word_vs_digit_substitution_teesri_complaint:    WER 1/8
+//
+//   - hinglish_phone_number_spaced_digit_grouping_collapse:                   WER 5/9
+//
+//   - hinglish_truncated_word_cutoff_mid_utterance_call_drop:                 WER 1/7
+//
+//   - hinglish_full_utterance_echo_duplication_order_confirmed:               WER 7/7
+//
+//   - hinglish_sentence_final_particle_na_deletion_confirmation_query:        WER 1/5
+
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
 		{
@@ -2193,6 +2260,85 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir aapka bill ५००० rupaye hai",
 			Hypothesis: "sir aapka bill 5000 rupaye hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A contraction-collapse substitution: the reference's
+			// two-word negation "will not" is merged by the fake ASR
+			// into the single contracted token "wont". Minimum edit
+			// distance aligns "will"->"wont" as one substitution and
+			// deletes "not" as one deletion: WER = 2/8
+			// (1 substitution + 1 deletion / 8 words).
+			Name:       "hinglish_contraction_expansion_wont_will_not_substitution",
+			Language:   "hi",
+			Reference:  "sir aapka refund will not be processed aaj",
+			Hypothesis: "sir aapka refund wont be processed aaj",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// An ordinal-number word-vs-digit substitution: "teesri"
+			// (third) mistranscribed as the digit-ordinal "3rd" -- a
+			// single substitution: WER = 1/8 (1 substitution / 8 words).
+			Name:       "hinglish_ordinal_number_word_vs_digit_substitution_teesri_complaint",
+			Language:   "hi",
+			Reference:  "sir yeh aapki teesri complaint hai is mahine",
+			Hypothesis: "sir yeh aapki 3rd complaint hai is mahine",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A phone-number spaced-digit-grouping collapse: five
+			// individually spoken digit words in the reference are
+			// collapsed into a single concatenated digit token in the
+			// hypothesis. Minimum edit distance aligns one of the five
+			// reference digit words with the single hypothesis token as
+			// a substitution and deletes the remaining four: WER = 5/9
+			// (1 substitution + 4 deletions / 9 words).
+			Name:       "hinglish_phone_number_spaced_digit_grouping_collapse",
+			Language:   "hi",
+			Reference:  "sir aapka number nine eight seven six five hai",
+			Hypothesis: "sir aapka number 98765 hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A mid-word transcription truncation: the fake ASR cuts
+			// off the utterance's final word partway through
+			// ("disconnect" -> "disconn"), modeling an abrupt call-drop
+			// mid-transcription. A single substitution: WER = 1/7
+			// (1 substitution / 7 words).
+			Name:       "hinglish_truncated_word_cutoff_mid_utterance_call_drop",
+			Language:   "hi",
+			Reference:  "sir aapka call abhi disconnect ho gaya",
+			Hypothesis: "sir aapka call abhi disconn ho gaya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A full-utterance echo duplication: the fake ASR repeats
+			// the entire 7-word reference sentence twice back to back.
+			// All 7 reference words are insertions relative to the
+			// second copy under minimum edit distance: WER = 7/7 = 1.0
+			// (7 insertions / 7 words).
+			Name:       "hinglish_full_utterance_echo_duplication_order_confirmed",
+			Language:   "hi",
+			Reference:  "sir aapka order confirm ho gaya hai",
+			Hypothesis: "sir aapka order confirm ho gaya hai sir aapka order confirm ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A sentence-final confirmation-seeking discourse particle
+			// ("na") deletion -- distinct from the honorific "ji"
+			// deletion entry since "na" seeks confirmation rather than
+			// signaling respect. A single deletion: WER = 1/5
+			// (1 deletion / 5 words).
+			Name:       "hinglish_sentence_final_particle_na_deletion_confirmation_query",
+			Language:   "hi",
+			Reference:  "sir yeh sahi hai na",
+			Hypothesis: "sir yeh sahi hai",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

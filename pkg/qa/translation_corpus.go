@@ -357,6 +357,68 @@ type TranslationCorpusEntry struct {
 //     representation of the same time. p1 = 5/6, p2 = 3/5, p3 = 1/2,
 //     p4 = 1/3. BP = exp(1 - 7/6) since the reformatted Candidate is one
 //     word shorter than the Reference.
+// Sprint 2026-08-13 (QA) adds six further entries covering
+// translation-quality failure shapes the existing thirty-one didn't
+// exercise:
+//
+//   - negation_deletion_mistranslation_refund_not_processed: the
+//     Candidate drops the Reference's negation word "not" entirely
+//     ("will not be processed" -> "will be processed"), flipping the
+//     sentence's meaning -- the BLEU counterpart to corpus.go's
+//     negation-substitution/deletion entries, not previously exercised
+//     on the translation-quality side. p1 = 5/5, p2 = 3/4, p3 = 1/3,
+//     p4 is epsilon-smoothed (0.1/2) since neither of the Candidate's
+//     two 4-grams survives the missing word. BP = exp(1 - 6/5) since
+//     the Candidate is one word shorter than the Reference;
+//
+//   - ordinal_number_word_vs_digit_translation_third_complaint: the
+//     Candidate collapses the Reference's spelled-out ordinal "third"
+//     into the digit-ordinal "3rd" -- distinct from
+//     numeral_formatting_inconsistency_word_to_digit_collapse (a
+//     cardinal quantity, not an ordinal, and a length-changing
+//     collapse rather than a same-length substitution here). p1 = 4/5,
+//     p2 = 2/4, p3 = 1/3, p4 is epsilon-smoothed (0.1/2). BP = 1.0
+//     (equal length, 5 == 5);
+//
+//   - full_utterance_echo_duplication_order_confirmed: the Candidate is
+//     the entire 4-word Reference sentence repeated twice back to back
+//     -- the whole-sentence-level counterpart to
+//     over_repeated_word_clipping_billing_transfer's degenerate
+//     single-word repetition, modeling an MT system that echoes its
+//     own output. p1 = 4/8, p2 = 3/7, p3 = 2/6, p4 = 1/5. BP = 1.0
+//     (Candidate longer, 8 > 4);
+//
+//   - phone_number_spaced_digit_grouping_collapse_translation: the
+//     Candidate collapses five individually-translated digit words in
+//     the Reference ("nine eight seven six five") into a single
+//     concatenated numeral token ("98765") -- distinct from
+//     numeral_formatting_inconsistency_word_to_digit_collapse (a
+//     single quantity word collapsing to digits, not five separately
+//     spoken digit words merging into one token) and from
+//     alphanumeric_bank_code_substitution_ifsc (a wrong alphanumeric
+//     value, not a formatting collapse). p1 = 4/5, p2 = 3/4, p3 = 2/3,
+//     p4 = 1/2. BP = exp(1 - 9/5) since the Candidate is four words
+//     shorter than the nine-word Reference;
+//
+//   - magnitude_confusion_lakh_thousand_substitution_bill_amount: a
+//     single substituted magnitude word ("lakh" -> "thousand",
+//     understating the amount by two orders of magnitude) in an
+//     otherwise word-for-word-identical 6-word translation -- the BLEU
+//     counterpart to corpus.go's
+//     hinglish_magnitude_word_substitution_lakh_hazar_confusion, not
+//     previously exercised for BLEU. p1 = 5/6, p2 = 3/5, p3 = 2/4,
+//     p4 = 1/3. BP = 1.0 (equal length, 6 == 6);
+//
+//   - contraction_expansion_wont_will_not_translation_refund: the
+//     Candidate merges the Reference's two-word negation "will not"
+//     into the single contracted token "wont" -- the BLEU counterpart
+//     to corpus.go's
+//     hinglish_contraction_expansion_wont_will_not_substitution.
+//     p1 = 5/6, p2 = 3/5, p3 = 1/4, p4 is epsilon-smoothed (0.1/3)
+//     since none of the Candidate's three 4-grams survive the merge.
+//     BP = exp(1 - 7/6) since the Candidate is one word shorter than
+//     the seven-word Reference.
+
 func FixedTranslationCorpus() []TranslationCorpusEntry {
 	return []TranslationCorpusEntry{
 		{
@@ -625,6 +687,54 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Source:         "sir aapka refund process ho gaya hai",
 			Reference:      "sir your refund has been processed",
 			Candidate:      "sir your refund has actually been processed",
+		},
+		{
+			Name:           "negation_deletion_mistranslation_refund_not_processed",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka refund process nahi hoga",
+			Reference:      "your refund will not be processed",
+			Candidate:      "your refund will be processed",
+		},
+		{
+			Name:           "ordinal_number_word_vs_digit_translation_third_complaint",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "yeh aapki teesri complaint hai",
+			Reference:      "this is your third complaint",
+			Candidate:      "this is your 3rd complaint",
+		},
+		{
+			Name:           "full_utterance_echo_duplication_order_confirmed",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka order confirm ho gaya hai",
+			Reference:      "your order is confirmed",
+			Candidate:      "your order is confirmed your order is confirmed",
+		},
+		{
+			Name:           "phone_number_spaced_digit_grouping_collapse_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya apna number nau aath saat chhe paanch confirm karein",
+			Reference:      "please confirm your number nine eight seven six five",
+			Candidate:      "please confirm your number 98765",
+		},
+		{
+			Name:           "magnitude_confusion_lakh_thousand_substitution_bill_amount",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka bill ek lakh rupaye hai",
+			Reference:      "your bill is one lakh rupees",
+			Candidate:      "your bill is one thousand rupees",
+		},
+		{
+			Name:           "contraction_expansion_wont_will_not_translation_refund",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka payment aaj process nahi hoga",
+			Reference:      "the payment will not be processed today",
+			Candidate:      "the payment wont be processed today",
 		},
 	}
 }

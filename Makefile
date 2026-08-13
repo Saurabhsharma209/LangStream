@@ -4,7 +4,15 @@ BINARY := langstream
 CMD_PATH := ./cmd/langstream
 IMAGE := langstream:local
 
+# go build ./... first so this target has the same full-repo compile
+# coverage as CI's `go build` step (.github/workflows/ci.yml) - building
+# only $(CMD_PATH) would miss a break in e.g. examples/ or
+# tools/latency_benchmark that CI would still catch, defeating the point
+# of `make ci` as a reliable local pre-push mirror of CI (see the `ci:`
+# target's own comment below). The second line still produces the
+# bin/$(BINARY) binary that `make docker`/`make serve` expect.
 build:
+	go build ./...
 	go build -o bin/$(BINARY) $(CMD_PATH)
 
 test:

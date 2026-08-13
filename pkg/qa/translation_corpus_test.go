@@ -443,6 +443,74 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	fillerInsertP4 := 1.0 / 4.0
 	wantFillerInsertion := math.Exp((math.Log(fillerInsertP1) + math.Log(fillerInsertP2) + math.Log(fillerInsertP3) + math.Log(fillerInsertP4)) / 4.0)
 
+	// negation_deletion_mistranslation_refund_not_processed: 6-word
+	// Reference "your refund will not be processed", 5-word Candidate
+	// dropping the negation word "not" entirely. p1 = 5/5, p2 = 3/4,
+	// p3 = 1/3, p4 is epsilon-smoothed (0.1/2) since neither of the
+	// Candidate's two 4-grams survives. BP = exp(1 - 6/5) (Candidate
+	// one word shorter than Reference).
+	negDelP1 := 5.0 / 5.0
+	negDelP2 := 3.0 / 4.0
+	negDelP3 := 1.0 / 3.0
+	negDelP4 := 0.1 / 2.0
+	wantNegationDeletion := math.Exp(1.0-6.0/5.0) * math.Exp((math.Log(negDelP1)+math.Log(negDelP2)+math.Log(negDelP3)+math.Log(negDelP4))/4.0)
+
+	// ordinal_number_word_vs_digit_translation_third_complaint: 5-word
+	// Reference "this is your third complaint", 5-word Candidate
+	// substituting the ordinal "third" for the digit-ordinal "3rd".
+	// p1 = 4/5, p2 = 2/4, p3 = 1/3, p4 is epsilon-smoothed (0.1/2).
+	// BP = 1.0 (equal length, 5 == 5).
+	ordP1 := 4.0 / 5.0
+	ordP2 := 2.0 / 4.0
+	ordP3 := 1.0 / 3.0
+	ordP4 := 0.1 / 2.0
+	wantOrdinalNumber := math.Exp((math.Log(ordP1) + math.Log(ordP2) + math.Log(ordP3) + math.Log(ordP4)) / 4.0)
+
+	// full_utterance_echo_duplication_order_confirmed: 4-word Reference
+	// "your order is confirmed" repeated twice by the Candidate (8
+	// words total). p1 = 4/8, p2 = 3/7, p3 = 2/6, p4 = 1/5.
+	// BP = 1.0 (Candidate longer, 8 > 4).
+	echoP1 := 4.0 / 8.0
+	echoP2 := 3.0 / 7.0
+	echoP3 := 2.0 / 6.0
+	echoP4 := 1.0 / 5.0
+	wantEchoDuplication := math.Exp((math.Log(echoP1) + math.Log(echoP2) + math.Log(echoP3) + math.Log(echoP4)) / 4.0)
+
+	// phone_number_spaced_digit_grouping_collapse_translation: 9-word
+	// Reference "please confirm your number nine eight seven six five",
+	// 5-word Candidate collapsing the five spoken digit words into a
+	// single concatenated numeral "98765". p1 = 4/5, p2 = 3/4, p3 = 2/3,
+	// p4 = 1/2. BP = exp(1 - 9/5) (Candidate four words shorter than
+	// Reference).
+	phoneP1 := 4.0 / 5.0
+	phoneP2 := 3.0 / 4.0
+	phoneP3 := 2.0 / 3.0
+	phoneP4 := 1.0 / 2.0
+	wantPhoneNumberGrouping := math.Exp(1.0-9.0/5.0) * math.Exp((math.Log(phoneP1)+math.Log(phoneP2)+math.Log(phoneP3)+math.Log(phoneP4))/4.0)
+
+	// magnitude_confusion_lakh_thousand_substitution_bill_amount:
+	// 6-word Reference "your bill is one lakh rupees", 6-word Candidate
+	// substituting the magnitude word "lakh" for "thousand". p1 = 5/6,
+	// p2 = 3/5, p3 = 2/4, p4 = 1/3. BP = 1.0 (equal length, 6 == 6).
+	magP1 := 5.0 / 6.0
+	magP2 := 3.0 / 5.0
+	magP3 := 2.0 / 4.0
+	magP4 := 1.0 / 3.0
+	wantMagnitudeConfusion := math.Exp((math.Log(magP1) + math.Log(magP2) + math.Log(magP3) + math.Log(magP4)) / 4.0)
+
+	// contraction_expansion_wont_will_not_translation_refund: 7-word
+	// Reference "the payment will not be processed today", 6-word
+	// Candidate merging the negation "will not" into the contracted
+	// token "wont". p1 = 5/6, p2 = 3/5, p3 = 1/4, p4 is
+	// epsilon-smoothed (0.1/3) since none of the Candidate's three
+	// 4-grams survive the merge. BP = exp(1 - 7/6) (Candidate one word
+	// shorter than Reference).
+	contrP1 := 5.0 / 6.0
+	contrP2 := 3.0 / 5.0
+	contrP3 := 1.0 / 4.0
+	contrP4 := 0.1 / 3.0
+	wantContractionExpansion := math.Exp(1.0-7.0/6.0) * math.Exp((math.Log(contrP1)+math.Log(contrP2)+math.Log(contrP3)+math.Log(contrP4))/4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -487,6 +555,15 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"currency_subunit_paise_rupees_substitution_trailing":     wantCurrencySubunitSubstitution,
 		"acronym_expansion_mismatch_kyc_full_form":                wantKycExpansionMismatch,
 		"filler_word_insertion_midsentence_actually":              wantFillerInsertion,
+
+		// Sprint 2026-08-13 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"negation_deletion_mistranslation_refund_not_processed":      wantNegationDeletion,
+		"ordinal_number_word_vs_digit_translation_third_complaint":   wantOrdinalNumber,
+		"full_utterance_echo_duplication_order_confirmed":            wantEchoDuplication,
+		"phone_number_spaced_digit_grouping_collapse_translation":    wantPhoneNumberGrouping,
+		"magnitude_confusion_lakh_thousand_substitution_bill_amount": wantMagnitudeConfusion,
+		"contraction_expansion_wont_will_not_translation_refund":     wantContractionExpansion,
 	}
 
 	entries := FixedTranslationCorpus()
