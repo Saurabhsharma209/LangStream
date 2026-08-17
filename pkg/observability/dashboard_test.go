@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newSampleRecorder() *LatencyRecorder {
@@ -204,10 +206,82 @@ func TestDashboardHandlerMetrics(t *testing.T) {
 		"langstream_stage_latency_ms",
 		"langstream_stage_errors_total",
 		"langstream_vendor_cost_usd_total",
+		"langstream_vendor_cost_usd_per_minute",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics body missing %q\nbody:\n%s", want, body)
 		}
+	}
+}
+
+// TestDashboardCostPerMinuteWiredThroughHTMLJSONAndMetrics covers
+// CostStats.PerMinuteUSD end to end: BuildDashboardData, the HTML table,
+// the JSON endpoint, and the Prometheus /metrics gauge all surface the
+// same live $/minute rate, not just the running USD total. Backdates the
+// unexported startedAt field directly (same package, see
+// TestCostSnapshotPerMinuteUSD in metrics_test.go) instead of sleeping,
+// so the expected rate is exact and the test stays fast.
+func TestDashboardCostPerMinuteWiredThroughHTMLJSONAndMetrics(t *testing.T) {
+	r := NewLatencyRecorder()
+	r.startedAt = r.startedAt.Add(-2 * time.Minute)
+	r.RecordCost("deepgram", 0.50) // $0.50 over ~2 minutes -> ~$0.25/minute
+
+	data := BuildDashboardData(r)
+	if len(data.Costs) != 1 {
+		t.Fatalf("Costs len = %d, want 1", len(data.Costs))
+	}
+	if got, want := data.Costs[0].PerMinuteUSD, 0.25; !almostEqual(got, want, 0.01) {
+		t.Errorf("BuildDashboardData Costs[0].PerMinuteUSD = %v, want ~%v", got, want)
+	}
+
+	handler := NewDashboardHandler(r)
+
+	htmlReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	htmlRec := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRec, htmlReq)
+	if !strings.Contains(htmlRec.Body.String(), "USD/minute") {
+		t.Errorf("HTML dashboard missing the USD/minute column header\nbody:\n%s", htmlRec.Body.String())
+	}
+	if !strings.Contains(htmlRec.Body.String(), "0.2500") {
+		t.Errorf("HTML dashboard missing the formatted 0.2500 USD/minute value\nbody:\n%s", htmlRec.Body.String())
+	}
+
+	jsonReq := httptest.NewRequest(http.MethodGet, "/dashboard.json", nil)
+	jsonRec := httptest.NewRecorder()
+	handler.ServeHTTP(jsonRec, jsonReq)
+	var jsonData DashboardData
+	if err := json.Unmarshal(jsonRec.Body.Bytes(), &jsonData); err != nil {
+		t.Fatalf("failed to unmarshal JSON body: %v", err)
+	}
+	if len(jsonData.Costs) != 1 || !almostEqual(jsonData.Costs[0].PerMinuteUSD, 0.25, 0.01) {
+		t.Errorf("/dashboard.json Costs = %+v, want one entry with PerMinuteUSD ~0.25", jsonData.Costs)
+	}
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsRec := httptest.NewRecorder()
+	handler.ServeHTTP(metricsRec, metricsReq)
+	// Not an exact-string match: real wall-clock time elapses between the
+	// backdated startedAt above and this ServeHTTP call, so the true
+	// elapsed-minutes denominator is very slightly more than 2.0 minutes,
+	// making the $/minute rate very slightly under 0.25 (e.g. 0.249999)
+	// rather than exactly 0.25 -- expected and correct, not a bug, so the
+	// assertion checks the metric line is present and parses within a
+	// tolerance instead of demanding an exact decimal string.
+	const wantPrefix = `langstream_vendor_cost_usd_per_minute{vendor="deepgram"} `
+	idx := strings.Index(metricsRec.Body.String(), wantPrefix)
+	if idx == -1 {
+		t.Fatalf("/metrics missing expected langstream_vendor_cost_usd_per_minute line\nbody:\n%s", metricsRec.Body.String())
+	}
+	rest := metricsRec.Body.String()[idx+len(wantPrefix):]
+	if nl := strings.IndexByte(rest, '\n'); nl != -1 {
+		rest = rest[:nl]
+	}
+	gotRate, err := strconv.ParseFloat(rest, 64)
+	if err != nil {
+		t.Fatalf("failed to parse langstream_vendor_cost_usd_per_minute value %q: %v", rest, err)
+	}
+	if !almostEqual(gotRate, 0.25, 0.01) {
+		t.Errorf("langstream_vendor_cost_usd_per_minute = %v, want ~0.25", gotRate)
 	}
 }
 

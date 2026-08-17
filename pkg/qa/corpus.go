@@ -610,6 +610,35 @@ func placeholderPCM() []byte {
 //   - hinglish_full_utterance_echo_duplication_order_confirmed:               WER 7/7
 //
 //   - hinglish_sentence_final_particle_na_deletion_confirmation_query:        WER 1/5
+//
+// Sprint 2026-08-17 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise: a place-name (city) substitution
+// (distinct from the existing brand-name and person-name substitutions --
+// this one misrecognizes a geographic proper noun), an addressee-honorific
+// gender substitution ("sir" misheard as "madam" -- distinct from
+// hinglish_gender_agreement_homophone_unka_unke_substitution, which is a
+// possessive-pronoun gender agreement error, not an addressee-honorific
+// one), a non-lexical filler hallucination (the fake ASR inserts the
+// disfluency token "umm", modeling background noise misheard as a
+// non-word utterance -- distinct from every existing insertion entry,
+// which all insert real words or repeated words/clauses), a hedge/
+// approximation-word deletion (the fake ASR drops "lagbhag",
+// "approximately" -- a semantically meaningful qualifier, distinct from
+// the existing filler-word and honorific-marker deletions), a
+// spelled-out letter-by-letter alphanumeric code substitution (one
+// letter token in a spelled-out code is misheard -- distinct from the
+// existing digit-value and phone-number-grouping entries, which involve
+// numeric digits, not letters), and a tense-marker substitution ("hoga",
+// future, misheard as "hua", past -- a critical meaning-changing error
+// distinct from hinglish_negation_flip_substitution_nahi_ho_refund_status,
+// which flips polarity rather than tense):
+//
+//   - hinglish_place_name_substitution_city_mumbai_pune_query:        WER 1/8   (1 substitution / 8 words)
+//   - hinglish_addressee_honorific_gender_substitution_sir_madam:     WER 1/6   (1 substitution / 6 words)
+//   - hinglish_nonlexical_filler_hallucination_umm_insertion:         WER 1/7   (1 insertion / 7 words)
+//   - hinglish_hedge_word_deletion_lagbhag_approximate_bill_amount:   WER 1/8   (1 deletion / 8 words)
+//   - hinglish_spelled_out_letter_substitution_pin_code_confirmation: WER 1/10  (1 substitution / 10 words)
+//   - hinglish_tense_marker_substitution_future_past_delivery_status: WER 1/6   (1 substitution / 6 words)
 
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
@@ -2339,6 +2368,95 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir yeh sahi hai na",
 			Hypothesis: "sir yeh sahi hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A place-name (city) substitution: the fake ASR
+			// mishears the origin city "mumbai" as "pune" -- a
+			// geographic proper noun error, distinct from the
+			// existing brand-name and person-name substitution
+			// entries. A single substitution: WER = 1/8
+			// (1 substitution / 8 words).
+			Name:       "hinglish_place_name_substitution_city_mumbai_pune_query",
+			Language:   "hi",
+			Reference:  "sir aapka parcel mumbai se dispatch hua hai",
+			Hypothesis: "sir aapka parcel pune se dispatch hua hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// An addressee-honorific gender substitution: the fake
+			// ASR mishears the male honorific "sir" as the female
+			// honorific "madam" -- distinct from
+			// hinglish_gender_agreement_homophone_unka_unke_substitution
+			// (a possessive-pronoun gender agreement error, not an
+			// addressee honorific). A single substitution: WER = 1/6
+			// (1 substitution / 6 words).
+			Name:       "hinglish_addressee_honorific_gender_substitution_sir_madam",
+			Language:   "hi",
+			Reference:  "sir aapka balance check ho gaya",
+			Hypothesis: "madam aapka balance check ho gaya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A non-lexical filler hallucination: the fake ASR
+			// inserts the disfluency token "umm", modeling background
+			// noise or crosstalk misheard as a non-word utterance --
+			// distinct from every existing insertion entry in this
+			// corpus, which all insert real words, repeated words, or
+			// whole clauses rather than a non-lexical filler. A
+			// single insertion: WER = 1/7 (1 insertion / 7 words).
+			Name:       "hinglish_nonlexical_filler_hallucination_umm_insertion",
+			Language:   "hi",
+			Reference:  "sir aapka refund process ho raha hai",
+			Hypothesis: "sir umm aapka refund process ho raha hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A hedge/approximation-word deletion: the fake ASR drops
+			// "lagbhag" ("approximately"), a semantically meaningful
+			// qualifier on the amount that follows -- distinct from
+			// the existing filler-word and honorific-marker deletions,
+			// which drop discourse particles rather than a qualifier
+			// that changes how precisely the amount should be read. A
+			// single deletion: WER = 1/8 (1 deletion / 8 words).
+			Name:       "hinglish_hedge_word_deletion_lagbhag_approximate_bill_amount",
+			Language:   "hi",
+			Reference:  "sir aapka bill lagbhag paanch sau rupaye hai",
+			Hypothesis: "sir aapka bill paanch sau rupaye hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A spelled-out letter-by-letter alphanumeric code
+			// substitution: one letter token ("b") in a code spoken
+			// letter-by-letter is misheard as a different letter
+			// ("d") -- distinct from the existing digit-value and
+			// phone-number-grouping entries, which involve numeric
+			// digits rather than spelled-out letters. A single
+			// substitution: WER = 1/10 (1 substitution / 10 words).
+			Name:       "hinglish_spelled_out_letter_substitution_pin_code_confirmation",
+			Language:   "hi",
+			Reference:  "sir aapka code hai a b c one two three",
+			Hypothesis: "sir aapka code hai a d c one two three",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A tense-marker substitution: the fake ASR mishears the
+			// future-tense marker "hoga" ("will happen") as the
+			// past-tense marker "hua" ("happened") -- a critical
+			// meaning-changing error distinct from
+			// hinglish_negation_flip_substitution_nahi_ho_refund_status
+			// (which flips polarity, not tense). A single
+			// substitution: WER = 1/6 (1 substitution / 6 words).
+			Name:       "hinglish_tense_marker_substitution_future_past_delivery_status",
+			Language:   "hi",
+			Reference:  "sir aapka parcel kal deliver hoga",
+			Hypothesis: "sir aapka parcel kal deliver hua",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

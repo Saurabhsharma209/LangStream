@@ -511,6 +511,77 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	contrP4 := 0.1 / 3.0
 	wantContractionExpansion := math.Exp(1.0-7.0/6.0) * math.Exp((math.Log(contrP1)+math.Log(contrP2)+math.Log(contrP3)+math.Log(contrP4))/4.0)
 
+	// tense_mismatch_future_vs_past_delivery_status_translation: 6-word
+	// Reference "your parcel will be delivered tomorrow", 5-word
+	// Candidate "your parcel was delivered tomorrow". p1 = 4/5, p2 = 2/4,
+	// p3 and p4 are epsilon-smoothed (0.1/3, 0.1/2) since no 3-gram or
+	// 4-gram survives the tense change. BP = exp(1 - 6/5).
+	tenseP1 := 4.0 / 5.0
+	tenseP2 := 2.0 / 4.0
+	tenseP3 := 0.1 / 3.0
+	tenseP4 := 0.1 / 2.0
+	wantTenseMismatch := math.Exp(1.0-6.0/5.0) * math.Exp((math.Log(tenseP1)+math.Log(tenseP2)+math.Log(tenseP3)+math.Log(tenseP4))/4.0)
+
+	// pluralization_mismatch_singular_plural_document_upload: 4-word
+	// Reference/Candidate differing only in the final word ("document"
+	// vs "documents"). p1 = 3/4, p2 = 2/3, p3 = 1/2, p4 is
+	// epsilon-smoothed (0.1/1). BP = 1.0 (equal length, 4 == 4).
+	pluralP1 := 3.0 / 4.0
+	pluralP2 := 2.0 / 3.0
+	pluralP3 := 1.0 / 2.0
+	pluralP4 := 0.1 / 1.0
+	wantPluralizationMismatch := math.Exp((math.Log(pluralP1) + math.Log(pluralP2) + math.Log(pluralP3) + math.Log(pluralP4)) / 4.0)
+
+	// digit_value_rounding_error_bill_amount_499_vs_500: 6-word
+	// Reference/Candidate differing only in one digit value ("499" vs
+	// "500"). p1 = 5/6, p2 = 3/5, p3 = 2/4, p4 = 1/3. BP = 1.0 (equal
+	// length, 6 == 6).
+	digitP1 := 5.0 / 6.0
+	digitP2 := 3.0 / 5.0
+	digitP3 := 2.0 / 4.0
+	digitP4 := 1.0 / 3.0
+	wantDigitValueRounding := math.Exp((math.Log(digitP1) + math.Log(digitP2) + math.Log(digitP3) + math.Log(digitP4)) / 4.0)
+
+	// place_name_substitution_city_mumbai_pune_translation: 6-word
+	// Reference/Candidate differing only in the final word ("mumbai" vs
+	// "pune"). p1 = 5/6, p2 = 4/5, p3 = 3/4, p4 = 2/3. BP = 1.0 (equal
+	// length, 6 == 6).
+	placeP1 := 5.0 / 6.0
+	placeP2 := 4.0 / 5.0
+	placeP3 := 3.0 / 4.0
+	placeP4 := 2.0 / 3.0
+	wantPlaceNameSubstitution := math.Exp((math.Log(placeP1) + math.Log(placeP2) + math.Log(placeP3) + math.Log(placeP4)) / 4.0)
+
+	// reference_repeated_word_collapsed_bilkul_bilkul_translation:
+	// 8-word Reference "sure sure sir i will check right now" has a
+	// genuine repeated word the 7-word Candidate collapses to one
+	// "sure". Every n-gram the Candidate does contain matches the
+	// Reference exactly (all four precisions 1.0), so the shortfall is
+	// entirely the brevity penalty: BP = exp(1 - 8/7).
+	wantRepeatedWordCollapsed := math.Exp(1.0 - 8.0/7.0)
+
+	// long_utterance_single_substitution_technical_support_ticket:
+	// 17-word Reference/Candidate differing only in one mid-sentence
+	// word ("escalated" vs "forwarded"). p1 = 16/17, p2 = 14/16,
+	// p3 = 12/15, p4 = 10/14. BP = 1.0 (equal length, 17 == 17).
+	longSubP1 := 16.0 / 17.0
+	longSubP2 := 14.0 / 16.0
+	longSubP3 := 12.0 / 15.0
+	longSubP4 := 10.0 / 14.0
+	wantLongUtteranceSingleSubstitution := math.Exp((math.Log(longSubP1) + math.Log(longSubP2) + math.Log(longSubP3) + math.Log(longSubP4)) / 4.0)
+
+	// voice_conversion_passive_to_active_mismatch_order_shipped: 5-word
+	// Reference "your order has been shipped" vs 5-word Candidate "we
+	// have shipped your order" (a passive-to-active voice rephrasing
+	// sharing every word but reordered). p1 = 3/5, p2 = 1/4, p3 and p4
+	// are epsilon-smoothed (0.1/3, 0.1/2) since no 3-gram or 4-gram
+	// survives the reordering. BP = 1.0 (equal length, 5 == 5).
+	voiceP1 := 3.0 / 5.0
+	voiceP2 := 1.0 / 4.0
+	voiceP3 := 0.1 / 3.0
+	voiceP4 := 0.1 / 2.0
+	wantVoiceConversion := math.Exp((math.Log(voiceP1) + math.Log(voiceP2) + math.Log(voiceP3) + math.Log(voiceP4)) / 4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -564,6 +635,16 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"phone_number_spaced_digit_grouping_collapse_translation":    wantPhoneNumberGrouping,
 		"magnitude_confusion_lakh_thousand_substitution_bill_amount": wantMagnitudeConfusion,
 		"contraction_expansion_wont_will_not_translation_refund":     wantContractionExpansion,
+
+		// Sprint 2026-08-17 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"tense_mismatch_future_vs_past_delivery_status_translation":   wantTenseMismatch,
+		"pluralization_mismatch_singular_plural_document_upload":      wantPluralizationMismatch,
+		"digit_value_rounding_error_bill_amount_499_vs_500":           wantDigitValueRounding,
+		"place_name_substitution_city_mumbai_pune_translation":        wantPlaceNameSubstitution,
+		"reference_repeated_word_collapsed_bilkul_bilkul_translation": wantRepeatedWordCollapsed,
+		"long_utterance_single_substitution_technical_support_ticket": wantLongUtteranceSingleSubstitution,
+		"voice_conversion_passive_to_active_mismatch_order_shipped":   wantVoiceConversion,
 	}
 
 	entries := FixedTranslationCorpus()

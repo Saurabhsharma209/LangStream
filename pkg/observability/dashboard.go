@@ -120,9 +120,9 @@ caption { text-align: left; color: #666; font-size: 0.8rem; margin-bottom: 0.3re
 <h2>Per-vendor cost</h2>
 {{ if .Costs }}
 <table>
-<tr><th>Vendor</th><th>Total (USD)</th><th>Cost events</th></tr>
+<tr><th>Vendor</th><th>Total (USD)</th><th>Cost events</th><th>USD/minute</th></tr>
 {{ range .Costs }}
-<tr><td>{{ .Vendor }}</td><td>{{ printf "%.4f" .TotalUSD }}</td><td>{{ .Events }}</td></tr>
+<tr><td>{{ .Vendor }}</td><td>{{ printf "%.4f" .TotalUSD }}</td><td>{{ .Events }}</td><td>{{ printf "%.4f" .PerMinuteUSD }}</td></tr>
 {{ end }}
 </table>
 {{ else }}

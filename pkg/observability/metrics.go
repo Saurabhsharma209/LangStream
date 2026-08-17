@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // StageLatency is a single latency observation for a named pipeline stage,
@@ -41,6 +42,21 @@ type StageLatency struct {
 type LatencyRecorder struct {
 	mu      sync.Mutex
 	samples map[string][]float64
+
+	// startedAt is set once, at construction, and never mutated -- it is
+	// the wall-clock reference point CostSnapshot's PerMinuteUSD field
+	// (and WriteText's langstream_vendor_cost_usd_per_minute gauge) use
+	// to turn a vendor's running cost total into a live $/minute rate
+	// (TotalUSD / minutes elapsed since this recorder was created), the
+	// "cost-per-minute tracking per vendor" the SRE charter calls for
+	// but which, until now, only existed as an unwired helper
+	// (CostPerMinute) requiring a caller-supplied duration that nothing
+	// in the codebase actually called. For a long-running `serve`
+	// process, elapsed-since-recorder-start is exactly the denominator
+	// an operator watching the dashboard/scrape endpoint wants: a live,
+	// self-updating rate, not a one-off computation an external caller
+	// has to remember to invoke with the right duration.
+	startedAt time.Time
 
 	// errorEvents/totalEvents back RecordError/RecordEvent/ErrorRate.
 	// totalEvents counts every RecordError + RecordEvent call per
@@ -75,6 +91,7 @@ func NewLatencyRecorder() *LatencyRecorder {
 		costTotals:   make(map[string]float64),
 		costEvents:   make(map[string]int64),
 		reasonEvents: make(map[reasonKey]int64),
+		startedAt:    time.Now(),
 	}
 }
 
@@ -223,6 +240,16 @@ type CostStats struct {
 	Vendor   string
 	TotalUSD float64
 	Events   int64
+
+	// PerMinuteUSD is TotalUSD divided by the number of minutes elapsed
+	// since this LatencyRecorder was constructed (see startedAt) -- a
+	// live $/minute rate for this vendor, not a one-off computation.
+	// It is 0 if less than one second has elapsed since construction,
+	// mirroring CostPerMinute's zero-or-negative-duration guard (a rate
+	// over a near-zero denominator is not meaningful, and would produce
+	// a wildly inflated or infinite-looking number rather than a
+	// genuinely small one).
+	PerMinuteUSD float64
 }
 
 // RecordEvent records one successful (non-error) event for the given
@@ -427,12 +454,23 @@ func (r *LatencyRecorder) CostSnapshot() []CostStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	elapsedSeconds := time.Since(r.startedAt).Seconds()
+	var perMinuteDivisor float64
+	if elapsedSeconds >= 1 {
+		perMinuteDivisor = elapsedSeconds / 60.0
+	}
+
 	out := make([]CostStats, 0, len(r.costTotals))
 	for vendor, total := range r.costTotals {
+		var perMinute float64
+		if perMinuteDivisor > 0 {
+			perMinute = total / perMinuteDivisor
+		}
 		out = append(out, CostStats{
-			Vendor:   vendor,
-			TotalUSD: total,
-			Events:   r.costEvents[vendor],
+			Vendor:       vendor,
+			TotalUSD:     total,
+			Events:       r.costEvents[vendor],
+			PerMinuteUSD: perMinute,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Vendor < out[j].Vendor })
@@ -534,6 +572,12 @@ func (r *LatencyRecorder) WriteText(w io.Writer) error {
 	b.WriteString("# TYPE langstream_vendor_cost_events_total counter\n")
 	for _, cs := range costSnap {
 		fmt.Fprintf(&b, "langstream_vendor_cost_events_total{vendor=%q} %d\n", cs.Vendor, cs.Events)
+	}
+
+	b.WriteString("# HELP langstream_vendor_cost_usd_per_minute Live cost rate in USD/minute per vendor, computed as the running cost total divided by minutes elapsed since this process's LatencyRecorder was created.\n")
+	b.WriteString("# TYPE langstream_vendor_cost_usd_per_minute gauge\n")
+	for _, cs := range costSnap {
+		fmt.Fprintf(&b, "langstream_vendor_cost_usd_per_minute{vendor=%q} %s\n", cs.Vendor, formatFloat(cs.PerMinuteUSD))
 	}
 
 	_, err := io.WriteString(w, b.String())

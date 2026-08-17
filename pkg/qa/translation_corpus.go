@@ -418,6 +418,87 @@ type TranslationCorpusEntry struct {
 //     since none of the Candidate's three 4-grams survive the merge.
 //     BP = exp(1 - 7/6) since the Candidate is one word shorter than
 //     the seven-word Reference.
+//
+// Sprint 2026-08-17 (QA) adds seven further entries covering error shapes
+// this corpus still didn't exercise:
+//
+//   - tense_mismatch_future_vs_past_delivery_status_translation: the
+//     Candidate mistranslates the future-tense "will be delivered" as
+//     the past-tense "was delivered" -- a critical meaning-changing
+//     tense error, the BLEU counterpart to corpus.go's
+//     hinglish_tense_marker_substitution_future_past_delivery_status,
+//     not previously exercised for BLEU. 6-word Reference, 5-word
+//     Candidate. p1 = 4/5, p2 = 2/4, p3 and p4 are epsilon-smoothed
+//     (0.1/3 and 0.1/2 respectively) since no 3-gram or 4-gram
+//     survives the tense change. BP = exp(1 - 6/5) since the
+//     Candidate is one word shorter than the six-word Reference;
+//
+//   - pluralization_mismatch_singular_plural_document_upload: a single
+//     substituted word at the very end of an otherwise
+//     word-for-word-identical 4-word translation ("document"
+//     mistranslated as its plural "documents") -- a small
+//     morphological difference distinct from every existing
+//     substitution entry, none of which are a singular/plural mismatch.
+//     p1 = 3/4, p2 = 2/3, p3 = 1/2, p4 is epsilon-smoothed (0.1/1)
+//     since the Candidate's only 4-gram doesn't survive. BP = 1.0
+//     (equal length, 4 == 4);
+//
+//   - digit_value_rounding_error_bill_amount_499_vs_500: a single
+//     substituted digit value ("499" mistranslated as the rounded
+//     "500") in an otherwise word-for-word-identical 6-word
+//     translation -- distinct from
+//     magnitude_confusion_lakh_thousand_substitution_bill_amount
+//     (which understates by orders of magnitude) and
+//     alphanumeric_bank_code_substitution_ifsc (an alphanumeric code,
+//     not a numeric rounding error): this models an MT/relay system
+//     rounding a precise figure to a nearby "clean" number. p1 = 5/6,
+//     p2 = 3/5, p3 = 2/4, p4 = 1/3. BP = 1.0 (equal length, 6 == 6);
+//
+//   - place_name_substitution_city_mumbai_pune_translation: a single
+//     substituted geographic proper noun ("mumbai" mistranslated as
+//     "pune") at the very end of an otherwise word-for-word-identical
+//     6-word translation -- the BLEU counterpart to corpus.go's
+//     hinglish_place_name_substitution_city_mumbai_pune_query, distinct
+//     from named_entity_mismatch_relationship_manager_name (a person's
+//     name, not a place name). p1 = 5/6, p2 = 4/5, p3 = 3/4, p4 = 2/3.
+//     BP = 1.0 (equal length, 6 == 6);
+//
+//   - reference_repeated_word_collapsed_bilkul_bilkul_translation: the
+//     8-word Reference has a genuine repeated word ("sure sure") that
+//     the Candidate collapses to a single "sure" -- the BLEU
+//     counterpart to corpus.go's
+//     hinglish_reference_repeated_word_fully_deleted_bilkul_bilkul,
+//     not previously exercised for BLEU (every existing
+//     repeated-word-shaped BLEU entry, like
+//     stutter_duplicated_trailing_word_confirmed_confirmed, has the
+//     Candidate over-repeating a word the Reference has only once --
+//     this is the opposite direction). Every n-gram the 7-word
+//     Candidate does contain matches the Reference exactly (all four
+//     precisions are 1.0), so the entire BLEU shortfall comes from the
+//     brevity penalty alone: BP = exp(1 - 8/7);
+//
+//   - long_utterance_single_substitution_technical_support_ticket: a
+//     single substituted word ("escalated" -> "forwarded") in an
+//     otherwise word-for-word-identical 17-word translation -- this
+//     corpus's BLEU entries had previously topped out around 8-13
+//     words, so this exercises BLEU's behavior on a longer utterance
+//     where a single substitution contaminates a much smaller
+//     proportion of the sentence's n-grams than in every existing
+//     short-sentence substitution entry. p1 = 16/17, p2 = 14/16,
+//     p3 = 12/15, p4 = 10/14. BP = 1.0 (equal length, 17 == 17);
+//
+//   - voice_conversion_passive_to_active_mismatch_order_shipped: the
+//     Candidate is a passive-to-active voice rephrasing of the
+//     Reference ("your order has been shipped" -> "we have shipped
+//     your order") -- every word is shared but reordered, distinct
+//     from word_reordering_full_reversal_delivery_schedule (a full
+//     token-order reversal) and transposition_mid_sentence_will_be_
+//     delivered (a single adjacent two-word swap): this is a genuine
+//     grammatical voice change a real MT system might produce, not an
+//     artificial permutation. 5-word Reference, 5-word Candidate.
+//     p1 = 3/5, p2 = 1/4, p3 and p4 are epsilon-smoothed (0.1/3 and
+//     0.1/2 respectively) since no 3-gram or 4-gram survives the
+//     reordering. BP = 1.0 (equal length, 5 == 5).
 
 func FixedTranslationCorpus() []TranslationCorpusEntry {
 	return []TranslationCorpusEntry{
@@ -735,6 +816,62 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Source:         "sir aapka payment aaj process nahi hoga",
 			Reference:      "the payment will not be processed today",
 			Candidate:      "the payment wont be processed today",
+		},
+		{
+			Name:           "tense_mismatch_future_vs_past_delivery_status_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka parcel kal deliver hoga",
+			Reference:      "your parcel will be delivered tomorrow",
+			Candidate:      "your parcel was delivered tomorrow",
+		},
+		{
+			Name:           "pluralization_mismatch_singular_plural_document_upload",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya apna document upload karein",
+			Reference:      "please upload your document",
+			Candidate:      "please upload your documents",
+		},
+		{
+			Name:           "digit_value_rounding_error_bill_amount_499_vs_500",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka bill 499 rupaye hai",
+			Reference:      "sir your bill is 499 rupees",
+			Candidate:      "sir your bill is 500 rupees",
+		},
+		{
+			Name:           "place_name_substitution_city_mumbai_pune_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka parcel mumbai se dispatch hua hai",
+			Reference:      "your parcel was dispatched from mumbai",
+			Candidate:      "your parcel was dispatched from pune",
+		},
+		{
+			Name:           "reference_repeated_word_collapsed_bilkul_bilkul_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "bilkul bilkul sir main abhi check karta hoon",
+			Reference:      "sure sure sir i will check right now",
+			Candidate:      "sure sir i will check right now",
+		},
+		{
+			Name:           "long_utterance_single_substitution_technical_support_ticket",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka technical support ticket humari senior engineering team ko aaj hi turant resolution ke liye bhej diya gaya hai",
+			Reference:      "sir your technical support ticket has been escalated to our senior engineering team for immediate resolution today",
+			Candidate:      "sir your technical support ticket has been forwarded to our senior engineering team for immediate resolution today",
+		},
+		{
+			Name:           "voice_conversion_passive_to_active_mismatch_order_shipped",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka order ship kar diya gaya hai",
+			Reference:      "your order has been shipped",
+			Candidate:      "we have shipped your order",
 		},
 	}
 }

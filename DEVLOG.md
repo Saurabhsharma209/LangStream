@@ -3520,3 +3520,116 @@ failing real CI.
   fresh, uniquely-named `/tmp` directory rather than assuming a prior
   run's `/tmp/LangStream` or `/tmp/gocache*` paths are reusable, since
   they may be owned by a different sandbox user and unwritable/unremovable.
+
+## 2026-08-17 (scheduled run, Sprint 25) — QA corpus growth + SRE cost-per-minute wiring fix
+
+Repo health at start: root filesystem had ~3.2GB free at clone time (down
+to ~2.5GB by the end of the run), no disk pressure this run. `$HOME`/
+`/sessions` was completely full (0 bytes free) from the start, same
+recurring issue as most prior runs -- worked around per the established
+pattern by cloning into `/tmp/work/LangStream` instead. `go build ./... &&
+go vet ./... && go test ./... -race && gofmt -l .` all passed clean on
+the first try, across all 12 packages. ClearStream re-checked (`git
+ls-remote --tags`): still only `v0.1.0`, no `VERSIONING.md` action
+needed.
+
+PE and Tech were not spawned this run -- planning found no owned-file gap
+worth a dedicated agent, same reasoning as Sprints 16-17/21-24.
+
+### Shipped
+
+**QA** -- grew `pkg/qa/corpus.go` (WER) 94->100 and
+`pkg/qa/translation_corpus.go` (BLEU) 37->44, with genuinely new,
+non-overlapping error shapes each:
+- WER: Hinglish place-name substitution (Mumbai/Pune), addressee-honorific
+  gender mishearing (sir/madam, distinct from the existing possessive-
+  pronoun gender case), non-lexical filler-word hallucination ("umm"
+  insertion), hedge-word/approximation-qualifier deletion ("lagbhag"),
+  spelled-out-letter PIN-code mishearing (distinct from digit-based
+  entries), future/past tense-marker substitution (distinct from the
+  existing negation flip).
+- BLEU: tense mismatch, pluralization mismatch, digit-rounding error
+  (499 vs 500), place-name substitution, reference-side repeated-word
+  collapse (the reverse direction of the existing over-repetition case),
+  a first 17-word long-utterance entry (single-substitution dilution at
+  length), and a passive-to-active voice-conversion mismatch (distinct
+  from artificial reversal/transposition entries).
+
+All 13 new entries' precomputed WER/BLEU values were verified by a
+scratch Go program calling the real `WordErrorRate`/`BLEUScore` functions
+directly against the entry strings (not hand-estimated), then deleted
+after use. Matching test expectations were added to `corpus_test.go`/
+`translation_corpus_test.go` in the existing precomputed-value style.
+
+QA also ran a fresh race-pattern audit across all 62 `go func(` launch
+sites across 35 files repo-wide (test + production). Result: clean --
+every site is synchronized via a done-channel+select-with-timeout, a
+`sync.WaitGroup.Wait()`, or a mutex-guarded read before any assertion. No
+fix needed, a real negative result.
+
+**SRE** -- full audit, found and fixed one real, previously-unnoticed gap:
+`pkg/observability`'s `LatencyRecorder.CostPerMinute(vendor,
+durationSeconds)` existed, was implemented and unit-tested, but had zero
+callers anywhere in the codebase -- despite "cost-per-minute tracking per
+vendor" being an explicit SRE charter deliverable, nothing wired a real
+per-minute cost rate into the dashboard HTML, `/dashboard.json`, or the
+Prometheus `/metrics` endpoint. Operators watching the dashboard only ever
+saw a running USD total and event count, never a rate. Fixed: added a
+`startedAt time.Time` field to `LatencyRecorder` (set at construction),
+added `PerMinuteUSD float64` to `CostStats`, computed by `CostSnapshot()`
+as total cost divided by elapsed minutes since recorder construction
+(guarded to 0 under 1 second elapsed, mirroring the existing zero-duration
+guard on `CostPerMinute`). Wired into the HTML dashboard (new "USD/minute"
+column), the JSON endpoint (automatic via the struct field), and
+`/metrics` (new `langstream_vendor_cost_usd_per_minute` Prometheus gauge).
+The original `CostPerMinute(vendor, durationSeconds)` method is untouched
+and remains available for callers with their own externally-tracked
+duration. New tests: `TestCostSnapshotPerMinuteUSD`,
+`TestCostSnapshotPerMinuteUSDZeroBeforeOneSecondElapsed`, an extension of
+`TestWriteTextIncludesErrorAndCostMetrics`, and
+`TestDashboardCostPerMinuteWiredThroughHTMLJSONAndMetrics`.
+
+Everything else SRE checks was still in sync, a clean result: vendor-key
+sync (`scripts/check-vendor-keys.sh`, 6/6, both directions, regression
+test also passing), `docs/compliance.md`'s vendor table matching the 6
+registered backends, per-vendor `RecordCost` math spot-checked as correct
+across all 6 real vendor clients (Deepgram, Sarvam, GPT-4o, Gemini,
+Cartesia, ElevenLabs -- minute/character/token-based cost models,
+GPT-4o/Gemini preferring exact API usage counts with char-count fallback),
+CI/Makefile parity confirmed (`make ci`'s steps and `.github/
+workflows/ci.yml`'s steps cover the same checks, order differs slightly
+but doesn't affect outcome since `go test` compiles anyway -- not a real
+gap), dashboard endpoints (`/`, `/dashboard.json`, `/metrics`) confirmed
+built and covered by tests (15 test functions after this run's addition).
+
+During the parallel run, SRE's agent transiently observed a `go vet`
+failure in `pkg/qa` (unused variables in `translation_corpus_test.go`)
+while QA's agent was still mid-edit in the same window -- flagged in
+SRE's report but confirmed resolved by EM integration time (`go vet
+./pkg/qa/...` clean once QA's agent had finished writing its test file).
+Not a real bug, just a race between the two agents' reports and QA's
+completion -- noted here so future runs don't need to re-investigate it.
+
+### Bugs found/fixed
+`pkg/observability`'s `CostPerMinute` had no real callers anywhere despite
+being an explicit charter deliverable -- fixed (see SRE above). This is a
+missing-instrumentation gap, not a regression; no live behavior was
+broken, but operators had no visibility into cost rate, only cost total.
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 12 packages after EM integration of both
+  agents' changes.
+- Fresh-clone verification from the real GitHub remote after push (see
+  below), rebuilt independently of the local working copy.
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, need Saurabh's anchor-customer/live-traffic decision.
+
+### Tomorrow
+- No specific carry-over items from this run. Next scheduled run should
+  continue opportunistic hardening / corpus growth until Week 4 is
+  unblocked. `$HOME`/`/sessions` should be expected full by default --
+  clone into a fresh `/tmp` directory and point `GOPATH`/`GOCACHE`/
+  `GOTMPDIR`/`TMPDIR` there too, per the established workaround.

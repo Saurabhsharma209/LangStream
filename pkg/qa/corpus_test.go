@@ -310,6 +310,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_truncated_word_cutoff_mid_utterance_call_drop":              1.0 / 7.0,
 		"hinglish_full_utterance_echo_duplication_order_confirmed":            7.0 / 7.0,
 		"hinglish_sentence_final_particle_na_deletion_confirmation_query":     1.0 / 5.0,
+
+		// Sprint 2026-08-17 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_place_name_substitution_city_mumbai_pune_query":        1.0 / 8.0,
+		"hinglish_addressee_honorific_gender_substitution_sir_madam":     1.0 / 6.0,
+		"hinglish_nonlexical_filler_hallucination_umm_insertion":         1.0 / 7.0,
+		"hinglish_hedge_word_deletion_lagbhag_approximate_bill_amount":   1.0 / 8.0,
+		"hinglish_spelled_out_letter_substitution_pin_code_confirmation": 1.0 / 10.0,
+		"hinglish_tense_marker_substitution_future_past_delivery_status": 1.0 / 6.0,
 	}
 
 	entries := FixedCorpus()

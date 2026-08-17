@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func almostEqual(a, b, eps float64) bool {
@@ -302,8 +303,49 @@ func TestCostSnapshotSorted(t *testing.T) {
 	}
 }
 
+// TestCostSnapshotPerMinuteUSD covers CostSnapshot's PerMinuteUSD field: a
+// live $/minute rate per vendor derived from the recorder's own uptime
+// (time since NewLatencyRecorder was called), not a caller-supplied
+// duration (that's what the older, still-present CostPerMinute method is
+// for -- see TestCostPerMinute). Backdates the unexported startedAt field
+// directly (same package) instead of sleeping in the test, so the
+// elapsed-time math is exact and the test stays fast and non-flaky.
+func TestCostSnapshotPerMinuteUSD(t *testing.T) {
+	r := NewLatencyRecorder()
+	r.startedAt = r.startedAt.Add(-2 * time.Minute) // pretend 2 minutes have elapsed
+	r.RecordCost("deepgram", 0.50)
+
+	snap := r.CostSnapshot()
+	if len(snap) != 1 {
+		t.Fatalf("CostSnapshot len = %d, want 1", len(snap))
+	}
+	// $0.50 total over ~2 minutes -> ~$0.25/minute.
+	if got, want := snap[0].PerMinuteUSD, 0.25; !almostEqual(got, want, 0.01) {
+		t.Errorf("CostSnapshot()[0].PerMinuteUSD = %v, want ~%v", got, want)
+	}
+}
+
+// TestCostSnapshotPerMinuteUSDZeroBeforeOneSecondElapsed covers the guard
+// against a near-zero elapsed-time denominator: a recorder that's had cost
+// recorded against it within the same instant it was constructed should
+// report PerMinuteUSD as 0, not a wildly inflated (near-infinite-looking)
+// rate, mirroring CostPerMinute's own zero-or-negative-duration guard.
+func TestCostSnapshotPerMinuteUSDZeroBeforeOneSecondElapsed(t *testing.T) {
+	r := NewLatencyRecorder()
+	r.RecordCost("deepgram", 1000.0)
+
+	snap := r.CostSnapshot()
+	if len(snap) != 1 {
+		t.Fatalf("CostSnapshot len = %d, want 1", len(snap))
+	}
+	if got := snap[0].PerMinuteUSD; got != 0 {
+		t.Errorf("CostSnapshot()[0].PerMinuteUSD = %v immediately after construction, want 0", got)
+	}
+}
+
 func TestWriteTextIncludesErrorAndCostMetrics(t *testing.T) {
 	r := NewLatencyRecorder()
+	r.startedAt = r.startedAt.Add(-1 * time.Minute) // deterministic, non-zero PerMinuteUSD
 	r.RecordEvent("asr_first_chunk", "deepgram")
 	r.RecordError("asr_first_chunk", "deepgram")
 	r.RecordCost("deepgram", 0.42)
@@ -324,6 +366,29 @@ func TestWriteTextIncludesErrorAndCostMetrics(t *testing.T) {
 		if !strings.Contains(out, sub) {
 			t.Errorf("WriteText output missing expected substring %q\nfull output:\n%s", sub, out)
 		}
+	}
+
+	// Not an exact-string match: real wall-clock time elapses between the
+	// backdated startedAt above and the WriteText call, so the true
+	// elapsed-minutes denominator is very slightly more than 1.0 minute,
+	// making the $/minute rate very slightly under 0.42 rather than
+	// exactly 0.42 -- expected and correct, so this checks the line is
+	// present and parses within a tolerance instead of an exact string.
+	const wantPrefix = `langstream_vendor_cost_usd_per_minute{vendor="deepgram"} `
+	idx := strings.Index(out, wantPrefix)
+	if idx == -1 {
+		t.Fatalf("WriteText output missing langstream_vendor_cost_usd_per_minute line\nfull output:\n%s", out)
+	}
+	rest := out[idx+len(wantPrefix):]
+	if nl := strings.IndexByte(rest, '\n'); nl != -1 {
+		rest = rest[:nl]
+	}
+	gotRate, err := strconv.ParseFloat(rest, 64)
+	if err != nil {
+		t.Fatalf("failed to parse langstream_vendor_cost_usd_per_minute value %q: %v", rest, err)
+	}
+	if !almostEqual(gotRate, 0.42, 0.01) {
+		t.Errorf("langstream_vendor_cost_usd_per_minute = %v, want ~0.42", gotRate)
 	}
 
 	// Every non-comment line must still parse as `name{labels} value`,
