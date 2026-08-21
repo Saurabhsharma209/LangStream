@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/exotel/langstream/pkg/observability"
 )
@@ -713,6 +714,42 @@ func TestCartesiaSynthesizer_RecordsCostPerCharacter(t *testing.T) {
 	got := metrics.CostTotal("cartesia")
 	if diff := got - want; diff > 1e-12 || diff < -1e-12 {
 		t.Errorf("CostTotal(cartesia) = %v, want %v", got, want)
+	}
+	if n := metrics.CostEventCount("cartesia"); n != 1 {
+		t.Errorf("CostEventCount(cartesia) = %d, want 1", n)
+	}
+}
+
+func TestCartesiaSynthesizer_RecordsCostPerCharacterForMultiByteText(t *testing.T) {
+	fs := newFakeCartesiaServer(t, func(conn net.Conn, req cartesiaGenerationRequest) {
+		doneMsg := mustMarshal(t, cartesiaMessage{Type: "done"})
+		_ = writeServerFrame(conn, wsOpText, doneMsg)
+	})
+	defer fs.Close()
+
+	metrics := observability.NewLatencyRecorder()
+	c := newTestSynthesizer(t, fs, WithMetrics(metrics))
+
+	// Devanagari text: each rune is 3 bytes in UTF-8, so a byte-length-based
+	// cost calculation would overcount by roughly 3x versus the vendor's
+	// actual per-character billing.
+	const text = "नमस्ते, मैं आपकी कैसे मदद कर सकता हूँ?"
+	ch, err := c.SynthesizeStream(context.Background(), text, Persona{Language: LanguageHindi})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainChunks(t, ch, 5*time.Second)
+
+	byteLen := len(text)
+	runeLen := utf8.RuneCountInString(text)
+	if byteLen == runeLen {
+		t.Fatalf("test text %q has equal byte length (%d) and rune count (%d); it must contain multi-byte characters to exercise this bug", text, byteLen, runeLen)
+	}
+
+	want := float64(runeLen) * cartesiaCostPerCharUSD
+	got := metrics.CostTotal("cartesia")
+	if diff := got - want; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("CostTotal(cartesia) = %v, want %v (rune-based cost for %d-rune/%d-byte input)", got, want, runeLen, byteLen)
 	}
 	if n := metrics.CostEventCount("cartesia"); n != 1 {
 		t.Errorf("CostEventCount(cartesia) = %d, want 1", n)

@@ -582,6 +582,67 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	voiceP4 := 0.1 / 2.0
 	wantVoiceConversion := math.Exp((math.Log(voiceP1) + math.Log(voiceP2) + math.Log(voiceP3) + math.Log(voiceP4)) / 4.0)
 
+	// trailing_punctuation_mark_exclamation_difference_confirmation:
+	// 4-word Reference "your payment is confirmed" vs 4-word Candidate
+	// "your payment is confirmed!" (a trailing "!" fused onto the final
+	// token, a full mismatch under whitespace-only tokenization).
+	// p1 = 3/4, p2 = 2/3, p3 = 1/2, p4 is epsilon-smoothed (0.1/1) since
+	// the sole 4-gram doesn't match. BP = 1.0 (equal length, 4 == 4).
+	exclP1 := 3.0 / 4.0
+	exclP2 := 2.0 / 3.0
+	exclP3 := 1.0 / 2.0
+	exclP4 := 0.1 / 1.0
+	wantTrailingPunctuation := math.Exp((math.Log(exclP1) + math.Log(exclP2) + math.Log(exclP3) + math.Log(exclP4)) / 4.0)
+
+	// word_order_long_distance_swap_business_hours_translation: 10-word
+	// Reference/Candidate with the second word and the last word
+	// swapped (non-adjacent, with every word between them unchanged).
+	// The multiset of words is unchanged so p1 = 1.0 exactly; the swap
+	// only registers starting at bigram: p2 = 6/9, p3 = 5/8, p4 = 4/7.
+	// BP = 1.0 (equal length, 10 == 10).
+	swapP1 := 1.0
+	swapP2 := 6.0 / 9.0
+	swapP3 := 5.0 / 8.0
+	swapP4 := 4.0 / 7.0
+	wantLongDistanceSwap := math.Exp((math.Log(swapP1) + math.Log(swapP2) + math.Log(swapP3) + math.Log(swapP4)) / 4.0)
+
+	// repeated_bigram_phrase_insertion_please_hold_while_i_check: 8-word
+	// Reference "please hold while i check your account status" vs
+	// 10-word Candidate that duplicates the leading "please hold"
+	// bigram back to back. p1 = 8/10 (clipping caps "please"/"hold" at
+	// the one time each appears in Reference), p2 = 7/9 (the repeated
+	// "please hold" bigram is clipped to 1 of its 2 occurrences, and
+	// the bridging "hold please" bigram has no match at all), p3 = 6/8,
+	// p4 = 5/7. BP = 1.0 (candidate longer than reference, 10 > 8).
+	repBigramP1 := 8.0 / 10.0
+	repBigramP2 := 7.0 / 9.0
+	repBigramP3 := 6.0 / 8.0
+	repBigramP4 := 5.0 / 7.0
+	wantRepeatedBigramInsertion := math.Exp((math.Log(repBigramP1) + math.Log(repBigramP2) + math.Log(repBigramP3) + math.Log(repBigramP4)) / 4.0)
+
+	// clause_level_reordering_swap_two_clauses_translation: 8-word
+	// Reference "please hold and i will check your balance" vs 8-word
+	// Candidate "i will check your balance and please hold" (two whole
+	// clauses swapped around "and"). Same unchanged multiset of 8 words
+	// so p1 = 1.0 exactly; p2 = 5/7, p3 = 3/6, p4 = 2/5.
+	// BP = 1.0 (equal length, 8 == 8).
+	clauseP1 := 1.0
+	clauseP2 := 5.0 / 7.0
+	clauseP3 := 3.0 / 6.0
+	clauseP4 := 2.0 / 5.0
+	wantClauseLevelReordering := math.Exp((math.Log(clauseP1) + math.Log(clauseP2) + math.Log(clauseP3) + math.Log(clauseP4)) / 4.0)
+
+	// preposition_substitution_on_in_delivery_day_mismatch: 6-word
+	// Reference "your parcel will arrive on monday" vs 6-word Candidate
+	// "your parcel will arrive in monday" (a single preposition
+	// substitution, "on" -> "in"). p1 = 5/6, p2 = 3/5, p3 = 1/2,
+	// p4 = 1/3. BP = 1.0 (equal length, 6 == 6).
+	prepP1 := 5.0 / 6.0
+	prepP2 := 3.0 / 5.0
+	prepP3 := 1.0 / 2.0
+	prepP4 := 1.0 / 3.0
+	wantPrepositionSubstitution := math.Exp((math.Log(prepP1) + math.Log(prepP2) + math.Log(prepP3) + math.Log(prepP4)) / 4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -645,6 +706,14 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"reference_repeated_word_collapsed_bilkul_bilkul_translation": wantRepeatedWordCollapsed,
 		"long_utterance_single_substitution_technical_support_ticket": wantLongUtteranceSingleSubstitution,
 		"voice_conversion_passive_to_active_mismatch_order_shipped":   wantVoiceConversion,
+
+		// Sprint 2026-08-21 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"trailing_punctuation_mark_exclamation_difference_confirmation": wantTrailingPunctuation,
+		"word_order_long_distance_swap_business_hours_translation":      wantLongDistanceSwap,
+		"repeated_bigram_phrase_insertion_please_hold_while_i_check":    wantRepeatedBigramInsertion,
+		"clause_level_reordering_swap_two_clauses_translation":          wantClauseLevelReordering,
+		"preposition_substitution_on_in_delivery_day_mismatch":          wantPrepositionSubstitution,
 	}
 
 	entries := FixedTranslationCorpus()

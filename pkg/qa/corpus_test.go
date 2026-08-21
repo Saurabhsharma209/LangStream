@@ -319,6 +319,14 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_hedge_word_deletion_lagbhag_approximate_bill_amount":   1.0 / 8.0,
 		"hinglish_spelled_out_letter_substitution_pin_code_confirmation": 1.0 / 10.0,
 		"hinglish_tense_marker_substitution_future_past_delivery_status": 1.0 / 6.0,
+
+		// Sprint 2026-08-21 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_two_word_phrase_repeat_insertion_hold_please":        2.0 / 7.0,
+		"hinglish_decimal_point_marker_deletion_parcel_weight":         1.0 / 10.0,
+		"hinglish_postposition_case_marker_substitution_ko_ki":         1.0 / 7.0,
+		"hinglish_day_of_week_substitution_monday_tuesday_appointment": 1.0 / 8.0,
+		"hinglish_conjunction_word_deletion_aur_bill_and_receipt":      1.0 / 7.0,
 	}
 
 	entries := FixedCorpus()

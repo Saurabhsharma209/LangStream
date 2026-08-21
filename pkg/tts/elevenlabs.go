@@ -42,6 +42,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/exotel/langstream/pkg/observability"
 )
@@ -96,8 +97,10 @@ const (
 // eleven_multilingual_v2 model used here -- per elevenlabs.io/pricing as
 // reviewed while writing this). ElevenLabs bills per character of input
 // text, not per second of audio produced, so this is charged against
-// len(text) once ElevenLabs has accepted the request (HTTP 200; see
-// SynthesizeStream). This is for pilot cost-visibility only, not
+// utf8.RuneCountInString(text) (character count, not UTF-8 byte length --
+// multi-byte scripts like Devanagari would otherwise be overcounted) once
+// ElevenLabs has accepted the request (HTTP 200; see SynthesizeStream).
+// This is for pilot cost-visibility only, not
 // billing-grade accuracy -- ElevenLabs' actual rates vary by plan/
 // model/commitment and change over time, and this value is not read live
 // from any API.
@@ -401,7 +404,7 @@ func (e *ElevenLabsSynthesizer) SynthesizeStream(ctx context.Context, text strin
 	// stream later fails mid-way -- see elevenlabsCostPerCharUSD's doc
 	// comment.
 	if e.metrics != nil {
-		e.metrics.RecordCost("elevenlabs", float64(len(text))*elevenlabsCostPerCharUSD)
+		e.metrics.RecordCost("elevenlabs", float64(utf8.RuneCountInString(text))*elevenlabsCostPerCharUSD)
 	}
 
 	out := make(chan AudioChunk, 4)

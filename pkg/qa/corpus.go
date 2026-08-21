@@ -2460,5 +2460,88 @@ func FixedCorpus() []CorpusEntry {
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},
+		{
+			// A two-word repeated-phrase insertion: the fake ASR
+			// duplicates the two-word phrase "please hold" back to
+			// back, modeling a hold-queue announcement that repeats
+			// mid-transcription -- the size in between this corpus's
+			// existing single-word repeat insertions
+			// (hinglish_insertion_leading_word_repeat_call_open,
+			// hinglish_insertion_trailing_word_repeat_call_end) and its
+			// three-word phrase repeat
+			// (hinglish_three_word_phrase_repeat_insertion_order_confirmation).
+			// Two insertions: WER = 2/7 (2 insertions / 7 words).
+			Name:       "hinglish_two_word_phrase_repeat_insertion_hold_please",
+			Language:   "hi",
+			Reference:  "sir please hold main check karta hoon",
+			Hypothesis: "sir please hold please hold main check karta hoon",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A decimal-point marker word deletion: the fake ASR drops
+			// the spoken decimal-point word "point" out of a
+			// number-point-number reading ("char point paanch", 4.5),
+			// silently collapsing it into "char paanch" -- a distinct
+			// numeric error class from every existing digit/number
+			// entry in this corpus, none of which drop the token that
+			// anchors a number's decimal place. A single deletion:
+			// WER = 1/10 (1 deletion / 10 words).
+			Name:       "hinglish_decimal_point_marker_deletion_parcel_weight",
+			Language:   "hi",
+			Reference:  "sir aapka parcel ka weight char point paanch kilo hai",
+			Hypothesis: "sir aapka parcel ka weight char paanch kilo hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A Hindi postposition/case-marker substitution: the fake
+			// ASR mishears the dative postposition "ko" as the
+			// genitive postposition "ki" -- a grammatical
+			// function-word confusion distinct from
+			// hinglish_gender_agreement_homophone_unka_unke_substitution
+			// (a pronoun+case-ending fused word, not a standalone
+			// postposition) and
+			// hinglish_politeness_register_aap_tum_downgrade_substitution
+			// (a pronoun formality register, not a case-marking
+			// postposition). A single substitution: WER = 1/7
+			// (1 substitution / 7 words).
+			Name:       "hinglish_postposition_case_marker_substitution_ko_ki",
+			Language:   "hi",
+			Reference:  "sir mera number ko update kar dijiye",
+			Hypothesis: "sir mera number ki update kar dijiye",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A day-of-week temporal proper-noun substitution: the fake
+			// ASR mishears "monday" as "tuesday" -- distinct from every
+			// existing proper-noun substitution in this corpus
+			// (brand-name, person-name, city-name), none of which cover
+			// a day-of-week. A single substitution: WER = 1/8
+			// (1 substitution / 8 words).
+			Name:       "hinglish_day_of_week_substitution_monday_tuesday_appointment",
+			Language:   "hi",
+			Reference:  "sir aapka appointment monday ko fix hua hai",
+			Hypothesis: "sir aapka appointment tuesday ko fix hua hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A coordinating-conjunction word deletion: the fake ASR
+			// drops "aur" ("and") from a two-item list, silently
+			// turning "you'll get both bill and receipt" into an
+			// ambiguous run-on -- distinct from every existing deletion
+			// entry in this corpus, which drop filler words,
+			// honorifics, discourse particles, hedge words, or content
+			// words, but never the connective joining two list items.
+			// A single deletion: WER = 1/7 (1 deletion / 7 words).
+			Name:       "hinglish_conjunction_word_deletion_aur_bill_and_receipt",
+			Language:   "hi",
+			Reference:  "sir aapko bill aur receipt dono milega",
+			Hypothesis: "sir aapko bill receipt dono milega",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
 	}
 }

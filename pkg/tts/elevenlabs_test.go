@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/exotel/langstream/pkg/observability"
 )
@@ -639,6 +640,42 @@ func TestElevenLabsSynthesizer_RecordsCostPerCharacter(t *testing.T) {
 	got := metrics.CostTotal("elevenlabs")
 	if diff := got - want; diff > 1e-12 || diff < -1e-12 {
 		t.Errorf("CostTotal(elevenlabs) = %v, want %v", got, want)
+	}
+	if n := metrics.CostEventCount("elevenlabs"); n != 1 {
+		t.Errorf("CostEventCount(elevenlabs) = %d, want 1", n)
+	}
+}
+
+func TestElevenLabsSynthesizer_RecordsCostPerCharacterForMultiByteText(t *testing.T) {
+	fs := newFakeElevenLabsServer(t, func(w http.ResponseWriter, req fakeElevenLabsRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte{1, 2, 3, 4})
+	})
+	defer fs.Close()
+
+	metrics := observability.NewLatencyRecorder()
+	e := newTestElevenLabsSynthesizer(t, fs, WithElevenLabsMetrics(metrics))
+
+	// Devanagari text: each rune is 3 bytes in UTF-8, so a byte-length-based
+	// cost calculation would overcount by roughly 3x versus the vendor's
+	// actual per-character billing.
+	const text = "नमस्ते, मैं आपकी कैसे मदद कर सकता हूँ?"
+	ch, err := e.SynthesizeStream(context.Background(), text, Persona{Language: LanguageHindi})
+	if err != nil {
+		t.Fatalf("SynthesizeStream: %v", err)
+	}
+	drainElevenLabsChunks(t, ch, 5*time.Second)
+
+	byteLen := len(text)
+	runeLen := utf8.RuneCountInString(text)
+	if byteLen == runeLen {
+		t.Fatalf("test text %q has equal byte length (%d) and rune count (%d); it must contain multi-byte characters to exercise this bug", text, byteLen, runeLen)
+	}
+
+	want := float64(runeLen) * elevenlabsCostPerCharUSD
+	got := metrics.CostTotal("elevenlabs")
+	if diff := got - want; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("CostTotal(elevenlabs) = %v, want %v (rune-based cost for %d-rune/%d-byte input)", got, want, runeLen, byteLen)
 	}
 	if n := metrics.CostEventCount("elevenlabs"); n != 1 {
 		t.Errorf("CostEventCount(elevenlabs) = %d, want 1", n)

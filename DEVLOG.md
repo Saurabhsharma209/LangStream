@@ -3633,3 +3633,105 @@ broken, but operators had no visibility into cost rate, only cost total.
   unblocked. `$HOME`/`/sessions` should be expected full by default --
   clone into a fresh `/tmp` directory and point `GOPATH`/`GOCACHE`/
   `GOTMPDIR`/`TMPDIR` there too, per the established workaround.
+
+## 2026-08-21 (scheduled run, Sprint 26) — SRE-flagged TTS cost bug (byte-vs-rune), QA corpus growth, PE fix
+
+Repo health at start: clean on the first try (`go build ./... && go vet
+./... && go test ./... -race && gofmt -l .` all green across all 11
+packages). ClearStream re-checked (`git ls-remote --tags`): still only
+`v0.1.0`, no `VERSIONING.md` action needed. Still genuinely blocked on
+Saurabh's anchor-customer/live-traffic decision for Week 3's one open
+item and all of Week 4 (unchanged since Sprint 8). Sandbox note: `$HOME`/
+`/sessions` was again completely full (0 bytes free, host-level, not
+this repo's doing); root filesystem had 2+GB free throughout, so the
+`/tmp`-based workaround worked without strain. `/tmp/go`, `/tmp/gopath`,
+`/tmp/gocache` from a prior sandbox instance were present but owned by a
+different user (`nobody`) and unwritable -- worked around by pointing
+`GOPATH`/`GOCACHE`/`GOTMPDIR`/`TMPDIR` at a freshly created, uniquely-
+named `/tmp` directory instead of assuming the stale ones were reusable,
+per Sprint 25's own documented guidance.
+
+PE and SRE were spawned alongside QA this run (unlike several recent
+sprints that skipped PE/Tech) because SRE's audit surfaced a genuine
+owned-file gap outside its own charter partway through -- see below.
+
+### Shipped
+
+**SRE** -- full fresh audit, all normal checks clean (vendor-key sync
+6/6, `docs/compliance.md` vendor table in sync with the 6 registered
+backends, CI/Makefile step-for-step parity confirmed no regression of the
+Sprint 24 `make build` fix, dashboard endpoints still covered). One real
+finding, flagged rather than fixed since it's outside SRE's owned files:
+`pkg/tts/cartesia.go` and `pkg/tts/elevenlabs.go` computed per-character
+billing cost as `float64(len(text)) * costPerChar`, where `len(text)` in
+Go is UTF-8 *byte* length, not character/rune count. For this SDK's
+actual pilot workload -- Hindi (Devanagari) translated text sent to
+TTS -- Devanagari characters are 3 bytes each in UTF-8, so this overcounted
+billed cost by roughly 3x versus what Cartesia/ElevenLabs actually bill
+(per character/credit, not per byte). Invisible for English/ASCII text
+(1 byte == 1 rune), which is why it went unnoticed until now.
+
+**PE** -- fixed the SRE-flagged bug in both files: replaced
+`len(text)` with `utf8.RuneCountInString(text)` in the cost calculation,
+added the `unicode/utf8` import, updated both cost-constant doc comments
+to explain the rune-vs-byte distinction. Checked the rest of `pkg/tts`
+for the same mistake -- no other instances (only two real TTS backends
+with per-character billing exist). Added a regression test in each file
+(`TestCartesiaSynthesizer_RecordsCostPerCharacterForMultiByteText`,
+`TestElevenLabsSynthesizer_RecordsCostPerCharacterForMultiByteText`)
+using real Devanagari text, asserting byte-length != rune-length as a
+sanity guard against the test accidentally passing vacuously, and
+asserting billed cost matches rune count.
+
+**QA** -- grew the WER corpus 100->105 (postposition case-marker
+confusion, decimal-point-marker deletion, two-word phrase-repeat
+insertion, weekday substitution, conjunction deletion) and the BLEU
+corpus 44->49 (trailing punctuation mismatch, long-distance word swap,
+repeated-bigram insertion, clause-level reordering, preposition
+substitution), all hand-derived and independently re-verified against the
+real `WordErrorRate`/`BLEUScore` functions via a throwaway scratch
+program (deleted after use), each confirmed non-overlapping with existing
+corpus categories. Ran a fresh race-pattern audit across all 62
+`go func(` launch sites (37 files) -- clean, no instance of the recurring
+"assert immediately after unsynchronized channel send" bug class found.
+QA and PE independently added non-conflicting regression tests for the
+same TTS bug (different test names, no collision) -- EM left both in
+place rather than deduping, since they're redundant but harmless and each
+exercises a slightly different vendor path.
+
+One process note: the QA agent's first invocation this run was
+interrupted mid-task; its partial file edits were left on disk in the
+working tree. The re-run correctly detected this (via `git diff` against
+`HEAD`) and verified rather than blindly redoing the prior partial work,
+avoiding duplicate/overlapping corpus entries.
+
+### Bugs found/fixed
+TTS per-character cost used UTF-8 byte length instead of rune count,
+overcounting Hindi/Devanagari billing by ~3x -- found by SRE (outside its
+own charter, flagged not fixed), fixed by PE, regression-tested by both
+QA and PE independently. This is a real, previously-unnoticed billing-
+accuracy bug affecting the observability cost-tracking feature shipped
+Sprint 25 -- not a regression from that sprint's own change, since the
+underlying `len(text)` cost math predates it, but it means Sprint 25's
+new "USD/minute" dashboard column has been slightly overstating Hindi TTS
+cost since Cartesia/ElevenLabs were first wired in.
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 11 packages after EM integration of all
+  three agents' changes.
+- Fresh-clone verification from the real GitHub remote after push (see
+  below).
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, need Saurabh's anchor-customer/live-traffic decision.
+
+### Tomorrow
+- No specific carry-over items from this run. Next scheduled run should
+  continue opportunistic hardening / corpus growth until Week 4 is
+  unblocked. Sandbox disk should be expected tight/full (`$HOME`/
+  `/sessions`) by default; clone into a fresh, uniquely-named `/tmp`
+  directory and point `GOPATH`/`GOCACHE`/`GOTMPDIR`/`TMPDIR` at fresh
+  subdirectories you create yourself, not any pre-existing `/tmp/go*`
+  paths, since those may be owned by a different sandbox user.

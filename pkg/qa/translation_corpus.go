@@ -499,6 +499,70 @@ type TranslationCorpusEntry struct {
 //     p1 = 3/5, p2 = 1/4, p3 and p4 are epsilon-smoothed (0.1/3 and
 //     0.1/2 respectively) since no 3-gram or 4-gram survives the
 //     reordering. BP = 1.0 (equal length, 5 == 5).
+//
+// Sprint 2026-08-21 (QA) adds five further entries covering error shapes
+// not yet exercised by any entry above:
+//
+//   - trailing_punctuation_mark_exclamation_difference_confirmation: the
+//     Candidate is identical to the Reference except for a trailing "!"
+//     fused onto the final token ("confirmed" -> "confirmed!") --
+//     distinct from case_only_difference_payment_capitalization (a
+//     capitalization difference, not punctuation) since BLEUScore's
+//     whitespace-only tokenization (see bleu.go's doc comment, the same
+//     caveat WordErrorRate documents) means an attached punctuation mark
+//     makes the last token a full mismatch at every n-gram order that
+//     touches it, exactly like a real word substitution would. 4-word
+//     Reference/Candidate. p1 = 3/4, p2 = 2/3, p3 = 1/2, p4 is
+//     epsilon-smoothed (0.1/1) since the sole 4-gram doesn't match.
+//     BP = 1.0 (equal length, 4 == 4);
+//
+//   - word_order_long_distance_swap_business_hours_translation: the
+//     Candidate swaps two non-adjacent content words -- the second word
+//     and the last word of a 10-word sentence -- with every word in
+//     between left untouched, distinct from
+//     word_order_adjacent_swap_end_delivery_schedule (an immediately
+//     adjacent two-word swap) and transposition_mid_sentence_will_be_
+//     delivered (also adjacent): because the swapped multiset of words
+//     is unchanged, p1 = 1.0 exactly (unigram BLEU cannot see a
+//     reordering at all), and the swap only shows up starting at
+//     bigram: p2 = 6/9, p3 = 5/8, p4 = 4/7. BP = 1.0 (equal length,
+//     10 == 10);
+//
+//   - repeated_bigram_phrase_insertion_please_hold_while_i_check: the
+//     Candidate duplicates the two-word phrase "please hold" back to
+//     back at the very start of an otherwise-identical 8-word sentence
+//     -- the BLEU counterpart to corpus.go's
+//     hinglish_two_word_phrase_repeat_insertion_hold_please, and
+//     distinct from over_repeated_word_clipping_billing_transfer (a
+//     single word repeated many times, clipped almost to nothing) and
+//     stutter_duplicated_trailing_word_confirmed_confirmed (a single
+//     trailing word repeated once): clipping caps the repeated
+//     "please hold" bigram's credit at the single time it actually
+//     appears in the Reference. p1 = 8/10, p2 = 7/9, p3 = 6/8, p4 =
+//     5/7. BP = 1.0 (candidate longer than reference, 10 > 8);
+//
+//   - clause_level_reordering_swap_two_clauses_translation: the
+//     Candidate swaps two whole independent clauses joined by "and"
+//     ("please hold and i will check your balance" -> "i will check
+//     your balance and please hold") -- a clause-level reordering
+//     distinct from every existing word-level reordering entry in this
+//     corpus (word_reordering_full_reversal_delivery_schedule,
+//     word_order_adjacent_swap_end_delivery_schedule,
+//     transposition_mid_sentence_will_be_delivered), none of which
+//     preserve two multi-word grammatical clauses intact while merely
+//     swapping their order. Same unchanged multiset of 8 words, so
+//     p1 = 1.0 exactly (unigram BLEU cannot see any reordering here
+//     either); p2 = 5/7, p3 = 3/6, p4 = 2/5. BP = 1.0 (equal length,
+//     8 == 8);
+//
+//   - preposition_substitution_on_in_delivery_day_mismatch: the
+//     Candidate mistranslates the preposition "on" as "in" ("your
+//     parcel will arrive on monday" -> "... in monday") -- a
+//     function-word substitution distinct from every existing
+//     substitution entry in this corpus (currency, named-entity,
+//     homophone, negation), none of which confuse two prepositions.
+//     6-word Reference/Candidate. p1 = 5/6, p2 = 3/5, p3 = 1/2, p4 =
+//     1/3. BP = 1.0 (equal length, 6 == 6).
 
 func FixedTranslationCorpus() []TranslationCorpusEntry {
 	return []TranslationCorpusEntry{
@@ -872,6 +936,46 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Source:         "aapka order ship kar diya gaya hai",
 			Reference:      "your order has been shipped",
 			Candidate:      "we have shipped your order",
+		},
+		{
+			Name:           "trailing_punctuation_mark_exclamation_difference_confirmation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka payment confirm ho gaya hai",
+			Reference:      "your payment is confirmed",
+			Candidate:      "your payment is confirmed!",
+		},
+		{
+			Name:           "word_order_long_distance_swap_business_hours_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka order kal shaam tak aapke ghar pahuch jayega",
+			Reference:      "your order will be delivered to your home tomorrow evening",
+			Candidate:      "your evening will be delivered to your home tomorrow order",
+		},
+		{
+			Name:           "repeated_bigram_phrase_insertion_please_hold_while_i_check",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "please hold main aapka account status check karta hoon",
+			Reference:      "please hold while i check your account status",
+			Candidate:      "please hold please hold while i check your account status",
+		},
+		{
+			Name:           "clause_level_reordering_swap_two_clauses_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "please hold aur main aapka balance check karunga",
+			Reference:      "please hold and i will check your balance",
+			Candidate:      "i will check your balance and please hold",
+		},
+		{
+			Name:           "preposition_substitution_on_in_delivery_day_mismatch",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka parcel monday ko pahuchega",
+			Reference:      "your parcel will arrive on monday",
+			Candidate:      "your parcel will arrive in monday",
 		},
 	}
 }

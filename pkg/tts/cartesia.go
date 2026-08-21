@@ -31,6 +31,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/exotel/langstream/pkg/observability"
 )
@@ -75,8 +76,10 @@ const (
 // pay-as-you-go pricing (~$0.00004/character, i.e. roughly $40 per 1M
 // characters, per cartesia.ai/pricing as reviewed while writing this).
 // Cartesia bills per character of input text, not per second of audio
-// produced, so this is charged against len(text) once Cartesia has
-// accepted the generation request (see SynthesizeStream). This is for
+// produced, so this is charged against utf8.RuneCountInString(text)
+// (character count, not UTF-8 byte length -- multi-byte scripts like
+// Devanagari would otherwise be overcounted) once Cartesia has accepted
+// the generation request (see SynthesizeStream). This is for
 // pilot cost-visibility only, not billing-grade accuracy -- Cartesia's
 // actual rates vary by plan/commitment and change over time, and this
 // value is not read live from any API.
@@ -392,7 +395,7 @@ func (c *CartesiaSynthesizer) SynthesizeStream(ctx context.Context, text string,
 	// stream later fails mid-way -- see cartesiaCostPerCharUSD's doc
 	// comment.
 	if c.metrics != nil {
-		c.metrics.RecordCost("cartesia", float64(len(text))*cartesiaCostPerCharUSD)
+		c.metrics.RecordCost("cartesia", float64(utf8.RuneCountInString(text))*cartesiaCostPerCharUSD)
 	}
 
 	out := make(chan AudioChunk, 4)
