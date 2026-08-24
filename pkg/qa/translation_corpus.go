@@ -563,6 +563,70 @@ type TranslationCorpusEntry struct {
 //     homophone, negation), none of which confuse two prepositions.
 //     6-word Reference/Candidate. p1 = 5/6, p2 = 3/5, p3 = 1/2, p4 =
 //     1/3. BP = 1.0 (equal length, 6 == 6).
+//
+// Sprint 2026-08-24 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise:
+//
+//   - gender_pronoun_mistranslation_he_she_confusion: the Candidate
+//     mistranslates the subject pronoun "he" as "she" ("he called you
+//     yesterday about the refund" -> "she called ...") -- a pronoun
+//     gender-agreement error distinct from every existing substitution
+//     entry, none of which confuse a subject pronoun's gender. 7-word
+//     Reference/Candidate. p1 = 6/7, p2 = 5/6, p3 = 4/5, p4 = 3/4.
+//     BP = 1.0 (equal length, 7 == 7);
+//
+//   - idiomatic_phrase_literal_translation_mismatch: the Candidate
+//     translates the English idiom "bear with" word-for-word as "carry
+//     with" ("please bear with us for a moment" -> "please carry with
+//     us ..."), the classic idiom-taken-literally MT failure mode --
+//     distinct from paraphrase_semantically_fine_lexically_different
+//     (a fluent reworking that preserves meaning) and every substitution
+//     entry (single-word factual errors, not idiom mistranslation).
+//     7-word Reference/Candidate. p1 = 6/7, p2 = 4/6, p3 = 3/5, p4 =
+//     2/4. BP = 1.0 (equal length, 7 == 7);
+//
+//   - formality_register_downgrade_please_dropped: the Candidate drops
+//     the politeness marker "please" entirely rather than mistranslating
+//     it ("please share your registered mobile number" -> "share your
+//     registered mobile number"), a formality-register downgrade
+//     distinct from honorific_marker_deletion_sir_dropped (a
+//     post-positioned respect marker, "sir", not a sentence-initial
+//     politeness request) -- every remaining word matches exactly, so
+//     p1 = p2 = p3 = p4 = 1.0 and the entire score comes from the
+//     brevity penalty: BP = exp(1 - 6/5) ~= 0.8187 (candidate is one
+//     word shorter than the 6-word reference);
+//
+//   - double_negative_mistranslation_meaning_reversal: the Candidate
+//     inserts a spurious extra "not" ("your refund has not been
+//     processed" -> "your refund has not not been processed"),
+//     reversing the sentence's polarity back to "has been processed" --
+//     a meaning-inverting insertion distinct from
+//     negation_deletion_mistranslation_refund_not_processed (which
+//     deletes the negation rather than doubling it). 6-word Reference,
+//     7-word Candidate. p1 = 6/7, p2 = 5/6, p3 = 3/5, p4 = 1/4. BP = 1.0
+//     (candidate longer than reference, 7 > 6);
+//
+//   - measurement_unit_conversion_numeric_error_km_to_miles: the
+//     Candidate changes both the numeric value and the unit label
+//     ("the warehouse is ten kilometers from here" -> "... is six miles
+//     from here") -- a compounded numeric-plus-unit conversion error
+//     distinct from unit_of_measurement_km_miles_substitution_trailing
+//     (which swaps only the unit label, leaving the number itself
+//     unchanged). 7-word Reference/Candidate. p1 = 5/7, p2 = 1/2, p3 =
+//     1/5, p4 = 0/4 (smoothed to 0.1/4 per bleuSmoothingEpsilon, since
+//     the candidate has 4-grams but none match). BP = 1.0 (equal
+//     length, 7 == 7);
+//
+//   - aspect_mismatch_continuous_vs_simple_tense_translation: the
+//     Candidate renders a present-continuous action as simple present
+//     ("our team is reviewing your complaint" -> "our team reviews your
+//     complaint"), an aspect (ongoing-vs-habitual/instantaneous) error
+//     distinct from tense_mismatch_future_vs_past_delivery_status_translation
+//     (which confuses tense -- future vs past -- not aspect within the
+//     same tense). 6-word Reference, 5-word Candidate. p1 = 4/5, p2 =
+//     1/2, p3 = 0/3 (smoothed to 0.1/3), p4 = 0/2 (smoothed to 0.1/2).
+//     BP = exp(1 - 6/5) ~= 0.8187 (candidate is one word shorter than
+//     the reference).
 
 func FixedTranslationCorpus() []TranslationCorpusEntry {
 	return []TranslationCorpusEntry{
@@ -976,6 +1040,54 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Source:         "aapka parcel monday ko pahuchega",
 			Reference:      "your parcel will arrive on monday",
 			Candidate:      "your parcel will arrive in monday",
+		},
+		{
+			Name:           "gender_pronoun_mistranslation_he_she_confusion",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "unhone kal aapko refund ke baare mein call kiya tha",
+			Reference:      "he called you yesterday about the refund",
+			Candidate:      "she called you yesterday about the refund",
+		},
+		{
+			Name:           "idiomatic_phrase_literal_translation_mismatch",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya thoda sabar rakhiye hum abhi dekhte hain",
+			Reference:      "please bear with us for a moment",
+			Candidate:      "please carry with us for a moment",
+		},
+		{
+			Name:           "formality_register_downgrade_please_dropped",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya apna registered mobile number bataiye",
+			Reference:      "please share your registered mobile number",
+			Candidate:      "share your registered mobile number",
+		},
+		{
+			Name:           "double_negative_mistranslation_meaning_reversal",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka refund process nahi hua hai",
+			Reference:      "your refund has not been processed",
+			Candidate:      "your refund has not not been processed",
+		},
+		{
+			Name:           "measurement_unit_conversion_numeric_error_km_to_miles",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "warehouse yahan se das kilometer door hai",
+			Reference:      "the warehouse is ten kilometers from here",
+			Candidate:      "the warehouse is six miles from here",
+		},
+		{
+			Name:           "aspect_mismatch_continuous_vs_simple_tense_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "hamari team aapki complaint review kar rahi hai",
+			Reference:      "our team is reviewing your complaint",
+			Candidate:      "our team reviews your complaint",
 		},
 	}
 }

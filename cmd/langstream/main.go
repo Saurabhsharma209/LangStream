@@ -68,7 +68,7 @@ const (
 // for it in the Dockerfile and docker-compose.yml.
 const defaultDashboardAddr = ":8080"
 
-// init registers the real vendor backends (Deepgram/Sarvam for ASR, GPT-4o
+// init registers the real vendor backends (Deepgram/Sarvam for ASR, GPT-4o/Gemini
 // for MT, Cartesia/ElevenLabs for TTS) alongside the always-available
 // "mock" backend registered by pkg/langstream itself. Registration is
 // unconditional -- it does not check whether the corresponding API key

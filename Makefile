@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet docker docker-run serve ci check-vendor-keys test-vendor-key-guard
+.PHONY: build test fmt fmt-check vet docker docker-run serve ci check-vendor-keys test-vendor-key-guard check-dockerignore test-dockerignore-guard
 
 BINARY := langstream
 CMD_PATH := ./cmd/langstream
@@ -68,8 +68,24 @@ check-vendor-keys:
 test-vendor-key-guard:
 	./scripts/check-vendor-keys_test.sh
 
+# Guards against a real build-hygiene gap found in Sprint 27: with no
+# .dockerignore, Dockerfile's `COPY . .` pulled in .git/ and every
+# top-level doc file (including DEVLOG.md, edited on essentially every
+# sprint per this project's own established pattern), busting the `go
+# build` layer's Docker cache on every doc-only change. See
+# .dockerignore's own header comment and scripts/check-dockerignore.sh's
+# header comment for the full story.
+check-dockerignore:
+	./scripts/check-dockerignore.sh
+
+# Regression test for check-dockerignore.sh itself (Sprint 27), same
+# rationale as test-vendor-key-guard above: a hand-verified-once check
+# with no pinned test could silently regress later.
+test-dockerignore-guard:
+	./scripts/check-dockerignore_test.sh
+
 # What CI runs. Keep this in sync with .github/workflows/ci.yml so
 # `make ci` is a reliable local pre-push check. (CI's docker-build job is
 # informational/parallel, not part of the local pre-push gate here - run
 # `make docker` separately if you want to sanity-check the image too.)
-ci: fmt-check vet test build check-vendor-keys test-vendor-key-guard
+ci: fmt-check vet test build check-vendor-keys test-vendor-key-guard check-dockerignore test-dockerignore-guard

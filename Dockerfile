@@ -13,6 +13,11 @@ WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
 
+# See .dockerignore (Sprint 27) -- it keeps this COPY from pulling in
+# .git/, docs, and other non-build content that would otherwise bust this
+# layer's cache on every doc-only commit (this project's DEVLOG.md is
+# edited on essentially every sprint) without changing anything the build
+# below actually reads.
 COPY . .
 
 # Static binary: CGO disabled so it runs unmodified on the distroless base

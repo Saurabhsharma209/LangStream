@@ -172,6 +172,13 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // block, a magnitude-word substitution, and a transliteration
 // spelling-variant mismatch) — see FixedCorpus's doc comment for each
 // entry's reasoning and hand-computed WER.
+//
+// Sprint 2026-08-24 (QA): includes six further entries (a false-start
+// self-repair disfluency deletion, a time-of-day period-marker
+// substitution, a spoken-digit reading-convention substitution, a
+// vocative customer-name deletion, a Hindi light-verb compound deletion,
+// and an English discourse-filler insertion) — see FixedCorpus's doc
+// comment for each entry's reasoning and hand-computed WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -327,6 +334,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_postposition_case_marker_substitution_ko_ki":         1.0 / 7.0,
 		"hinglish_day_of_week_substitution_monday_tuesday_appointment": 1.0 / 8.0,
 		"hinglish_conjunction_word_deletion_aur_bill_and_receipt":      1.0 / 7.0,
+
+		// Sprint 2026-08-24 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_false_start_self_repair_disfluency_deletion":               2.0 / 8.0,
+		"hinglish_time_of_day_period_marker_substitution_subah_shaam":        1.0 / 6.0,
+		"hinglish_spoken_digit_reading_convention_substitution_double_digit": 1.0 / 8.0,
+		"hinglish_vocative_customer_name_deletion_dropped_at_start":          1.0 / 8.0,
+		"hinglish_light_verb_compound_deletion_kar_do":                       1.0 / 6.0,
+		"hinglish_english_discourse_filler_like_insertion":                   1.0 / 7.0,
 	}
 
 	entries := FixedCorpus()

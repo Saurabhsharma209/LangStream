@@ -639,6 +639,43 @@ func placeholderPCM() []byte {
 //   - hinglish_hedge_word_deletion_lagbhag_approximate_bill_amount:   WER 1/8   (1 deletion / 8 words)
 //   - hinglish_spelled_out_letter_substitution_pin_code_confirmation: WER 1/10  (1 substitution / 10 words)
 //   - hinglish_tense_marker_substitution_future_past_delivery_status: WER 1/6   (1 substitution / 6 words)
+//
+// Sprint 2026-08-24 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise: a false-start self-repair disfluency
+// (the fake ASR drops an entire mid-utterance self-correction fragment --
+// "mujhe matlab" abandoned in favor of the repaired "humein" -- a
+// spontaneous-speech repair pattern distinct from every existing filler-
+// word or discourse-particle deletion, which drop a single standalone
+// word rather than an abandoned false-start clause), a time-of-day
+// period-marker substitution ("subah", morning, misheard as "shaam",
+// evening -- distinct from hinglish_day_of_week_substitution_monday_
+// tuesday_appointment, which substitutes a day name, not a time-of-day
+// period), a spoken-digit reading-convention substitution (the fake ASR
+// mishears the English reading-convention word "double" -- as in "double
+// five" for "55" -- as the digit word "five" itself, a distinct numeric
+// error class from every existing digit/number entry, none of which
+// involve the double/triple spoken-digit-repetition convention common in
+// Indian spoken numbers), a vocative customer-name deletion (a person's
+// name used as a sentence-opening vocative address is dropped entirely --
+// distinct from hinglish_proper_noun_person_name_substitution_order,
+// which substitutes a name rather than deleting one used vocatively), a
+// Hindi light-verb (compound-verb) deletion (the light verb "do" is
+// dropped from the compound "update kar do", leaving the bare non-finite
+// "kar" -- a grammatical-construction error distinct from every existing
+// deletion entry, which drop content words, filler words, or function
+// words but never the light-verb half of a Hindi compound-verb
+// construction), and an English discourse-filler insertion (the fake ASR
+// hallucinates the Indian-English filler "like" mid-sentence -- distinct
+// from hinglish_filler_words_address_update's Hindi fillers "matlab"/
+// "actually"/"na", since "like" is a characteristically English, not
+// Hindi, discourse marker):
+//
+//   - hinglish_false_start_self_repair_disfluency_deletion:               WER 2/8  (2 deletions / 8 words)
+//   - hinglish_time_of_day_period_marker_substitution_subah_shaam:        WER 1/6  (1 substitution / 6 words)
+//   - hinglish_spoken_digit_reading_convention_substitution_double_digit: WER 1/8  (1 substitution / 8 words)
+//   - hinglish_vocative_customer_name_deletion_dropped_at_start:          WER 1/8  (1 deletion / 8 words)
+//   - hinglish_light_verb_compound_deletion_kar_do:                       WER 1/6  (1 deletion / 6 words)
+//   - hinglish_english_discourse_filler_like_insertion:                   WER 1/7  (1 insertion / 7 words)
 
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
@@ -2540,6 +2577,103 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir aapko bill aur receipt dono milega",
 			Hypothesis: "sir aapko bill receipt dono milega",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A false-start self-repair disfluency: the reference
+			// captures a genuine mid-utterance self-correction ("mujhe
+			// matlab" -- "to me, I mean" -- abandoned in favor of the
+			// repaired "humein", "to us"), and the fake ASR drops the
+			// entire abandoned false-start fragment rather than
+			// transcribing it -- distinct from every existing
+			// filler-word deletion in this corpus, which drop a single
+			// standalone discourse word, not a two-word abandoned
+			// self-correction clause. Two deletions: WER = 2/8
+			// (2 deletions / 8 words).
+			Name:       "hinglish_false_start_self_repair_disfluency_deletion",
+			Language:   "hi",
+			Reference:  "sir mujhe matlab humein order cancel karna hai",
+			Hypothesis: "sir humein order cancel karna hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A time-of-day period-marker substitution: the fake ASR
+			// mishears "subah" ("morning") as "shaam" ("evening") --
+			// distinct from
+			// hinglish_day_of_week_substitution_monday_tuesday_appointment,
+			// which substitutes a day-of-week name, not a time-of-day
+			// period. A single substitution: WER = 1/6
+			// (1 substitution / 6 words).
+			Name:       "hinglish_time_of_day_period_marker_substitution_subah_shaam",
+			Language:   "hi",
+			Reference:  "sir aapka delivery subah ho jayegi",
+			Hypothesis: "sir aapka delivery shaam ho jayegi",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A spoken-digit reading-convention substitution: Indian
+			// spoken numbers commonly use "double"/"triple" to read
+			// repeated digits aloud (e.g. "double five" for "55"), and
+			// the fake ASR mishears the reading-convention word
+			// "double" as the digit word "five" itself -- a distinct
+			// numeric error class from every existing digit/number
+			// entry in this corpus, none of which involve this
+			// double/triple spoken-digit convention. A single
+			// substitution: WER = 1/8 (1 substitution / 8 words).
+			Name:       "hinglish_spoken_digit_reading_convention_substitution_double_digit",
+			Language:   "hi",
+			Reference:  "sir aapka otp double five one two hai",
+			Hypothesis: "sir aapka otp five five one two hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A vocative customer-name deletion: a person's name used
+			// as a sentence-opening vocative address is dropped
+			// entirely by the fake ASR -- distinct from
+			// hinglish_proper_noun_person_name_substitution_order,
+			// which substitutes a name rather than deleting one used
+			// vocatively. A single deletion: WER = 1/8
+			// (1 deletion / 8 words).
+			Name:       "hinglish_vocative_customer_name_deletion_dropped_at_start",
+			Language:   "hi",
+			Reference:  "priya sir aapka order confirm ho gaya hai",
+			Hypothesis: "sir aapka order confirm ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A Hindi light-verb (compound-verb) deletion: the light
+			// verb "do" is dropped from the compound construction
+			// "update kar do", leaving the bare non-finite "kar" --
+			// a grammatical-construction error distinct from every
+			// existing deletion entry in this corpus, which drop
+			// content words, filler words, or function words but never
+			// the light-verb half of a Hindi compound-verb
+			// construction. A single deletion: WER = 1/6
+			// (1 deletion / 6 words).
+			Name:       "hinglish_light_verb_compound_deletion_kar_do",
+			Language:   "hi",
+			Reference:  "sir mera address update kar do",
+			Hypothesis: "sir mera address update kar",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// An English discourse-filler insertion: the fake ASR
+			// hallucinates the Indian-English discourse filler "like"
+			// mid-sentence -- distinct from
+			// hinglish_filler_words_address_update's Hindi fillers
+			// "matlab"/"actually"/"na", since "like" is a
+			// characteristically English, not Hindi, discourse marker.
+			// A single insertion: WER = 1/7 (1 insertion / 7 words).
+			Name:       "hinglish_english_discourse_filler_like_insertion",
+			Language:   "hi",
+			Reference:  "sir mera order abhi tak nahi aaya",
+			Hypothesis: "sir mera order like abhi tak nahi aaya",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

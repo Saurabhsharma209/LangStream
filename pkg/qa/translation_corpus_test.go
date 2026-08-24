@@ -643,6 +643,80 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	prepP4 := 1.0 / 3.0
 	wantPrepositionSubstitution := math.Exp((math.Log(prepP1) + math.Log(prepP2) + math.Log(prepP3) + math.Log(prepP4)) / 4.0)
 
+	// gender_pronoun_mistranslation_he_she_confusion: 7-word Reference
+	// "he called you yesterday about the refund" vs 7-word Candidate
+	// "she called you yesterday about the refund" (a single subject-
+	// pronoun substitution at the very first word). p1 = 6/7, p2 = 5/6,
+	// p3 = 4/5, p4 = 3/4. BP = 1.0 (equal length, 7 == 7).
+	genderP1 := 6.0 / 7.0
+	genderP2 := 5.0 / 6.0
+	genderP3 := 4.0 / 5.0
+	genderP4 := 3.0 / 4.0
+	wantGenderPronounMistranslation := math.Exp((math.Log(genderP1) + math.Log(genderP2) + math.Log(genderP3) + math.Log(genderP4)) / 4.0)
+
+	// idiomatic_phrase_literal_translation_mismatch: 7-word Reference
+	// "please bear with us for a moment" vs 7-word Candidate "please
+	// carry with us for a moment" (the idiom "bear with" translated
+	// literally as "carry with"). p1 = 6/7, p2 = 4/6, p3 = 3/5,
+	// p4 = 2/4. BP = 1.0 (equal length, 7 == 7).
+	idiomP1 := 6.0 / 7.0
+	idiomP2 := 4.0 / 6.0
+	idiomP3 := 3.0 / 5.0
+	idiomP4 := 2.0 / 4.0
+	wantIdiomaticLiteralMismatch := math.Exp((math.Log(idiomP1) + math.Log(idiomP2) + math.Log(idiomP3) + math.Log(idiomP4)) / 4.0)
+
+	// formality_register_downgrade_please_dropped: 6-word Reference
+	// "please share your registered mobile number" vs 5-word Candidate
+	// "share your registered mobile number" (the leading politeness
+	// marker "please" dropped entirely, every remaining word matching).
+	// p1 = p2 = p3 = p4 = 1.0 (every n-gram the 5-word candidate forms
+	// is also in the reference). BP = exp(1 - 6/5) since the candidate
+	// (5 words) is shorter than the reference (6 words).
+	formalityP1 := 1.0
+	formalityP2 := 1.0
+	formalityP3 := 1.0
+	formalityP4 := 1.0
+	wantFormalityRegisterDowngrade := math.Exp(1.0-6.0/5.0) * math.Exp((math.Log(formalityP1)+math.Log(formalityP2)+math.Log(formalityP3)+math.Log(formalityP4))/4.0)
+
+	// double_negative_mistranslation_meaning_reversal: 6-word Reference
+	// "your refund has not been processed" vs 7-word Candidate "your
+	// refund has not not been processed" (a spurious extra "not"
+	// inserted, reversing the sentence's polarity). p1 = 6/7, p2 = 5/6,
+	// p3 = 3/5, p4 = 1/4. BP = 1.0 (candidate longer than reference,
+	// 7 > 6).
+	doubleNegP1 := 6.0 / 7.0
+	doubleNegP2 := 5.0 / 6.0
+	doubleNegP3 := 3.0 / 5.0
+	doubleNegP4 := 1.0 / 4.0
+	wantDoubleNegativeMistranslation := math.Exp((math.Log(doubleNegP1) + math.Log(doubleNegP2) + math.Log(doubleNegP3) + math.Log(doubleNegP4)) / 4.0)
+
+	// measurement_unit_conversion_numeric_error_km_to_miles: 7-word
+	// Reference "the warehouse is ten kilometers from here" vs 7-word
+	// Candidate "the warehouse is six miles from here" (both the numeric
+	// value and the unit label changed). p1 = 5/7, p2 = 1/2, p3 = 1/5,
+	// p4 = 0/4, smoothed to bleuSmoothingEpsilon/4 since the candidate
+	// has 4-grams but none of them match the reference. BP = 1.0 (equal
+	// length, 7 == 7).
+	unitConvP1 := 5.0 / 7.0
+	unitConvP2 := 1.0 / 2.0
+	unitConvP3 := 1.0 / 5.0
+	unitConvP4 := bleuSmoothingEpsilon / 4.0
+	wantUnitConversionNumericError := math.Exp((math.Log(unitConvP1) + math.Log(unitConvP2) + math.Log(unitConvP3) + math.Log(unitConvP4)) / 4.0)
+
+	// aspect_mismatch_continuous_vs_simple_tense_translation: 6-word
+	// Reference "our team is reviewing your complaint" vs 5-word
+	// Candidate "our team reviews your complaint" (present-continuous
+	// rendered as simple present, dropping "is" and changing
+	// "reviewing" to "reviews"). p1 = 4/5, p2 = 1/2, p3 = 0/3
+	// (smoothed to bleuSmoothingEpsilon/3), p4 = 0/2 (smoothed to
+	// bleuSmoothingEpsilon/2). BP = exp(1 - 6/5) since the candidate
+	// (5 words) is shorter than the reference (6 words).
+	aspectP1 := 4.0 / 5.0
+	aspectP2 := 1.0 / 2.0
+	aspectP3 := bleuSmoothingEpsilon / 3.0
+	aspectP4 := bleuSmoothingEpsilon / 2.0
+	wantAspectMismatch := math.Exp(1.0-6.0/5.0) * math.Exp((math.Log(aspectP1)+math.Log(aspectP2)+math.Log(aspectP3)+math.Log(aspectP4))/4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -714,6 +788,15 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"repeated_bigram_phrase_insertion_please_hold_while_i_check":    wantRepeatedBigramInsertion,
 		"clause_level_reordering_swap_two_clauses_translation":          wantClauseLevelReordering,
 		"preposition_substitution_on_in_delivery_day_mismatch":          wantPrepositionSubstitution,
+
+		// Sprint 2026-08-24 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"gender_pronoun_mistranslation_he_she_confusion":         wantGenderPronounMistranslation,
+		"idiomatic_phrase_literal_translation_mismatch":          wantIdiomaticLiteralMismatch,
+		"formality_register_downgrade_please_dropped":            wantFormalityRegisterDowngrade,
+		"double_negative_mistranslation_meaning_reversal":        wantDoubleNegativeMistranslation,
+		"measurement_unit_conversion_numeric_error_km_to_miles":  wantUnitConversionNumericError,
+		"aspect_mismatch_continuous_vs_simple_tense_translation": wantAspectMismatch,
 	}
 
 	entries := FixedTranslationCorpus()

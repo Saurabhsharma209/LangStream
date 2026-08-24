@@ -1,0 +1,54 @@
+# .dockerignore -- keeps the Docker build context (see Dockerfile's
+# `COPY . .` in the builder stage) limited to what `go build
+# ./cmd/langstream` actually needs.
+#
+# This closes a real, previously-unnoticed gap: with no .dockerignore,
+# `COPY . .` pulled in .git/ (repo history, several hundred KB and
+# growing) and every top-level doc file on every build. The most costly
+# part of that in practice is DEVLOG.md: per this project's own
+# established pattern, it is appended to on essentially every sprint/day
+# (see DEVLOG.md itself), and Docker's layer cache keys the `COPY . .`
+# layer (and therefore the `go build` layer that follows it, since it's
+# a separate RUN step but still invalidated once its input layer
+# changes) off the exact contents copied. A pure documentation edit with
+# zero effect on the built binary was silently forcing a full,
+# uncached `go mod download`-adjacent rebuild step on every image build
+# -- a real, quantifiable CI/local build-time cost for this SRE-owned
+# charter item, not a style nit. Excluding docs/VCS metadata here means
+# a DEVLOG-only change no longer busts the build layer's cache.
+#
+# Keep in sync with what cmd/langstream actually imports (see go.mod --
+# no local `replace` directives point outside this repo, and cmd/langstream
+# does not import examples/ or tools/, so those stay excluded too; if that
+# ever changes, add the needed path back here).
+
+# VCS metadata -- never needed to build the binary.
+.git/
+.gitignore
+
+# Documentation -- edited far more often than source, never read by the
+# build. See this file's header comment for why that specifically matters
+# for Docker layer-cache invalidation.
+*.md
+docs/
+
+# Not imported by cmd/langstream (see go.mod: no local replace directives
+# point at either of these, and neither is a dependency of the binary
+# Dockerfile actually builds).
+examples/
+tools/
+
+# Local build artifacts / editor & OS cruft -- mirrors .gitignore's own
+# list, so a locally-built binary or stray temp file never ends up baked
+# into a build context by accident.
+/bin/
+/langstream
+*.exe
+*.test
+*.out
+*.go.[0-9]*
+.DS_Store
+*.swp
+
+# CI/CD config -- irrelevant inside the image itself.
+.github/

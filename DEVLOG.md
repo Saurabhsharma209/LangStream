@@ -3735,3 +3735,108 @@ cost since Cartesia/ElevenLabs were first wired in.
   directory and point `GOPATH`/`GOCACHE`/`GOTMPDIR`/`TMPDIR` at fresh
   subdirectories you create yourself, not any pre-existing `/tmp/go*`
   paths, since those may be owned by a different sandbox user.
+
+## 2026-08-24 (scheduled run, Sprint 27) — QA corpus growth + SRE .dockerignore/build-cache fix, no roadmap items closed
+
+Still genuinely blocked on Saurabh's anchor-customer/live-traffic decision
+for Week 3's one open item (real-PSTN jitter tuning) and all of Week 4
+(unchanged since Sprint 8; three days elapsed since the last scheduled run
+on 2026-08-21, no interactive work landed in between). Repo health at
+start was clean on the first try (`go build`/`vet`/`gofmt`/`go test ./...`
+and `go test ./... -race` all green across all 12 packages). ClearStream
+re-checked (`git ls-remote --tags`): still only `v0.1.0`, no
+`VERSIONING.md` action needed.
+
+Sandbox note: `$HOME`/`/sessions` was again completely full (0 bytes free,
+host-level, shared across sessions, not this repo's doing) -- cloned into
+a fresh `/tmp/build_home/LangStream` instead, consistent with every prior
+run's documented workaround. Root filesystem itself was also unusually
+tight this run (down to ~390MB free by the end, vs. several recent runs'
+multi-GB headroom) -- workable, but tighter than typical; worth noting in
+case a future run hits a harder wall. Also had to redetect host
+architecture: the cached `/tmp/go.tar.gz` from a prior run turned out to
+be `linux-amd64` on an `aarch64` (arm64) host and failed with `Exec format
+error` -- downloaded `go1.22.6 linux-arm64` fresh instead of assuming a
+cached toolchain tarball matches the current host arch.
+
+PE/Tech were not spawned (no owned-file gap identified during planning,
+same reasoning as most recent sprints) -- only QA and SRE ran, in
+parallel.
+
+### Shipped
+
+**QA** -- grew the WER corpus 105->111 and the BLEU corpus 44->50 with 6
+new non-overlapping error shapes each (Hinglish self-repair/false-start
+disfluency deletion, subah/shaam time-of-day marker substitution, spoken
+double-digit reading-convention substitution, vocative customer-name
+deletion, Hindi light-verb compound deletion, English discourse-filler
+"like" hallucination for WER; gender pronoun he/she confusion, idiomatic
+literal-translation mismatch, formality-register politeness-marker
+deletion, double-negative meaning-reversal, km/miles unit-conversion
+numeric error, continuous-vs-simple tense/aspect mismatch for BLEU), all
+hand-verified against the real `WordErrorRate`/`bleuScore` functions via a
+throwaway scratch program (deleted after use). Ran a clean race-pattern
+audit across all 62 `go func(` launch sites (39 files) -- three initial
+automated-scan hits in the three vendor circuit-breaker test files turned
+out to be false positives (`defer func(){ done <- struct{}{} }()` sends
+that fire after the loop body, not before, on internally mutex-protected
+circuit breakers) -- no real instance of the recurring "assert immediately
+after unsynchronized channel send" bug class found.
+
+**SRE** -- full fresh audit: vendor-key sync (6/6, `docker-compose.yml`
+and `cmd/langstream/main.go`'s `init()` in sync), `docs/compliance.md`
+vendor table confirmed matching the 6 registered backends, per-vendor
+`RecordCost` math spot-checked correct across all 6 real vendor clients
+(including the Sprint 26 byte-vs-rune fix still intact), CI/Makefile
+scope parity confirmed (no Sprint-24-style mismatch), dashboard endpoints
+still covered by tests. One real, previously-unnoticed gap found and
+fixed: no `.dockerignore` existed, so `Dockerfile`'s `COPY . .` pulled
+`.git/` and every top-level doc file -- including `DEVLOG.md`, which this
+project's own pattern edits on essentially every sprint -- into the
+Docker build context, busting that layer's build cache (and the `go
+build` layer after it) on every pure-documentation change with zero
+corresponding source change. Fixed: added `.dockerignore` (excludes
+`.git/`, `*.md`, `docs/`, `examples/`, `tools/`, `.github/`, local
+build/editor cruft -- verified `cmd/langstream` imports neither
+`examples/` nor `tools/`, so excluding them from the image is safe),
+`scripts/check-dockerignore.sh` + regression test
+(`scripts/check-dockerignore_test.sh`, 3 cases: missing file, missing
+pattern, complete), wired into `Makefile` (`check-dockerignore`,
+`test-dockerignore-guard`, added to `ci:`) and
+`.github/workflows/ci.yml`, keeping CI/Makefile parity intact.
+
+**EM (integration)** -- fixed a stale doc comment SRE flagged (outside its
+own charter, `cmd/langstream/main.go`'s `init()` comment listed "GPT-4o
+for MT" but omitted Gemini, registered in the same function since
+2026-07-14) -- trivial one-line comment fix, folded into this integration
+commit rather than deferred to a Tech-workstream spawn.
+
+### Bugs found/fixed
+`.dockerignore` was missing, silently busting Docker build-cache layers on
+every documentation-only commit (which is most commits, given DEVLOG.md's
+own update cadence) -- a real, quantifiable build-time cost previously
+unnoticed across 27 sprints of audits, found and fixed by SRE. Not a
+functional/runtime bug (the built image was always correct), a build-
+efficiency gap.
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 12 packages after EM integration of both
+  agents' changes.
+- `scripts/check-vendor-keys.sh`, `scripts/check-dockerignore.sh`, and
+  `scripts/check-dockerignore_test.sh` all pass.
+- Fresh-clone verification from the real GitHub remote after push (see
+  below), rebuilt independently of the local working copy.
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, need Saurabh's anchor-customer/live-traffic decision.
+
+### Tomorrow
+- No specific carry-over items from this run. Next scheduled run should
+  continue opportunistic hardening / corpus growth until Week 4 is
+  unblocked. `$HOME`/`/sessions` should be expected full by default --
+  clone into a fresh `/tmp` directory and point `GOPATH`/`GOCACHE`/
+  `GOTMPDIR`/`TMPDIR` there too. Also don't assume a cached Go toolchain
+  tarball matches the current host architecture -- check `uname -m`
+  first, since this run's cached tarball was amd64 on an arm64 host.
