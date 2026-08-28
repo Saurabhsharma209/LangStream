@@ -627,6 +627,73 @@ type TranslationCorpusEntry struct {
 //     1/2, p3 = 0/3 (smoothed to 0.1/3), p4 = 0/2 (smoothed to 0.1/2).
 //     BP = exp(1 - 6/5) ~= 0.8187 (candidate is one word shorter than
 //     the reference).
+//
+// Sprint 2026-08-28 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise:
+//
+//   - determiner_deletion_the_dropped_refund_timeline: the Candidate
+//     drops both occurrences of the article "the" ("the refund will be
+//     processed within the day" -> "refund will be processed within
+//     day") -- a function-word (determiner) ellipsis distinct from
+//     every existing deletion/omission entry, none of which drop an
+//     article specifically. 8-word Reference, 6-word Candidate. p1 =
+//     6/6, p2 = 4/5, p3 = 3/4, p4 = 2/3. BP = exp(1 - 8/6) ~= 0.7165
+//     (candidate is two words shorter than the reference);
+//
+//   - modal_verb_mistranslation_must_should_obligation_strength: the
+//     Candidate downgrades the obligation-strength modal "must" to the
+//     weaker "should" ("you must submit your documents by friday" ->
+//     "you should submit ..."), a modality-strength error distinct from
+//     tense_mismatch_future_vs_past_delivery_status_translation and
+//     aspect_mismatch_continuous_vs_simple_tense_translation, neither of
+//     which touches a modal verb. 7-word Reference/Candidate. p1 = 6/7,
+//     p2 = 4/6, p3 = 3/5, p4 = 2/4. BP = 1.0 (equal length, 7 == 7);
+//
+//   - conjunction_mistranslation_and_or_logical_connective: the
+//     Candidate mistranslates the conjunction "and" as "or" ("please
+//     share your name and your registered number" -> "... your name or
+//     your registered number"), a logical-connective meaning error
+//     distinct from double_negative_mistranslation_meaning_reversal
+//     (which reverses polarity via a doubled negation, not a
+//     conjunction swap). 8-word Reference/Candidate. p1 = 7/8, p2 =
+//     5/7, p3 = 3/6, p4 = 1/5. BP = 1.0 (equal length, 8 == 8);
+//
+//   - pronoun_number_mismatch_singular_plural_it_they: the Candidate
+//     mistranslates the singular pronoun "it" as the plural "they"
+//     ("your package has been delivered check it now" -> "... check
+//     they now") -- a pronoun *number* agreement error distinct from
+//     gender_pronoun_mistranslation_he_she_confusion (which confuses
+//     pronoun gender, not number) and from
+//     pluralization_mismatch_singular_plural_document_upload (which
+//     pluralizes a noun, not a pronoun). 8-word Reference/Candidate.
+//     p1 = 7/8, p2 = 5/7, p3 = 4/6, p4 = 3/5. BP = 1.0 (equal length,
+//     8 == 8);
+//
+//   - compound_noun_word_order_scramble_customer_care_number: the
+//     Candidate scrambles the internal word order of the compound noun
+//     "customer care number" to "care customer number" while leaving
+//     every other word in place ("please call our customer care number
+//     now" -> "please call our care customer number now") -- a
+//     localized noun-phrase-internal reorder distinct from
+//     word_order_adjacent_swap_end_delivery_schedule (which swaps two
+//     independent adjacent words, not the internals of one compound
+//     noun) and from clause_level_reordering_swap_two_clauses_translation
+//     (a whole-clause-level swap, not a three-word noun phrase). 7-word
+//     Reference/Candidate. p1 = 7/7, p2 = 3/6, p3 = 1/5, p4 = 0/4
+//     (smoothed to 0.1/4, since the candidate has 4-grams but none
+//     match). BP = 1.0 (equal length, 7 == 7);
+//
+//   - antonym_substitution_open_closed_business_hours: the Candidate
+//     substitutes the antonym "closed" for "open" ("our office is open
+//     on all weekdays" -> "our office is closed on all weekdays") -- a
+//     direct lexical-antonym substitution distinct from every negation
+//     entry (which add/remove/duplicate a negation marker rather than
+//     swap a word for its semantic opposite) and from
+//     combined_substitution_and_trailing_hallucination_complaint_resolved_closed
+//     (whose "closed" substitutes for "resolved", a near-synonym pair,
+//     not an antonym pair). 7-word Reference/Candidate. p1 = 6/7, p2 =
+//     4/6, p3 = 2/5, p4 = 0/4 (smoothed to 0.1/4, since the candidate
+//     has 4-grams but none match). BP = 1.0 (equal length, 7 == 7).
 
 func FixedTranslationCorpus() []TranslationCorpusEntry {
 	return []TranslationCorpusEntry{
@@ -1088,6 +1155,60 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Source:         "hamari team aapki complaint review kar rahi hai",
 			Reference:      "our team is reviewing your complaint",
 			Candidate:      "our team reviews your complaint",
+		},
+
+		// --- Sprint 2026-08-28 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. See this file's package-level doc comment above
+		// FixedTranslationCorpus for the full rationale and hand-computed
+		// n-gram precisions behind each.
+		{
+			Name:           "determiner_deletion_the_dropped_refund_timeline",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "refund din ke andar process ho jayega",
+			Reference:      "the refund will be processed within the day",
+			Candidate:      "refund will be processed within day",
+		},
+		{
+			Name:           "modal_verb_mistranslation_must_should_obligation_strength",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapko apne documents shukrawar tak submit karne honge",
+			Reference:      "you must submit your documents by friday",
+			Candidate:      "you should submit your documents by friday",
+		},
+		{
+			Name:           "conjunction_mistranslation_and_or_logical_connective",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya apna naam aur apna registered number bataiye",
+			Reference:      "please share your name and your registered number",
+			Candidate:      "please share your name or your registered number",
+		},
+		{
+			Name:           "pronoun_number_mismatch_singular_plural_it_they",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka package deliver ho gaya hai ise abhi check kariye",
+			Reference:      "your package has been delivered check it now",
+			Candidate:      "your package has been delivered check they now",
+		},
+		{
+			Name:           "compound_noun_word_order_scramble_customer_care_number",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya hamara customer care number abhi call kariye",
+			Reference:      "please call our customer care number now",
+			Candidate:      "please call our care customer number now",
+		},
+		{
+			Name:           "antonym_substitution_open_closed_business_hours",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "hamara office sabhi weekdays mein khula rehta hai",
+			Reference:      "our office is open on all weekdays",
+			Candidate:      "our office is closed on all weekdays",
 		},
 	}
 }

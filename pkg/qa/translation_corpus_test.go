@@ -717,6 +717,77 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	aspectP4 := bleuSmoothingEpsilon / 2.0
 	wantAspectMismatch := math.Exp(1.0-6.0/5.0) * math.Exp((math.Log(aspectP1)+math.Log(aspectP2)+math.Log(aspectP3)+math.Log(aspectP4))/4.0)
 
+	// determiner_deletion_the_dropped_refund_timeline: 8-word Reference
+	// "the refund will be processed within the day" vs 6-word Candidate
+	// "refund will be processed within day" (both occurrences of "the"
+	// dropped). p1 = 6/6, p2 = 4/5, p3 = 3/4, p4 = 2/3. BP =
+	// exp(1 - 8/6) since the candidate (6 words) is shorter than the
+	// reference (8 words).
+	determinerDelP1 := 6.0 / 6.0
+	determinerDelP2 := 4.0 / 5.0
+	determinerDelP3 := 3.0 / 4.0
+	determinerDelP4 := 2.0 / 3.0
+	wantDeterminerDeletion := math.Exp(1.0-8.0/6.0) * math.Exp((math.Log(determinerDelP1)+math.Log(determinerDelP2)+math.Log(determinerDelP3)+math.Log(determinerDelP4))/4.0)
+
+	// modal_verb_mistranslation_must_should_obligation_strength: 7-word
+	// Reference "you must submit your documents by friday" vs 7-word
+	// Candidate "you should submit your documents by friday" (modal
+	// "must" downgraded to "should"). p1 = 6/7, p2 = 4/6, p3 = 3/5,
+	// p4 = 2/4. BP = 1.0 (equal length, 7 == 7).
+	modalVerbP1 := 6.0 / 7.0
+	modalVerbP2 := 4.0 / 6.0
+	modalVerbP3 := 3.0 / 5.0
+	modalVerbP4 := 2.0 / 4.0
+	wantModalVerbMistranslation := math.Exp((math.Log(modalVerbP1) + math.Log(modalVerbP2) + math.Log(modalVerbP3) + math.Log(modalVerbP4)) / 4.0)
+
+	// conjunction_mistranslation_and_or_logical_connective: 8-word
+	// Reference "please share your name and your registered number" vs
+	// 8-word Candidate "please share your name or your registered
+	// number" (conjunction "and" mistranslated as "or"). p1 = 7/8,
+	// p2 = 5/7, p3 = 3/6, p4 = 1/5. BP = 1.0 (equal length, 8 == 8).
+	conjunctionP1 := 7.0 / 8.0
+	conjunctionP2 := 5.0 / 7.0
+	conjunctionP3 := 3.0 / 6.0
+	conjunctionP4 := 1.0 / 5.0
+	wantConjunctionMistranslation := math.Exp((math.Log(conjunctionP1) + math.Log(conjunctionP2) + math.Log(conjunctionP3) + math.Log(conjunctionP4)) / 4.0)
+
+	// pronoun_number_mismatch_singular_plural_it_they: 8-word Reference
+	// "your package has been delivered check it now" vs 8-word Candidate
+	// "your package has been delivered check they now" (singular "it"
+	// mistranslated as plural "they"). p1 = 7/8, p2 = 5/7, p3 = 4/6,
+	// p4 = 3/5. BP = 1.0 (equal length, 8 == 8).
+	pronounNumberP1 := 7.0 / 8.0
+	pronounNumberP2 := 5.0 / 7.0
+	pronounNumberP3 := 4.0 / 6.0
+	pronounNumberP4 := 3.0 / 5.0
+	wantPronounNumberMismatch := math.Exp((math.Log(pronounNumberP1) + math.Log(pronounNumberP2) + math.Log(pronounNumberP3) + math.Log(pronounNumberP4)) / 4.0)
+
+	// compound_noun_word_order_scramble_customer_care_number: 7-word
+	// Reference "please call our customer care number now" vs 7-word
+	// Candidate "please call our care customer number now" (the
+	// compound noun "customer care number" internally scrambled to
+	// "care customer number"). p1 = 7/7, p2 = 3/6, p3 = 1/5, p4 = 0/4,
+	// smoothed to bleuSmoothingEpsilon/4 since the candidate has 4-grams
+	// but none of them match the reference. BP = 1.0 (equal length,
+	// 7 == 7).
+	compoundScrambleP1 := 7.0 / 7.0
+	compoundScrambleP2 := 3.0 / 6.0
+	compoundScrambleP3 := 1.0 / 5.0
+	compoundScrambleP4 := bleuSmoothingEpsilon / 4.0
+	wantCompoundNounScramble := math.Exp((math.Log(compoundScrambleP1) + math.Log(compoundScrambleP2) + math.Log(compoundScrambleP3) + math.Log(compoundScrambleP4)) / 4.0)
+
+	// antonym_substitution_open_closed_business_hours: 7-word Reference
+	// "our office is open on all weekdays" vs 7-word Candidate "our
+	// office is closed on all weekdays" (antonym substitution "open" ->
+	// "closed"). p1 = 6/7, p2 = 4/6, p3 = 2/5, p4 = 0/4, smoothed to
+	// bleuSmoothingEpsilon/4 since the candidate has 4-grams but none of
+	// them match the reference. BP = 1.0 (equal length, 7 == 7).
+	antonymP1 := 6.0 / 7.0
+	antonymP2 := 4.0 / 6.0
+	antonymP3 := 2.0 / 5.0
+	antonymP4 := bleuSmoothingEpsilon / 4.0
+	wantAntonymSubstitution := math.Exp((math.Log(antonymP1) + math.Log(antonymP2) + math.Log(antonymP3) + math.Log(antonymP4)) / 4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -797,6 +868,15 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"double_negative_mistranslation_meaning_reversal":        wantDoubleNegativeMistranslation,
 		"measurement_unit_conversion_numeric_error_km_to_miles":  wantUnitConversionNumericError,
 		"aspect_mismatch_continuous_vs_simple_tense_translation": wantAspectMismatch,
+
+		// Sprint 2026-08-28 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"determiner_deletion_the_dropped_refund_timeline":           wantDeterminerDeletion,
+		"modal_verb_mistranslation_must_should_obligation_strength": wantModalVerbMistranslation,
+		"conjunction_mistranslation_and_or_logical_connective":      wantConjunctionMistranslation,
+		"pronoun_number_mismatch_singular_plural_it_they":           wantPronounNumberMismatch,
+		"compound_noun_word_order_scramble_customer_care_number":    wantCompoundNounScramble,
+		"antonym_substitution_open_closed_business_hours":           wantAntonymSubstitution,
 	}
 
 	entries := FixedTranslationCorpus()

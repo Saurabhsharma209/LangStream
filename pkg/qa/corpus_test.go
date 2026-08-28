@@ -179,6 +179,13 @@ func TestFixedCorpus_EntriesAreWellFormed(t *testing.T) {
 // vocative customer-name deletion, a Hindi light-verb compound deletion,
 // and an English discourse-filler insertion) — see FixedCorpus's doc
 // comment for each entry's reasoning and hand-computed WER.
+//
+// Sprint 2026-08-28 (QA): includes six further entries (a yes/no
+// answer-word polarity substitution, a time-unit substitution, a
+// wh-question-word substitution, a symmetric bookend double insertion,
+// a relative-day-reference substitution, and an English plural/singular
+// inflection substitution) — see FixedCorpus's doc comment for each
+// entry's reasoning and hand-computed WER.
 func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 	want := map[string]float64{
 		"identical_greeting":              0.0,
@@ -343,6 +350,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_vocative_customer_name_deletion_dropped_at_start":          1.0 / 8.0,
 		"hinglish_light_verb_compound_deletion_kar_do":                       1.0 / 6.0,
 		"hinglish_english_discourse_filler_like_insertion":                   1.0 / 7.0,
+
+		// Sprint 2026-08-28 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"hinglish_yesno_polarity_answer_word_substitution_haan_nahi":              1.0 / 6.0,
+		"hinglish_time_unit_substitution_minute_second_hold_duration":             1.0 / 8.0,
+		"hinglish_interrogative_whword_substitution_kab_kya_delivery_query":       1.0 / 7.0,
+		"hinglish_symmetric_bookend_double_insertion_same_word_repeat_haan":       2.0 / 7.0,
+		"hinglish_relative_day_reference_substitution_kal_parso_complaint":        1.0 / 7.0,
+		"hinglish_english_plural_singular_inflection_substitution_packet_packets": 1.0 / 8.0,
 	}
 
 	entries := FixedCorpus()

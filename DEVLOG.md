@@ -3840,3 +3840,81 @@ efficiency gap.
   `GOTMPDIR`/`TMPDIR` there too. Also don't assume a cached Go toolchain
   tarball matches the current host architecture -- check `uname -m`
   first, since this run's cached tarball was amd64 on an arm64 host.
+
+## 2026-08-28 (scheduled run, Sprint 28) — QA corpus growth + SRE clean audit, no roadmap items closed
+
+### Agents run
+QA and SRE in parallel. PE and Tech not spawned — no owned-file gap
+(`pkg/asr`/`pkg/translate`/`pkg/tts`/`pkg/langstream`/`pkg/rtp`/
+`pkg/webrtcgw`/`cmd/langstream`) was identified during planning: a
+repo-wide `TODO|FIXME|XXX` grep across those packages came back empty,
+and SRE's audit (below) found no bug in PE/Tech-owned files either.
+
+### Repo health at start
+Clean on the first try: `go build ./...`, `go vet ./...`, `gofmt -l .`,
+and `go test ./... -race` all green across all 12 packages. Root
+filesystem had 3.6-3.9GB free throughout (no disk-exhaustion recurrence
+this run) — cloned into a fresh `/tmp/LangStream` per the standing
+`$HOME`/`/sessions`-is-shared-and-often-full precedent (confirmed again
+today: `/sessions` measured 100% full, 0 bytes free, holding ~150+ other
+sessions' data this automation has no access to). Also hit fresh
+permission-denied errors on the pre-existing `/tmp/gopath`/`/tmp/gocache`
+directories (owned by a different prior sandbox user, not this run's) —
+worked around by using freshly-created, self-owned `/tmp/ls-gopath`/
+`/tmp/ls-gocache`/`/tmp/ls-tmp` instead. Go 1.26 toolchain was
+pre-extracted at `/tmp/go1.26` and matched host arch (`aarch64`) — no
+re-download needed. ClearStream re-checked via `git ls-remote --tags`:
+still only `v0.1.0`, no `VERSIONING.md` action needed.
+
+### Shipped
+
+**QA** — grew the WER corpus 111→117 with 6 new non-overlapping error
+shapes (Hinglish yes/no polarity substitution "haan"/"nahi", time-unit
+substitution minute/second, wh-word substitution "kab"/"kya",
+symmetric bookend double-insertion, relative-day-reference substitution
+"kal"/"parso", English plural/singular inflection substitution) and the
+BLEU corpus 55→61 (actual starting count was 55, not the 50 DEVLOG's
+Sprint 27 note stated — likely a stale figure in that note, not
+re-litigated here) with 6 new shapes (determiner deletion, modal-verb
+mistranslation, conjunction mistranslation, pronoun number mismatch,
+compound-noun word-order scramble, antonym substitution), all hand-
+verified against the real `WordErrorRate`/`bleuScore` functions via
+throwaway scratch programs (deleted after use). Ran a clean race-pattern
+audit across all 62 `go func(` launch sites (39 files) — no instance of
+the recurring "assert immediately after unsynchronized channel send" bug
+class found, backed by `go test -race -count=1 ./...` passing clean
+repo-wide.
+
+**SRE** — full fresh audit: vendor-key sync (6/6, `check-vendor-keys.sh`
+clean), `docs/compliance.md` vendor table matches all 6 registered
+backends, per-vendor `RecordCost` math spot-checked correct across all 6
+real vendor clients (including the Sprint 26 byte-vs-rune fix and Sprint
+25 cost-per-minute wiring, both still intact), CI/Makefile parity
+confirmed (no Sprint-24-style scope drift), `.dockerignore`
+(Sprint 27) still present and correct, observability dashboard endpoints
+still covered by 27 passing tests, Go version consistency across
+`go.mod`/Dockerfile/CI confirmed (all 1.22). No gaps found this run —
+eighth consecutive clean-or-fixed result on the vendor-key/CI front, and
+this run's specific result was clean rather than fix-needed.
+
+### Bugs found/fixed
+None this run — a real negative result across both workstreams.
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 12 packages after EM integration of both
+  agents' changes (QA's corpus additions only — SRE made no changes).
+- Fresh-clone verification from the real GitHub remote after push (see
+  below), rebuilt independently of the local working copy.
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, still need Saurabh's anchor-customer/live-traffic decision.
+
+### Tomorrow
+No specific carry-over items. Next scheduled run should continue
+opportunistic hardening / corpus growth until Week 4 is unblocked. Keep
+using fresh, self-owned `/tmp`-based `GOPATH`/`GOCACHE`/`GOTMPDIR`/
+`TMPDIR` directories rather than reusing `/tmp/gopath`/`/tmp/gocache` —
+those are owned by a different (stale) sandbox user and hit permission
+errors this run.

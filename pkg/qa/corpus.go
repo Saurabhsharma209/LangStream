@@ -676,6 +676,42 @@ func placeholderPCM() []byte {
 //   - hinglish_vocative_customer_name_deletion_dropped_at_start:          WER 1/8  (1 deletion / 8 words)
 //   - hinglish_light_verb_compound_deletion_kar_do:                       WER 1/6  (1 deletion / 6 words)
 //   - hinglish_english_discourse_filler_like_insertion:                   WER 1/7  (1 insertion / 7 words)
+//
+// Sprint 2026-08-28 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise: a yes/no answer-word polarity
+// substitution ("haan" misheard as "nahi" -- distinct from
+// hinglish_negation_flip_substitution_nahi_ho_refund_status, which flips
+// a verb-attached negation marker, not a standalone answer word, and
+// distinct from every deletion-based negation entry, since this is a
+// substitution of one polarity-bearing word for its opposite, not a
+// drop), a time-unit substitution ("minute" misheard as "second" --
+// distinct from hinglish_unit_of_measurement_kilometer_miles_substitution,
+// which confuses distance units, not time units), a wh-question-word
+// substitution ("kab", when, misheard as "kya", what -- a
+// meaning-changing interrogative-pronoun confusion not exercised by any
+// existing entry, none of which substitute one question word for
+// another), a symmetric bookend double insertion (the fake ASR
+// duplicates the *same* word "haan" at both the start and end of the
+// utterance -- distinct from
+// hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing,
+// which pairs a leading deletion with a trailing insertion of a
+// different word, and from every other insertion entry, none of which
+// insert one identical word at both ends), a relative-day-reference
+// substitution ("kal", yesterday, misheard as "parso", day-before-
+// yesterday -- distinct from
+// hinglish_day_of_week_substitution_monday_tuesday_appointment, which
+// confuses named weekdays, not relative-day expressions), and an
+// English inflectional plural/singular substitution ("packet" misheard
+// as "packets" -- distinct from every existing substitution entry, all
+// of which swap distinct lexical words rather than a bare inflectional
+// suffix on the same root):
+//
+//   - hinglish_yesno_polarity_answer_word_substitution_haan_nahi:              WER 1/6  (1 substitution / 6 words)
+//   - hinglish_time_unit_substitution_minute_second_hold_duration:             WER 1/8  (1 substitution / 8 words)
+//   - hinglish_interrogative_whword_substitution_kab_kya_delivery_query:       WER 1/7  (1 substitution / 7 words)
+//   - hinglish_symmetric_bookend_double_insertion_same_word_repeat_haan:       WER 2/7  (2 insertions / 7 words)
+//   - hinglish_relative_day_reference_substitution_kal_parso_complaint:        WER 1/7  (1 substitution / 7 words)
+//   - hinglish_english_plural_singular_inflection_substitution_packet_packets: WER 1/8  (1 substitution / 8 words)
 
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
@@ -2674,6 +2710,100 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir mera order abhi tak nahi aaya",
 			Hypothesis: "sir mera order like abhi tak nahi aaya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-08-28 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. See this file's package-level doc comment above
+		// FixedCorpus for the full rationale behind each.
+		{
+			// A yes/no answer-word polarity substitution: the fake ASR
+			// mishears the standalone affirmative answer word "haan"
+			// ("yes") as its opposite, "nahi" ("no") -- distinct from
+			// hinglish_negation_flip_substitution_nahi_ho_refund_status,
+			// which flips a verb-attached negation marker within a
+			// declarative sentence, not a standalone answer word. A
+			// single substitution: WER = 1/6 (1 substitution / 6 words).
+			Name:       "hinglish_yesno_polarity_answer_word_substitution_haan_nahi",
+			Language:   "hi",
+			Reference:  "haan sir mera address sahi hai",
+			Hypothesis: "nahi sir mera address sahi hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A time-unit substitution: the fake ASR mishears "minute"
+			// as "second" -- distinct from
+			// hinglish_unit_of_measurement_kilometer_miles_substitution,
+			// which confuses distance units, not time units. A single
+			// substitution: WER = 1/8 (1 substitution / 8 words).
+			Name:       "hinglish_time_unit_substitution_minute_second_hold_duration",
+			Language:   "hi",
+			Reference:  "sir aapko sirf ek minute hold karna hoga",
+			Hypothesis: "sir aapko sirf ek second hold karna hoga",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A wh-question-word substitution: the fake ASR mishears
+			// the interrogative "kab" ("when") as "kya" ("what") --
+			// a meaning-changing question-word confusion not exercised
+			// by any existing entry, none of which substitute one
+			// question word for another. A single substitution:
+			// WER = 1/7 (1 substitution / 7 words).
+			Name:       "hinglish_interrogative_whword_substitution_kab_kya_delivery_query",
+			Language:   "hi",
+			Reference:  "sir aapka parcel kab tak deliver hoga",
+			Hypothesis: "sir aapka parcel kya tak deliver hoga",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A symmetric bookend double insertion: the fake ASR
+			// duplicates the identical word "haan" at both the very
+			// start and the very end of the utterance -- distinct from
+			// hinglish_bookend_leading_deletion_trailing_insertion_greeting_closing,
+			// which pairs a leading *deletion* with a trailing
+			// insertion of a *different* word, and from every other
+			// insertion entry in this corpus, none of which insert the
+			// same identical word at both ends. Two insertions:
+			// WER = 2/7 (2 insertions / 7 words).
+			Name:       "hinglish_symmetric_bookend_double_insertion_same_word_repeat_haan",
+			Language:   "hi",
+			Reference:  "sir aapka order confirm ho gaya hai",
+			Hypothesis: "haan sir aapka order confirm ho gaya hai haan",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A relative-day-reference substitution: the fake ASR
+			// mishears "kal" ("yesterday") as "parso" ("day before
+			// yesterday") -- distinct from
+			// hinglish_day_of_week_substitution_monday_tuesday_appointment,
+			// which confuses named weekdays, not relative-day
+			// expressions. A single substitution: WER = 1/7
+			// (1 substitution / 7 words).
+			Name:       "hinglish_relative_day_reference_substitution_kal_parso_complaint",
+			Language:   "hi",
+			Reference:  "sir maine kal complaint register karwaya tha",
+			Hypothesis: "sir maine parso complaint register karwaya tha",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// An English inflectional plural/singular substitution: the
+			// fake ASR mishears the singular "packet" as the plural
+			// "packets" -- distinct from every existing substitution
+			// entry in this corpus, all of which swap distinct lexical
+			// words rather than a bare inflectional suffix on the same
+			// root. A single substitution: WER = 1/8
+			// (1 substitution / 8 words).
+			Name:       "hinglish_english_plural_singular_inflection_substitution_packet_packets",
+			Language:   "hi",
+			Reference:  "sir mera ek packet abhi tak nahi mila",
+			Hypothesis: "sir mera ek packets abhi tak nahi mila",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},
