@@ -712,6 +712,37 @@ func placeholderPCM() []byte {
 //   - hinglish_symmetric_bookend_double_insertion_same_word_repeat_haan:       WER 2/7  (2 insertions / 7 words)
 //   - hinglish_relative_day_reference_substitution_kal_parso_complaint:        WER 1/7  (1 substitution / 7 words)
 //   - hinglish_english_plural_singular_inflection_substitution_packet_packets: WER 1/8  (1 substitution / 8 words)
+//
+// Sprint 2026-08-31 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise: a generic English homophone
+// confusion ("their" misheard as "there" -- distinct from every existing
+// homophone entry, which are either acronym homophones ("KYC"/"IVR"/
+// "EMI" misheard as similar-sounding non-acronym words) or the
+// cross-language "call"/"kal" homophone, not a same-language,
+// non-acronym English homophone pair), a kinship-term gender
+// substitution ("beta", son, misheard as "beti", daughter -- distinct
+// from hinglish_gender_agreement_homophone_unka_unke_substitution, which
+// confuses a possessive pronoun's gender agreement, not a gender-specific
+// kinship noun), a spatial-direction word substitution ("baayi", left,
+// misheard as "daayi", right -- a new confusable-word category this
+// corpus didn't have alongside its existing place-name and day-of-week
+// substitutions), an acknowledgment/backchannel two-word phrase deletion
+// ("theek hai", okay/alright, dropped entirely -- distinct from every
+// existing deletion entry, none of which drop a standalone acknowledgment
+// phrase as opposed to a content word, filler word, honorific, negation,
+// or light verb), a modal-verb necessity substitution ("chahiye", should,
+// misheard as "padega", will have to -- distinct from
+// hinglish_tense_marker_substitution_future_past_delivery_status, which
+// swaps a tense marker, not a modal-obligation marker), and a possessive-
+// pronoun deletion ("mera", my, dropped entirely -- distinct from every
+// existing deletion entry, none of which drop a possessive pronoun):
+//
+//   - english_homophone_confusion_their_there_substitution:          WER 1/8  (1 substitution / 8 words)
+//   - kinship_term_gender_substitution_beta_beti:                    WER 1/7  (1 substitution / 7 words)
+//   - spatial_direction_word_substitution_baayi_daayi_left_right:    WER 1/6  (1 substitution / 6 words)
+//   - acknowledgment_backchannel_phrase_deletion_theek_hai:          WER 2/8  (2 deletions / 8 words)
+//   - modal_necessity_substitution_chahiye_padega_obligation_future: WER 1/7  (1 substitution / 7 words)
+//   - possessive_pronoun_deletion_mera_dropped_order_status:         WER 1/8  (1 deletion / 8 words)
 
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
@@ -2804,6 +2835,98 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir mera ek packet abhi tak nahi mila",
 			Hypothesis: "sir mera ek packets abhi tak nahi mila",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-08-31 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. See this file's package-level doc comment above
+		// FixedCorpus for the full rationale behind each.
+		{
+			// A generic English homophone confusion: the fake ASR
+			// mishears "their" as the identically-pronounced "there"
+			// -- distinct from every existing homophone entry, which
+			// are either acronym homophones (KYC/IVR/EMI) or the
+			// cross-language "call"/"kal" homophone, not a plain
+			// same-language English homophone pair. A single
+			// substitution: WER = 1/8 (1 substitution / 8 words).
+			Name:       "english_homophone_confusion_their_there_substitution",
+			Language:   "en",
+			Reference:  "sir please share their updated address for delivery",
+			Hypothesis: "sir please share there updated address for delivery",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A kinship-term gender substitution: the fake ASR
+			// mishears "beta" (son) as "beti" (daughter) -- distinct
+			// from hinglish_gender_agreement_homophone_unka_unke_substitution,
+			// which confuses a possessive pronoun's gender agreement,
+			// not a gender-specific kinship noun. A single
+			// substitution: WER = 1/7 (1 substitution / 7 words).
+			Name:       "kinship_term_gender_substitution_beta_beti",
+			Language:   "hi",
+			Reference:  "sir aapke beta ka naam kya hai",
+			Hypothesis: "sir aapke beti ka naam kya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A spatial-direction word substitution: the fake ASR
+			// mishears "baayi" (left) as "daayi" (right) -- a new
+			// confusable-word category alongside this corpus's
+			// existing place-name and day-of-week substitutions, none
+			// of which confuse a spatial-direction pair. A single
+			// substitution: WER = 1/6 (1 substitution / 6 words).
+			Name:       "spatial_direction_word_substitution_baayi_daayi_left_right",
+			Language:   "hi",
+			Reference:  "sir aapko baayi taraf mudna hoga",
+			Hypothesis: "sir aapko daayi taraf mudna hoga",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// An acknowledgment/backchannel two-word phrase deletion:
+			// the fake ASR drops "theek hai" (okay/alright) entirely
+			// -- distinct from every existing deletion entry, none of
+			// which drop a standalone acknowledgment phrase as opposed
+			// to a content word, filler word, honorific, negation, or
+			// light verb. Two deletions: WER = 2/8 (2 deletions / 8
+			// words).
+			Name:       "acknowledgment_backchannel_phrase_deletion_theek_hai",
+			Language:   "hi",
+			Reference:  "sir theek hai aapka order confirm ho gaya",
+			Hypothesis: "sir aapka order confirm ho gaya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A modal-verb necessity substitution: the fake ASR
+			// mishears "chahiye" (should) as "padega" (will have to)
+			// -- distinct from
+			// hinglish_tense_marker_substitution_future_past_delivery_status,
+			// which swaps a tense marker, not a modal-obligation
+			// marker. A single substitution: WER = 1/7 (1 substitution
+			// / 7 words).
+			Name:       "modal_necessity_substitution_chahiye_padega_obligation_future",
+			Language:   "hi",
+			Reference:  "sir aapko form abhi submit karna chahiye",
+			Hypothesis: "sir aapko form abhi submit karna padega",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A possessive-pronoun deletion: the fake ASR drops "mera"
+			// (my) entirely -- distinct from every existing deletion
+			// entry, none of which drop a possessive pronoun (the
+			// closest, hinglish_vocative_customer_name_deletion_dropped_at_start,
+			// drops a vocative person name, not a possessive pronoun).
+			// A single deletion: WER = 1/8 (1 deletion / 8 words).
+			Name:       "possessive_pronoun_deletion_mera_dropped_order_status",
+			Language:   "hi",
+			Reference:  "sir mera order abhi tak deliver nahi hua",
+			Hypothesis: "sir order abhi tak deliver nahi hua",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

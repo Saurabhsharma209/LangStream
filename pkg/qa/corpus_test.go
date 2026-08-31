@@ -359,6 +359,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"hinglish_symmetric_bookend_double_insertion_same_word_repeat_haan":       2.0 / 7.0,
 		"hinglish_relative_day_reference_substitution_kal_parso_complaint":        1.0 / 7.0,
 		"hinglish_english_plural_singular_inflection_substitution_packet_packets": 1.0 / 8.0,
+
+		// Sprint 2026-08-31 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"english_homophone_confusion_their_there_substitution":          1.0 / 8.0,
+		"kinship_term_gender_substitution_beta_beti":                    1.0 / 7.0,
+		"spatial_direction_word_substitution_baayi_daayi_left_right":    1.0 / 6.0,
+		"acknowledgment_backchannel_phrase_deletion_theek_hai":          2.0 / 8.0,
+		"modal_necessity_substitution_chahiye_padega_obligation_future": 1.0 / 7.0,
+		"possessive_pronoun_deletion_mera_dropped_order_status":         1.0 / 8.0,
 	}
 
 	entries := FixedCorpus()

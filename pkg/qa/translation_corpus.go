@@ -694,6 +694,68 @@ type TranslationCorpusEntry struct {
 //     not an antonym pair). 7-word Reference/Candidate. p1 = 6/7, p2 =
 //     4/6, p3 = 2/5, p4 = 0/4 (smoothed to 0.1/4, since the candidate
 //     has 4-grams but none match). BP = 1.0 (equal length, 7 == 7).
+//
+// Sprint 2026-08-31 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise:
+//
+//   - kinship_term_mistranslation_son_daughter_substitution: the
+//     Candidate mistranslates "son's" as "daughter's" ("your son's name
+//     has been updated in registration" -> "your daughter's name has
+//     been updated in registration") -- a gender-specific kinship-noun
+//     substitution distinct from gender_pronoun_mistranslation_he_she_confusion
+//     (which confuses a pronoun, not a kinship noun). 8-word
+//     Reference/Candidate. p1 = 7/8, p2 = 5/7, p3 = 2/3, p4 = 3/5.
+//     BP = 1.0 (equal length, 8 == 8);
+//
+//   - spatial_direction_mistranslation_left_right_substitution: the
+//     Candidate mistranslates "left" as "right" ("please turn your
+//     vehicle to the left" -> "... to the right") -- a spatial-direction
+//     antonym pair distinct from antonym_substitution_open_closed_business_hours
+//     (an open/closed state antonym, not a direction). 7-word
+//     Reference/Candidate. p1 = 6/7, p2 = 5/6, p3 = 4/5, p4 = 3/4.
+//     BP = 1.0 (equal length, 7 == 7);
+//
+//   - possessive_pronoun_deletion_my_dropped_order_translation: the
+//     Candidate drops the possessive pronoun "my" entirely ("my order
+//     has not been delivered yet" -> "order has not been delivered
+//     yet") -- a possessive-pronoun ellipsis distinct from
+//     determiner_deletion_the_dropped_refund_timeline (which drops an
+//     article, not a possessive pronoun). 7-word Reference, 6-word
+//     Candidate; since the candidate is an exact suffix of the
+//     reference, every n-gram order scores perfect precision
+//     (p1 = p2 = p3 = p4 = 1.0). BP = exp(1 - 7/6) ~= 0.8465 (candidate
+//     is one word shorter than the reference);
+//
+//   - question_tag_deletion_confirmation_right_translation: the
+//     Candidate drops the trailing confirmation tag "right" entirely
+//     ("your address is this one right" -> "your address is this
+//     one") -- a sentence-final discourse-tag ellipsis distinct from
+//     every existing deletion entry, none of which drop a trailing
+//     confirmation tag. 6-word Reference, 5-word Candidate; since the
+//     candidate is an exact prefix of the reference, every n-gram order
+//     scores perfect precision (p1 = p2 = p3 = p4 = 1.0). BP =
+//     exp(1 - 6/5) ~= 0.8187 (candidate is one word shorter than the
+//     reference);
+//
+//   - superlative_degree_mistranslation_better_best_substitution: the
+//     Candidate mistranslates the comparative "better" as the
+//     superlative "best" ("this plan will be better for you" -> "...
+//     will be best for you") -- a comparative/superlative degree
+//     confusion distinct from every existing tense/aspect/modal entry,
+//     none of which touch adjective degree. 7-word Reference/Candidate.
+//     p1 = 6/7, p2 = 2/3, p3 = 2/5, p4 = 1/4. BP = 1.0 (equal length,
+//     7 == 7);
+//
+//   - quantifier_mistranslation_some_all_substitution: the Candidate
+//     mistranslates the partitive quantifier "some" as the universal
+//     quantifier "all" ("please send some documents by email" -> "...
+//     send all documents by email") -- a quantifier-scope meaning error
+//     distinct from pronoun_number_mismatch_singular_plural_it_they
+//     (a pronoun-number error, not a quantifier) and from
+//     determiner_deletion_the_dropped_refund_timeline (a deletion, not a
+//     substitution). 6-word Reference/Candidate. p1 = 5/6, p2 = 3/5,
+//     p3 = 1/4, p4 = 0/3 (smoothed to 0.1/3, since the candidate has
+//     4-grams but none match). BP = 1.0 (equal length, 6 == 6).
 
 func FixedTranslationCorpus() []TranslationCorpusEntry {
 	return []TranslationCorpusEntry{
@@ -1209,6 +1271,60 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Source:         "hamara office sabhi weekdays mein khula rehta hai",
 			Reference:      "our office is open on all weekdays",
 			Candidate:      "our office is closed on all weekdays",
+		},
+
+		// --- Sprint 2026-08-31 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. See this file's package-level doc comment above
+		// FixedTranslationCorpus for the full rationale and hand-computed
+		// BLEU behind each.
+		{
+			Name:           "kinship_term_mistranslation_son_daughter_substitution",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapke beta ka naam registration mein update ho gaya",
+			Reference:      "your son's name has been updated in registration",
+			Candidate:      "your daughter's name has been updated in registration",
+		},
+		{
+			Name:           "spatial_direction_mistranslation_left_right_substitution",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya apni gaadi baayi taraf mode",
+			Reference:      "please turn your vehicle to the left",
+			Candidate:      "please turn your vehicle to the right",
+		},
+		{
+			Name:           "possessive_pronoun_deletion_my_dropped_order_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "mera order abhi tak deliver nahi hua hai",
+			Reference:      "my order has not been delivered yet",
+			Candidate:      "order has not been delivered yet",
+		},
+		{
+			Name:           "question_tag_deletion_confirmation_right_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka address yahi hai na",
+			Reference:      "your address is this one right",
+			Candidate:      "your address is this one",
+		},
+		{
+			Name:           "superlative_degree_mistranslation_better_best_substitution",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "yeh plan aapke liye sabse behtar hoga",
+			Reference:      "this plan will be better for you",
+			Candidate:      "this plan will be best for you",
+		},
+		{
+			Name:           "quantifier_mistranslation_some_all_substitution",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "kripya kuch documents email par bhejiye",
+			Reference:      "please send some documents by email",
+			Candidate:      "please send all documents by email",
 		},
 	}
 }

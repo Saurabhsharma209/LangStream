@@ -7,6 +7,22 @@ FROM golang:1.22 AS builder
 
 WORKDIR /src
 
+# TARGETOS/TARGETARCH are populated automatically by BuildKit/buildx to
+# match whatever platform this stage is actually being built for (the
+# host's native platform by default, or an explicit `--platform` if one
+# is passed) -- see https://docs.docker.com/build/building/multi-platform/.
+# Neither this stage nor the runtime stage below pins a `--platform`, so
+# both resolve to the same platform at build time; hardcoding GOOS/GOARCH
+# to a fixed value here (previously `GOARCH=amd64`, unconditionally) would
+# silently mismatch that on any non-amd64 build host -- e.g. Apple Silicon
+# dev laptops or an arm64 CI runner -- producing an amd64 binary COPYed
+# into a non-amd64 runtime base image below, which fails at container
+# start with "exec format error" rather than at build time. Using the
+# build-args instead keeps the compiled binary's architecture matched to
+# whatever platform this image build actually targets.
+ARG TARGETOS
+ARG TARGETARCH
+
 # Cache module downloads separately from source changes. go.sum* (glob)
 # tolerates the fact that no go.sum exists yet (no external deps as of
 # Week 1) without failing the COPY.
@@ -21,8 +37,11 @@ RUN go mod download
 COPY . .
 
 # Static binary: CGO disabled so it runs unmodified on the distroless base
-# below (no libc dependency issues).
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+# below (no libc dependency issues). GOOS/GOARCH come from the
+# TARGETOS/TARGETARCH build args above (see their declaration), not a
+# hardcoded literal, so the binary's architecture always matches the
+# platform this image is being built for.
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/langstream ./cmd/langstream
 
 # ---- runtime --------------------------------------------------------------

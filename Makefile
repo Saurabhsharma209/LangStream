@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet docker docker-run serve ci check-vendor-keys test-vendor-key-guard check-dockerignore test-dockerignore-guard
+.PHONY: build test fmt fmt-check vet docker docker-run serve ci check-vendor-keys test-vendor-key-guard check-dockerignore test-dockerignore-guard check-docker-arch test-docker-arch-guard
 
 BINARY := langstream
 CMD_PATH := ./cmd/langstream
@@ -84,8 +84,25 @@ check-dockerignore:
 test-dockerignore-guard:
 	./scripts/check-dockerignore_test.sh
 
+# Guards against a real cross-platform-build gap found by SRE: Dockerfile
+# previously hardcoded GOARCH=amd64 on the builder stage's `go build`
+# line while neither stage pins a `--platform`, so a build on any
+# non-amd64 host (an arm64 dev laptop, or an arm64 CI runner) would COPY
+# an amd64 binary into a non-amd64 runtime base image, failing at
+# container start with "exec format error" instead of at build time. See
+# Dockerfile's own header comment next to `ARG TARGETOS`/`ARG TARGETARCH`
+# and scripts/check-docker-arch.sh's header comment for the full story.
+check-docker-arch:
+	./scripts/check-docker-arch.sh
+
+# Regression test for check-docker-arch.sh itself, same rationale as
+# test-vendor-key-guard/test-dockerignore-guard above: a hand-verified-once
+# check with no pinned test could silently regress later.
+test-docker-arch-guard:
+	./scripts/check-docker-arch_test.sh
+
 # What CI runs. Keep this in sync with .github/workflows/ci.yml so
 # `make ci` is a reliable local pre-push check. (CI's docker-build job is
 # informational/parallel, not part of the local pre-push gate here - run
 # `make docker` separately if you want to sanity-check the image too.)
-ci: fmt-check vet test build check-vendor-keys test-vendor-key-guard check-dockerignore test-dockerignore-guard
+ci: fmt-check vet test build check-vendor-keys test-vendor-key-guard check-dockerignore test-dockerignore-guard check-docker-arch test-docker-arch-guard

@@ -788,6 +788,71 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	antonymP4 := bleuSmoothingEpsilon / 4.0
 	wantAntonymSubstitution := math.Exp((math.Log(antonymP1) + math.Log(antonymP2) + math.Log(antonymP3) + math.Log(antonymP4)) / 4.0)
 
+	// kinship_term_mistranslation_son_daughter_substitution: 8-word
+	// Reference "your son's name has been updated in registration" vs
+	// 8-word Candidate "your daughter's name has been updated in
+	// registration" (kinship noun "son's" mistranslated as
+	// "daughter's"). p1 = 7/8, p2 = 5/7, p3 = 4/6, p4 = 3/5. BP = 1.0
+	// (equal length, 8 == 8).
+	kinshipP1 := 7.0 / 8.0
+	kinshipP2 := 5.0 / 7.0
+	kinshipP3 := 4.0 / 6.0
+	kinshipP4 := 3.0 / 5.0
+	wantKinshipMistranslation := math.Exp((math.Log(kinshipP1) + math.Log(kinshipP2) + math.Log(kinshipP3) + math.Log(kinshipP4)) / 4.0)
+
+	// spatial_direction_mistranslation_left_right_substitution: 7-word
+	// Reference "please turn your vehicle to the left" vs 7-word
+	// Candidate "please turn your vehicle to the right" (direction word
+	// "left" mistranslated as "right"). p1 = 6/7, p2 = 5/6, p3 = 4/5,
+	// p4 = 3/4. BP = 1.0 (equal length, 7 == 7).
+	spatialDirP1 := 6.0 / 7.0
+	spatialDirP2 := 5.0 / 6.0
+	spatialDirP3 := 4.0 / 5.0
+	spatialDirP4 := 3.0 / 4.0
+	wantSpatialDirectionMistranslation := math.Exp((math.Log(spatialDirP1) + math.Log(spatialDirP2) + math.Log(spatialDirP3) + math.Log(spatialDirP4)) / 4.0)
+
+	// possessive_pronoun_deletion_my_dropped_order_translation: 7-word
+	// Reference "my order has not been delivered yet" vs 6-word
+	// Candidate "order has not been delivered yet" (possessive pronoun
+	// "my" dropped entirely). The candidate is an exact suffix of the
+	// reference, so every n-gram order scores perfect precision:
+	// p1 = p2 = p3 = p4 = 1.0. BP = exp(1 - 7/6) since the candidate
+	// (6 words) is shorter than the reference (7 words).
+	wantPossessivePronounDeletion := math.Exp(1.0 - 7.0/6.0)
+
+	// question_tag_deletion_confirmation_right_translation: 6-word
+	// Reference "your address is this one right" vs 5-word Candidate
+	// "your address is this one" (trailing confirmation tag "right"
+	// dropped entirely). The candidate is an exact prefix of the
+	// reference, so every n-gram order scores perfect precision:
+	// p1 = p2 = p3 = p4 = 1.0. BP = exp(1 - 6/5) since the candidate
+	// (5 words) is shorter than the reference (6 words).
+	wantQuestionTagDeletion := math.Exp(1.0 - 6.0/5.0)
+
+	// superlative_degree_mistranslation_better_best_substitution: 7-word
+	// Reference "this plan will be better for you" vs 7-word Candidate
+	// "this plan will be best for you" (comparative "better"
+	// mistranslated as superlative "best"). p1 = 6/7, p2 = 2/3,
+	// p3 = 2/5, p4 = 1/4. BP = 1.0 (equal length, 7 == 7).
+	superlativeP1 := 6.0 / 7.0
+	superlativeP2 := 2.0 / 3.0
+	superlativeP3 := 2.0 / 5.0
+	superlativeP4 := 1.0 / 4.0
+	wantSuperlativeDegreeMistranslation := math.Exp((math.Log(superlativeP1) + math.Log(superlativeP2) + math.Log(superlativeP3) + math.Log(superlativeP4)) / 4.0)
+
+	// quantifier_mistranslation_some_all_substitution: 6-word Reference
+	// "please send some documents by email" vs 6-word Candidate "please
+	// send all documents by email" (partitive quantifier "some"
+	// mistranslated as universal quantifier "all"). p1 = 5/6, p2 = 3/5,
+	// p3 = 1/4, p4 = 0/3 (smoothed to bleuSmoothingEpsilon/3, since the
+	// candidate has 4-grams but none match the reference). BP = 1.0
+	// (equal length, 6 == 6).
+	quantifierP1 := 5.0 / 6.0
+	quantifierP2 := 3.0 / 5.0
+	quantifierP3 := 1.0 / 4.0
+	quantifierP4 := bleuSmoothingEpsilon / 3.0
+	wantQuantifierMistranslation := math.Exp((math.Log(quantifierP1) + math.Log(quantifierP2) + math.Log(quantifierP3) + math.Log(quantifierP4)) / 4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -877,6 +942,15 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"pronoun_number_mismatch_singular_plural_it_they":           wantPronounNumberMismatch,
 		"compound_noun_word_order_scramble_customer_care_number":    wantCompoundNounScramble,
 		"antonym_substitution_open_closed_business_hours":           wantAntonymSubstitution,
+
+		// Sprint 2026-08-31 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"kinship_term_mistranslation_son_daughter_substitution":      wantKinshipMistranslation,
+		"spatial_direction_mistranslation_left_right_substitution":   wantSpatialDirectionMistranslation,
+		"possessive_pronoun_deletion_my_dropped_order_translation":   wantPossessivePronounDeletion,
+		"question_tag_deletion_confirmation_right_translation":       wantQuestionTagDeletion,
+		"superlative_degree_mistranslation_better_best_substitution": wantSuperlativeDegreeMistranslation,
+		"quantifier_mistranslation_some_all_substitution":            wantQuantifierMistranslation,
 	}
 
 	entries := FixedTranslationCorpus()

@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/exotel/langstream/pkg/observability"
 )
@@ -438,8 +439,8 @@ func (g *GeminiTranslator) recordCost(inputText, outputText string, usage *gemin
 		promptTokens = float64(usage.PromptTokenCount)
 		candidatesTokens = float64(usage.CandidatesTokenCount)
 	} else {
-		promptTokens = float64(len(inputText)) / geminiApproxCharsPerToken
-		candidatesTokens = float64(len(outputText)) / geminiApproxCharsPerToken
+		promptTokens = float64(utf8.RuneCountInString(inputText)) / geminiApproxCharsPerToken
+		candidatesTokens = float64(utf8.RuneCountInString(outputText)) / geminiApproxCharsPerToken
 	}
 	cost := promptTokens*geminiInputCostPerTokenUSD + candidatesTokens*geminiOutputCostPerTokenUSD
 	g.metrics.RecordCost("gemini", cost)

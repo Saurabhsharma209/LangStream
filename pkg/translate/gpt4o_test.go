@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/exotel/langstream/pkg/observability"
 )
@@ -544,12 +545,58 @@ func TestGPT4oTranslator_Translate_RecordsCostFallbackWithoutUsage(t *testing.T)
 		t.Fatalf("Translate: %v", err)
 	}
 
-	wantPromptTokens := float64(len(input)) / gpt4oApproxCharsPerToken
-	wantCompletionTokens := float64(len(chunk.Text)) / gpt4oApproxCharsPerToken
+	wantPromptTokens := float64(utf8.RuneCountInString(input)) / gpt4oApproxCharsPerToken
+	wantCompletionTokens := float64(utf8.RuneCountInString(chunk.Text)) / gpt4oApproxCharsPerToken
 	want := wantPromptTokens*gpt4oInputCostPerTokenUSD + wantCompletionTokens*gpt4oOutputCostPerTokenUSD
 	got := metrics.CostTotal("gpt-4o")
 	if diff := got - want; diff > 1e-12 || diff < -1e-12 {
 		t.Errorf("CostTotal(gpt-4o) = %v, want %v (character-count fallback)", got, want)
+	}
+}
+
+// TestGPT4oTranslator_Translate_RecordsCostFallbackUsesRuneCountNotByteLength
+// pins a real bug found by SRE's 2026-08-31 audit: the cost fallback
+// (RecordsCostFallbackWithoutUsage above) must count Unicode *characters*
+// (utf8.RuneCountInString), not UTF-8 *bytes* (len()). Devanagari
+// characters are 3 bytes each in UTF-8, so a byte-length fallback
+// overestimates prompt/completion tokens -- and thus billed cost -- by
+// roughly 3x for Hindi input/output, the exact language pair this product
+// exists for. This mirrors the byte-vs-rune fix already applied to
+// pkg/tts/cartesia.go and pkg/tts/elevenlabs.go in an earlier sprint.
+func TestGPT4oTranslator_Translate_RecordsCostFallbackUsesRuneCountNotByteLength(t *testing.T) {
+	const input = "नमस्ते, कैसे हो?" // Hindi (Devanagari): few runes, many more UTF-8 bytes.
+	const output = "hello, how are you?"
+	sse := sseChunk(output) + "data: [DONE]\n\n"
+
+	srv := newTestServer(t, sse, http.StatusOK, nil)
+	defer srv.Close()
+
+	metrics := observability.NewLatencyRecorder()
+	tr, err := NewGPT4oTranslator(WithBaseURL(srv.URL), WithAPIKey("test-api-key"), WithMetrics(metrics))
+	if err != nil {
+		t.Fatalf("NewGPT4oTranslator: %v", err)
+	}
+
+	if _, err := tr.Translate(context.Background(), input, "hi", "en", true); err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+
+	runeBasedPromptTokens := float64(utf8.RuneCountInString(input)) / gpt4oApproxCharsPerToken
+	byteBasedPromptTokens := float64(len(input)) / gpt4oApproxCharsPerToken
+	if runeBasedPromptTokens >= byteBasedPromptTokens {
+		t.Fatalf("test fixture invalid: input must have fewer runes than bytes for this test to distinguish the two, got runes=%v bytes=%v", runeBasedPromptTokens, byteBasedPromptTokens)
+	}
+
+	wantCompletionTokens := float64(utf8.RuneCountInString(output)) / gpt4oApproxCharsPerToken
+	want := runeBasedPromptTokens*gpt4oInputCostPerTokenUSD + wantCompletionTokens*gpt4oOutputCostPerTokenUSD
+	got := metrics.CostTotal("gpt-4o")
+	if diff := got - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("CostTotal(gpt-4o) = %v, want %v (rune-count fallback) -- if this equals the byte-count-based value instead, the byte-vs-rune bug has regressed", got, want)
+	}
+
+	byteBasedWant := byteBasedPromptTokens*gpt4oInputCostPerTokenUSD + wantCompletionTokens*gpt4oOutputCostPerTokenUSD
+	if diff := got - byteBasedWant; diff < 1e-9 && diff > -1e-9 {
+		t.Errorf("CostTotal(gpt-4o) = %v matches the byte-length calculation %v -- regression to counting UTF-8 bytes instead of runes", got, byteBasedWant)
 	}
 }
 

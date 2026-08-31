@@ -50,6 +50,12 @@ jobs:
       - name: Dockerignore hygiene guard regression test (check-dockerignore.sh itself)
         run: ./scripts/check-dockerignore_test.sh
 
+      - name: Docker cross-arch build check (no hardcoded GOARCH in Dockerfile)
+        run: ./scripts/check-docker-arch.sh
+
+      - name: Docker cross-arch build guard regression test (check-docker-arch.sh itself)
+        run: ./scripts/check-docker-arch_test.sh
+
   docker-build:
     name: Docker build verification
     runs-on: ubuntu-latest

@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/exotel/langstream/pkg/observability"
 )
@@ -459,8 +460,8 @@ func (g *GPT4oTranslator) recordCost(inputText, outputText string, usage *chatCo
 		promptTokens = float64(usage.PromptTokens)
 		completionTokens = float64(usage.CompletionTokens)
 	} else {
-		promptTokens = float64(len(inputText)) / gpt4oApproxCharsPerToken
-		completionTokens = float64(len(outputText)) / gpt4oApproxCharsPerToken
+		promptTokens = float64(utf8.RuneCountInString(inputText)) / gpt4oApproxCharsPerToken
+		completionTokens = float64(utf8.RuneCountInString(outputText)) / gpt4oApproxCharsPerToken
 	}
 	cost := promptTokens*gpt4oInputCostPerTokenUSD + completionTokens*gpt4oOutputCostPerTokenUSD
 	g.metrics.RecordCost("gpt-4o", cost)

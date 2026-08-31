@@ -3918,3 +3918,127 @@ using fresh, self-owned `/tmp`-based `GOPATH`/`GOCACHE`/`GOTMPDIR`/
 `TMPDIR` directories rather than reusing `/tmp/gopath`/`/tmp/gocache` —
 those are owned by a different (stale) sandbox user and hit permission
 errors this run.
+
+## 2026-08-31 (scheduled run, Sprint 29) — QA corpus growth + SRE Docker-arch fix + EM byte-vs-rune cost fix, no roadmap items closed
+
+### Agents run
+QA and SRE in parallel. PE and Tech not spawned — a repo-wide `TODO|FIXME|
+XXX` grep across their owned packages (`pkg/asr`, `pkg/translate`,
+`pkg/tts`, `pkg/langstream`, `pkg/rtp`, `pkg/webrtcgw`, `cmd/langstream`)
+came back empty, same reasoning as Sprints 16-17/21-28.
+
+### Repo health at start
+Clean on the first try: `go build ./...`, `go vet ./...`, `gofmt -l .`,
+and `go test ./... -race` all green across all 12 packages. ClearStream
+re-checked via `git ls-remote --tags`: still only `v0.1.0`, no
+`VERSIONING.md` action needed.
+
+### Infra note
+`$HOME`/`/sessions` was again at 100% full (0 bytes free, ~160 other
+sessions' data) — worked around with the standing `/tmp`-based pattern.
+New this run: the cached `/tmp/go.tar.gz` and `/tmp/gopath`/`/tmp/gocache`
+left over from a prior sandbox instance were both unusable — the Go
+tarball was `linux-amd64` on this `aarch64` host (`Exec format error`,
+same failure class as Sprint 27), and `/tmp/gopath`/`/tmp/gocache` were
+owned by a different, stale sandbox user (`nobody`, permission denied),
+same as Sprint 20's finding. Re-downloaded `go1.22.5 linux-arm64` fresh
+and used newly-created, self-owned `/tmp/lsbuild-{gopath,gocache,tmp}`
+directories instead. Root filesystem held 2.3-3.0GB free throughout —
+workable, no strain.
+
+### Shipped
+
+**QA** — grew the WER corpus 117→123 and the BLEU/translation corpus
+61→67 with 6 new non-overlapping error shapes each (English homophone
+confusion "their"/"there", kinship-term gender substitution beta/beti,
+spatial-direction word substitution baayi/daayi, acknowledgment
+backchannel-phrase deletion "theek hai", modal-necessity substitution
+chahiye/padega, possessive-pronoun deletion "mera" for WER; matching
+kinship, spatial-direction, and possessive-pronoun-deletion shapes plus a
+question-tag deletion, superlative-degree mistranslation, and quantifier
+mistranslation for BLEU), all hand-verified against the real
+`WordErrorRate`/`BLEUScore` functions via a throwaway scratch program
+(deleted after use). Ran a clean race-pattern audit across all 62
+`go func(` launch sites (39 files, unchanged count from Sprint 28) — no
+instance of the recurring "assert immediately after unsynchronized
+channel send" bug class found.
+
+**SRE** — full fresh audit (vendor-key sync, `docs/compliance.md`
+vendor-table sync, per-vendor `RecordCost` math, CI/Makefile parity,
+`.dockerignore` correctness, dashboard endpoint coverage, Go-version
+consistency). One real, previously-unnoticed gap found and fixed:
+`Dockerfile`'s builder stage hardcoded `GOARCH=amd64` on the `go build`
+line with no `--platform` pinning on either stage, so `docker build`/
+`docker compose up --build` on an arm64 host (Apple Silicon dev laptop,
+or an arm64 CI runner) would `COPY` an amd64 binary into the arm64
+distroless runtime image and fail at container start with `exec format
+error` — the same failure signature that has bitten this project's own
+sandbox multiple times (most recently this run, see Infra note above) for
+the unrelated reason of a mismatched Go toolchain tarball; nobody had
+previously connected it to this Dockerfile bug. Fixed: `ARG TARGETOS`/
+`ARG TARGETARCH` declared in the builder stage, build line changed to
+`GOOS=$TARGETOS GOARCH=$TARGETARCH` (BuildKit/buildx populate these
+automatically to match the real target platform). Added
+`scripts/check-docker-arch.sh` (static guard: fails on a hardcoded
+GOOS/GOARCH literal, or a `$TARGETOS`/`$TARGETARCH` reference without a
+matching `ARG` declaration) + `scripts/check-docker-arch_test.sh` (4
+cases: missing Dockerfile, hardcoded-arch regression, missing `ARG`,
+correct form — all verified in both directions), wired into `Makefile`
+(`check-docker-arch`, `test-docker-arch-guard`, added to `ci:`) and
+`.github/workflows/ci.yml`, keeping CI/Makefile parity intact.
+
+**EM (integration)** — SRE flagged, but correctly left unfixed as
+outside its own ownership (`pkg/translate`), a real gap: `gpt4o.go` and
+`gemini.go`'s `recordCost` fallback paths (used only when the API
+response lacks a `usage`/`usageMetadata` field) approximated token counts
+via `len(inputText)`/`len(outputText)` — Go's UTF-8 *byte* length, not
+rune count. Both files' doc comments already flagged the ~4-chars-per-
+token heuristic as least accurate for non-Latin scripts, but the byte-vs-
+rune bug compounded that further: Devanagari characters are 3 bytes each
+in UTF-8, so the fallback overestimated prompt/completion tokens — and
+thus billed cost — by roughly 3x on top of the already-acknowledged
+heuristic inaccuracy, for Hindi, the exact language this product exists
+for. This is the same bug class SRE found and PE fixed in
+`pkg/tts/cartesia.go`/`elevenlabs.go` in Sprint 26, left unaddressed in
+this analogous MT-cost fallback path until today. Fixed by the EM as a
+small, well-scoped cross-workstream fix during integration (same pattern
+as Sprint 27's stale-comment fix): both files now use
+`utf8.RuneCountInString` instead of `len()` in `recordCost`'s fallback
+branch. Added a Devanagari-input regression test to each file
+(`TestGPT4oTranslator_Translate_RecordsCostFallbackUsesRuneCountNotByteLength`,
+`TestGeminiTranslator_Translate_RecordsCostFallbackUsesRuneCountNotByteLength`)
+that fails if the calculation ever regresses to byte-length, and updated
+the two pre-existing ASCII-only fallback tests' expected-value
+calculations to use `utf8.RuneCountInString` for consistency (no
+behavior change there — ASCII rune count equals byte count).
+
+### Bugs found/fixed
+Two real bugs this run: (1) SRE's Dockerfile GOARCH hardcoding, a
+build-time correctness gap on non-amd64 hosts, not a runtime regression
+in any previously-built image; (2) EM's byte-vs-rune cost-fallback bug in
+`pkg/translate`, a real billing-accuracy gap for Hindi-language calls
+whenever a GPT-4o/Gemini response lacks a `usage` field (the primary
+path, exact token counts from the API, was never affected).
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 12 packages after EM integration of both
+  agents' changes plus the EM's own `pkg/translate` fix.
+- `scripts/check-vendor-keys.sh`, `scripts/check-dockerignore.sh`,
+  `scripts/check-dockerignore_test.sh`, `scripts/check-docker-arch.sh`,
+  and `scripts/check-docker-arch_test.sh` all pass.
+- Fresh-clone verification from the real GitHub remote after push (see
+  below), rebuilt independently of the local working copy.
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, need Saurabh's anchor-customer/live-traffic decision.
+
+### Tomorrow
+No specific carry-over items. Next scheduled run should continue
+opportunistic hardening / corpus growth until Week 4 is unblocked. Keep
+using fresh, self-owned `/tmp`-based `GOPATH`/`GOCACHE`/`GOTMPDIR`/
+`TMPDIR` directories and re-verifying host architecture before reusing
+any cached Go toolchain tarball — both cached-artifact assumptions
+(toolchain arch, `/tmp/gopath` ownership) failed this run exactly as
+documented in Sprints 20 and 27.
