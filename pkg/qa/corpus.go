@@ -743,6 +743,30 @@ func placeholderPCM() []byte {
 //   - acknowledgment_backchannel_phrase_deletion_theek_hai:          WER 2/8  (2 deletions / 8 words)
 //   - modal_necessity_substitution_chahiye_padega_obligation_future: WER 1/7  (1 substitution / 7 words)
 //   - possessive_pronoun_deletion_mera_dropped_order_status:         WER 1/8  (1 deletion / 8 words)
+//
+// Sprint 2026-09-01 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise: a comparative-quantity word
+// substitution ("zyada", more, misheard as its antonym "kam", less), a
+// color-word substitution ("laal", red, misheard as "neela", blue -- a
+// new confusable-word category alongside this corpus's existing kinship,
+// spatial-direction, place-name, and day-of-week substitutions), a
+// mid-sentence landmark/location descriptive-phrase deletion ("signal ke
+// paas", near the signal, dropped entirely -- distinct from the closest
+// existing three-word deletion, which drops a trailing rather than
+// mid-sentence span), a word-splitting insertion (the compound word
+// "helpline" split into "help line" -- a new error class not exercised
+// by any existing insertion entry, all of which insert an unrelated
+// extra word rather than split one existing word into two), the
+// mirror-image word-merging deletion ("call back" merged into
+// "callback"), and a festival-name substitution ("diwali" misheard as
+// "holi" -- a new confusable-word category, named festivals/holidays):
+//
+//   - comparative_quantity_substitution_zyada_kam_more_less:        WER 1/7  (1 substitution / 7 words)
+//   - color_word_substitution_laal_neela_red_blue:                  WER 1/7  (1 substitution / 7 words)
+//   - landmark_location_descriptive_phrase_deletion_signal_ke_paas: WER 3/7  (3 deletions / 7 words)
+//   - word_splitting_compound_word_helpline_split_insertion:        WER 2/6  (2 insertions-equivalent / 6 words)
+//   - word_merging_call_back_merged_into_callback_deletion:         WER 2/6  (2 deletions-equivalent / 6 words)
+//   - festival_name_substitution_diwali_holi:                       WER 1/7  (1 substitution / 7 words)
 
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
@@ -2927,6 +2951,106 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir mera order abhi tak deliver nahi hua",
 			Hypothesis: "sir order abhi tak deliver nahi hua",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-09-01 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. See this file's package-level doc comment above
+		// FixedCorpus for the full rationale behind each.
+		{
+			// A comparative-quantity word substitution: the fake ASR
+			// mishears "zyada" (more) as its antonym "kam" (less) --
+			// distinct from every existing substitution entry, none of
+			// which confuse a comparative-quantity pair (the closest,
+			// hinglish_negation_flip_substitution_nahi_ho_refund_status,
+			// flips a negation marker, not a comparative-quantity
+			// word). A single substitution: WER = 1/7
+			// (1 substitution / 7 words).
+			Name:       "comparative_quantity_substitution_zyada_kam_more_less",
+			Language:   "hi",
+			Reference:  "sir aapko zyada wait nahi karna padega",
+			Hypothesis: "sir aapko kam wait nahi karna padega",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A color-word substitution: the fake ASR mishears "laal"
+			// (red) as "neela" (blue) -- a new confusable-word category
+			// alongside this corpus's existing kinship, spatial-
+			// direction, place-name, and day-of-week substitutions,
+			// none of which confuse a color-word pair. A single
+			// substitution: WER = 1/7 (1 substitution / 7 words).
+			Name:       "color_word_substitution_laal_neela_red_blue",
+			Language:   "hi",
+			Reference:  "sir aapki laal wali shirt ready hai",
+			Hypothesis: "sir aapki neela wali shirt ready hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A mid-sentence landmark/location descriptive-phrase
+			// deletion: the fake ASR drops the entire three-word
+			// landmark clause "signal ke paas" (near the signal) --
+			// distinct from every existing deletion entry: the
+			// closest by word count,
+			// hinglish_trailing_three_word_deletion_call_cutoff_complaint_update,
+			// drops a *trailing* three-word span, not a mid-sentence
+			// landmark/location reference. Three deletions:
+			// WER = 3/7 (3 deletions / 7 words).
+			Name:       "landmark_location_descriptive_phrase_deletion_signal_ke_paas",
+			Language:   "hi",
+			Reference:  "sir aapka office signal ke paas hai",
+			Hypothesis: "sir aapka office hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A word-splitting insertion: the fake ASR splits the
+			// single compound word "helpline" into two separate words
+			// "help line" -- a new error class not exercised by any
+			// existing insertion entry in this corpus, all of which
+			// insert an unrelated extra word rather than split one
+			// existing word into two. A single insertion: WER = 2/6
+			// (2 insertions / 6 words, since the split word no longer
+			// aligns as a match and contributes an extra token).
+			Name:       "word_splitting_compound_word_helpline_split_insertion",
+			Language:   "hi",
+			Reference:  "sir humari helpline abhi available hai",
+			Hypothesis: "sir humari help line abhi available hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A word-merging deletion: the fake ASR merges the two
+			// separate words "call back" into a single word "callback"
+			// -- the mirror-image error class of
+			// word_splitting_compound_word_helpline_split_insertion
+			// above (splitting one word into two vs. merging two words
+			// into one), not exercised anywhere else in this corpus.
+			// A single deletion: WER = 2/6 (2 deletions / 6 words,
+			// since the two merged words no longer align as matches
+			// and collapse into one fewer token overall).
+			Name:       "word_merging_call_back_merged_into_callback_deletion",
+			Language:   "hi",
+			Reference:  "sir hum aapko call back karenge",
+			Hypothesis: "sir hum aapko callback karenge",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A festival-name substitution: the fake ASR mishears
+			// "diwali" as "holi" -- a new confusable-word category
+			// (named festivals/holidays) distinct from this corpus's
+			// existing place-name, day-of-week, and relative-day-
+			// reference substitutions, none of which confuse a pair of
+			// festival names. A single substitution: WER = 1/7
+			// (1 substitution / 7 words).
+			Name:       "festival_name_substitution_diwali_holi",
+			Language:   "hi",
+			Reference:  "sir humara office diwali par band rahega",
+			Hypothesis: "sir humara office holi par band rahega",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

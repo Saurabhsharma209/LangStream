@@ -756,6 +756,67 @@ type TranslationCorpusEntry struct {
 //     substitution). 6-word Reference/Candidate. p1 = 5/6, p2 = 3/5,
 //     p3 = 1/4, p4 = 0/3 (smoothed to 0.1/3, since the candidate has
 //     4-grams but none match). BP = 1.0 (equal length, 6 == 6).
+//
+// Sprint 2026-09-01 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise:
+//
+//   - comparative_quantity_mistranslation_more_less_substitution: the
+//     Candidate mistranslates the comparative-quantity word "more" as
+//     its antonym "less" ("you will not have to wait more" -> "...
+//     wait less") -- distinct from
+//     superlative_degree_mistranslation_better_best_substitution (a
+//     comparative/superlative degree confusion, not a more/less
+//     quantity antonym). 7-word Reference/Candidate. p1 = 6/7, p2 =
+//     5/6, p3 = 4/5, p4 = 3/4. BP = 1.0 (equal length, 7 == 7);
+//
+//   - color_word_mistranslation_red_blue_substitution: the Candidate
+//     mistranslates "red" as "blue" ("your red colored shirt is ready"
+//     -> "your blue colored shirt is ready") -- a new confusable-word
+//     category (colors) this corpus didn't have. 6-word
+//     Reference/Candidate. p1 = 5/6, p2 = 3/5, p3 = 2/4, p4 = 1/3.
+//     BP = 1.0 (equal length, 6 == 6);
+//
+//   - landmark_phrase_deletion_near_signal_dropped: the Candidate drops
+//     the entire landmark-descriptive clause "near the traffic signal"
+//     ("your office is near the traffic signal" -> "your office is")
+//     -- distinct from determiner_deletion_the_dropped_refund_timeline
+//     and every other deletion entry, none of which drop a whole
+//     landmark/location descriptive clause. 7-word Reference, 3-word
+//     Candidate; since the candidate is an exact prefix of the
+//     reference, every available n-gram order (only up to trigrams,
+//     since the 3-word candidate has no 4-grams -- effective-order
+//     reduction) scores perfect precision (p1 = p2 = p3 = 1.0).
+//     BP = exp(1 - 7/3) ~= 0.0672 (candidate is much shorter than the
+//     reference);
+//
+//   - time_of_day_mistranslation_morning_evening_substitution: the
+//     Candidate mistranslates "morning" as "evening" ("your delivery
+//     will happen tomorrow morning near your address" -> "... tomorrow
+//     evening near your address") -- distinct from every existing
+//     tense/aspect entry, none of which confuse a time-of-day noun.
+//     9-word Reference/Candidate. p1 = 8/9, p2 = 6/8, p3 = 4/7,
+//     p4 = 2/6. BP = 1.0 (equal length, 9 == 9);
+//
+//   - intensifier_degree_mistranslation_very_quite_substitution: the
+//     Candidate mistranslates the intensifier "very" as "quite" ("sir
+//     this offer is very good for you" -> "... is quite good for you")
+//     -- a degree-intensifier confusion distinct from
+//     superlative_degree_mistranslation_better_best_substitution (an
+//     adjective-degree substitution on the adjective itself, not its
+//     intensifier). 8-word Reference/Candidate. p1 = 7/8, p2 = 5/7,
+//     p3 = 3/6, p4 = 1/5. BP = 1.0 (equal length, 8 == 8);
+//
+//   - topic_particle_bhi_deletion_also_dropped: the Candidate drops the
+//     topic particle "also" entirely ("your order is ready and payment
+//     is also done" -> "... payment is done") -- distinct from
+//     determiner_deletion_the_dropped_refund_timeline (drops an
+//     article, not a topic particle) and
+//     possessive_pronoun_deletion_my_dropped_order_translation (drops a
+//     possessive pronoun). 9-word Reference, 8-word Candidate; the
+//     candidate is the reference with one interior word removed, so
+//     every n-gram order still scores a high but imperfect precision:
+//     p1 = 8/8, p2 = 6/7, p3 = 5/6, p4 = 4/5. BP = exp(1 - 9/8) ~=
+//     0.8825 (candidate is one word shorter than the reference).
 
 func FixedTranslationCorpus() []TranslationCorpusEntry {
 	return []TranslationCorpusEntry{
@@ -1325,6 +1386,60 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Source:         "kripya kuch documents email par bhejiye",
 			Reference:      "please send some documents by email",
 			Candidate:      "please send all documents by email",
+		},
+
+		// --- Sprint 2026-09-01 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. See this file's package-level doc comment above
+		// FixedTranslationCorpus for the full rationale and hand-computed
+		// BLEU behind each.
+		{
+			Name:           "comparative_quantity_mistranslation_more_less_substitution",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapko zyada wait nahi karna padega",
+			Reference:      "you will not have to wait more",
+			Candidate:      "you will not have to wait less",
+		},
+		{
+			Name:           "color_word_mistranslation_red_blue_substitution",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapki laal wali shirt ready hai",
+			Reference:      "your red colored shirt is ready",
+			Candidate:      "your blue colored shirt is ready",
+		},
+		{
+			Name:           "landmark_phrase_deletion_near_signal_dropped",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka office traffic signal ke paas hai",
+			Reference:      "your office is near the traffic signal",
+			Candidate:      "your office is",
+		},
+		{
+			Name:           "time_of_day_mistranslation_morning_evening_substitution",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapki delivery kal subah aapke address ke paas hogi",
+			Reference:      "your delivery will happen tomorrow morning near your address",
+			Candidate:      "your delivery will happen tomorrow evening near your address",
+		},
+		{
+			Name:           "intensifier_degree_mistranslation_very_quite_substitution",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir yeh offer aapke liye bahut accha hai",
+			Reference:      "sir this offer is very good for you",
+			Candidate:      "sir this offer is quite good for you",
+		},
+		{
+			Name:           "topic_particle_bhi_deletion_also_dropped",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka order ready hai aur payment bhi ho gaya hai",
+			Reference:      "your order is ready and payment is also done",
+			Candidate:      "your order is ready and payment is done",
 		},
 	}
 }

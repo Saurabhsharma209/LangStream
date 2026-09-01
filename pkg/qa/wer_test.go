@@ -95,3 +95,41 @@ func TestWordErrorRate_InsertionsCanPushWERAboveOne(t *testing.T) {
 		t.Fatalf("WordErrorRate(short reference, long mismatched hypothesis) = %v, want > 1.0", got)
 	}
 }
+
+func TestWordErrorRate_IrregularWhitespaceTokenizesLikeSingleSpaces(t *testing.T) {
+	// WordErrorRate tokenizes via strings.Fields, which treats any run of
+	// whitespace (spaces, tabs, newlines) as a single separator and
+	// trims leading/trailing whitespace entirely -- not documented
+	// anywhere in wer.go beyond "tokenized on whitespace", and not
+	// previously locked in by a test, even though real ASR vendor output
+	// (and hand-authored corpus fixtures) can plausibly contain tabs or
+	// embedded newlines rather than clean single spaces. This asserts an
+	// irregularly-whitespaced reference/hypothesis pair scores exactly
+	// the same as its normalized, single-space equivalent -- a real,
+	// previously-unverified edge case, not a hypothetical one.
+	irregular := WordErrorRate("  the\tcat  sat\ndown  ", "the cat sad down")
+	normalized := WordErrorRate("the cat sat down", "the cat sad down")
+	if !approxEqual(irregular, normalized) {
+		t.Fatalf("WordErrorRate(irregular whitespace) = %v, want %v (same as single-space-normalized equivalent)", irregular, normalized)
+	}
+	want := 0.25
+	if !approxEqual(irregular, want) {
+		t.Fatalf("WordErrorRate(irregular whitespace) = %v, want %v", irregular, want)
+	}
+}
+
+func TestWordErrorRate_WhitespaceOnlyStringsAreEmpty(t *testing.T) {
+	// A string containing only whitespace tokenizes to zero words via
+	// strings.Fields, so it must be treated exactly like an empty
+	// string, not as a single (empty-content) word -- otherwise a
+	// silence-timeout hypothesis that comes through as spaces/tabs
+	// instead of a true empty string would be scored incorrectly.
+	got := WordErrorRate("   \t  ", "")
+	if !approxEqual(got, 0.0) {
+		t.Fatalf("WordErrorRate(whitespace-only reference, empty hypothesis) = %v, want 0.0", got)
+	}
+	got2 := WordErrorRate("a b c", "  \n\t ")
+	if !approxEqual(got2, 1.0) {
+		t.Fatalf("WordErrorRate(reference, whitespace-only hypothesis) = %v, want 1.0 (equivalent to empty hypothesis)", got2)
+	}
+}

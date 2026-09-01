@@ -4042,3 +4042,86 @@ using fresh, self-owned `/tmp`-based `GOPATH`/`GOCACHE`/`GOTMPDIR`/
 any cached Go toolchain tarball — both cached-artifact assumptions
 (toolchain arch, `/tmp/gopath` ownership) failed this run exactly as
 documented in Sprints 20 and 27.
+
+## 2026-09-01 (scheduled run, Sprint 30) — QA corpus growth + whitespace-tokenization test gap fixed, clean SRE audit, no roadmap items closed
+
+### Agents run
+SRE and QA in parallel. PE and Tech not spawned — repo-wide `TODO|FIXME|
+XXX` grep across their owned packages (`pkg/asr`, `pkg/translate`,
+`pkg/tts`, `pkg/langstream`, `pkg/rtp`, `pkg/webrtcgw`, `cmd/langstream`)
+came back empty (only false-positive `XXX_API_KEY` placeholder text),
+same reasoning as Sprints 16-17/21-29.
+
+### Repo health at start
+Clean on the first try: `go build ./...`, `go vet ./...`, `gofmt -l .`,
+and `go test ./... -race` all green across all 12 packages. ClearStream
+re-checked via `git ls-remote --tags`: still only `v0.1.0`, no
+`VERSIONING.md` action needed.
+
+### Infra note
+`$HOME` (`/sessions/keen-magical-ritchie`, backed by the shared
+`/sessions` ext4 volume) was again at 100% full, 0 bytes free — same
+class of issue as Sprints 18-20 and 29, this time confirmed to be ~160
+other sandbox sessions' data on a shared volume, not anything this
+session wrote. Root filesystem (`/`) held 4.4GB free throughout, so
+worked from `/tmp/build/LangStream` instead of `$HOME/LangStream` (still
+a plain ext4 path, not the Cowork outputs/mounted fuse folder that the
+task explicitly rules out). No cached Go toolchain or `/tmp/gopath`/
+`/tmp/gocache` existed in this fresh sandbox; downloaded `go1.22.5
+linux-arm64` (confirmed host is `aarch64`) fresh into `/tmp/gotools` and
+used newly-created, self-owned `/tmp/lsbuild-{gopath,gocache,tmp}`
+directories, per the pattern documented in Sprints 20/27/29.
+
+### Shipped
+
+**QA** — grew the WER corpus 123→129 and the BLEU/translation corpus
+67→73 with 6 new non-overlapping error shapes each (comparative-quantity
+antonym substitution zyada/kam, color-word substitution, mid-sentence
+landmark-phrase deletion, word-splitting and word-merging ASR error
+classes for WER; matching comparative-quantity, color-word, and
+landmark-phrase shapes plus time-of-day substitution, intensifier
+mistranslation, and topic-particle "bhi" deletion for BLEU), all
+hand-verified against the real `WordErrorRate`/`BLEUScore` functions via
+a throwaway scratch program (deleted after use). Re-ran the race-pattern
+audit across all 62 `go func(` launch sites (39 files, unchanged count
+from Sprint 29) — no instance of the recurring "assert immediately after
+unsynchronized channel send" bug class found. Additionally found and
+fixed a real test-coverage gap: `wer.go`/`bleu.go` tokenize on
+`strings.Fields` (collapses irregular whitespace, trims ends) but this
+behavior — directly relevant to real ASR/MT output — was never locked in
+by a test. Added 4 regression tests across `wer_test.go`/`bleu_test.go`.
+
+**SRE** — full fresh audit (vendor-key sync, `docs/compliance.md`
+vendor-table sync, per-vendor `RecordCost` math, CI/Makefile parity,
+`.dockerignore` correctness, Sprint 29's Docker `ARG TARGETOS`/
+`TARGETARCH` fix re-verified intact, observability latency/cost-metric
+wiring traced end-to-end from call site to `/metrics` gauge, Go-version
+consistency). No new gap found — ninth clean-or-fixed result across the
+vendor-key/CI/Docker front, this run's specific result being clean.
+
+### Bugs found/fixed
+One real bug this run: QA's whitespace-tokenization test-coverage gap in
+`pkg/qa` (behavior was already correct, just previously unverified by any
+test — a latent risk, not an active defect).
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 12 packages after EM integration of both
+  agents' changes (QA's corpus/test additions only — SRE made no
+  changes).
+- Fresh-clone verification from the real GitHub remote after push (see
+  below), rebuilt independently of the local working copy.
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, still need Saurabh's anchor-customer/live-traffic decision.
+
+### Tomorrow
+No specific carry-over items. Next scheduled run should continue
+opportunistic hardening / corpus growth until Week 4 is unblocked. Keep
+using fresh, self-owned `/tmp`-based `GOPATH`/`GOCACHE`/`GOTMPDIR`/
+`TMPDIR` directories and re-verifying host architecture before reusing
+any cached Go toolchain tarball — the shared `/sessions` volume being
+full is now a recurring, cross-session infra condition (not unique to
+this run) worth flagging to Saurabh if it keeps recurring, since it means
+every run pays the toolchain-download cost fresh.

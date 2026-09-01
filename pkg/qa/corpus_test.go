@@ -368,6 +368,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"acknowledgment_backchannel_phrase_deletion_theek_hai":          2.0 / 8.0,
 		"modal_necessity_substitution_chahiye_padega_obligation_future": 1.0 / 7.0,
 		"possessive_pronoun_deletion_mera_dropped_order_status":         1.0 / 8.0,
+
+		// Sprint 2026-09-01 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"comparative_quantity_substitution_zyada_kam_more_less":        1.0 / 7.0,
+		"color_word_substitution_laal_neela_red_blue":                  1.0 / 7.0,
+		"landmark_location_descriptive_phrase_deletion_signal_ke_paas": 3.0 / 7.0,
+		"word_splitting_compound_word_helpline_split_insertion":        2.0 / 6.0,
+		"word_merging_call_back_merged_into_callback_deletion":         2.0 / 6.0,
+		"festival_name_substitution_diwali_holi":                       1.0 / 7.0,
 	}
 
 	entries := FixedCorpus()

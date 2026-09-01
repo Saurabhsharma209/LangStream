@@ -853,6 +853,77 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	quantifierP4 := bleuSmoothingEpsilon / 3.0
 	wantQuantifierMistranslation := math.Exp((math.Log(quantifierP1) + math.Log(quantifierP2) + math.Log(quantifierP3) + math.Log(quantifierP4)) / 4.0)
 
+	// comparative_quantity_mistranslation_more_less_substitution: 7-word
+	// Reference "you will not have to wait more" vs 7-word Candidate
+	// "you will not have to wait less" (comparative-quantity word
+	// "more" mistranslated as its antonym "less"). p1 = 6/7, p2 = 5/6,
+	// p3 = 4/5, p4 = 3/4. BP = 1.0 (equal length, 7 == 7).
+	comparativeQuantityP1 := 6.0 / 7.0
+	comparativeQuantityP2 := 5.0 / 6.0
+	comparativeQuantityP3 := 4.0 / 5.0
+	comparativeQuantityP4 := 3.0 / 4.0
+	wantComparativeQuantityMistranslation := math.Exp((math.Log(comparativeQuantityP1) + math.Log(comparativeQuantityP2) + math.Log(comparativeQuantityP3) + math.Log(comparativeQuantityP4)) / 4.0)
+
+	// color_word_mistranslation_red_blue_substitution: 6-word Reference
+	// "your red colored shirt is ready" vs 6-word Candidate "your blue
+	// colored shirt is ready" (color word "red" mistranslated as
+	// "blue"). p1 = 5/6, p2 = 3/5, p3 = 2/4, p4 = 1/3. BP = 1.0 (equal
+	// length, 6 == 6).
+	colorWordP1 := 5.0 / 6.0
+	colorWordP2 := 3.0 / 5.0
+	colorWordP3 := 2.0 / 4.0
+	colorWordP4 := 1.0 / 3.0
+	wantColorWordMistranslation := math.Exp((math.Log(colorWordP1) + math.Log(colorWordP2) + math.Log(colorWordP3) + math.Log(colorWordP4)) / 4.0)
+
+	// landmark_phrase_deletion_near_signal_dropped: 7-word Reference
+	// "your office is near the traffic signal" vs 3-word Candidate
+	// "your office is" (the entire landmark-descriptive clause "near
+	// the traffic signal" dropped). The candidate is an exact prefix of
+	// the reference, so every available n-gram order (only up to
+	// trigrams, since the candidate has just 3 words -- effective-order
+	// reduction, see BLEUScore's doc comment) scores perfect precision:
+	// p1 = p2 = p3 = 1.0. BP = exp(1 - 7/3) since the candidate
+	// (3 words) is much shorter than the reference (7 words).
+	wantLandmarkPhraseDeletion := math.Exp(1.0 - 7.0/3.0)
+
+	// time_of_day_mistranslation_morning_evening_substitution: 9-word
+	// Reference "your delivery will happen tomorrow morning near your
+	// address" vs 9-word Candidate "your delivery will happen tomorrow
+	// evening near your address" (time-of-day word "morning"
+	// mistranslated as "evening"). p1 = 8/9, p2 = 6/8, p3 = 4/7,
+	// p4 = 2/6. BP = 1.0 (equal length, 9 == 9).
+	timeOfDayP1 := 8.0 / 9.0
+	timeOfDayP2 := 6.0 / 8.0
+	timeOfDayP3 := 4.0 / 7.0
+	timeOfDayP4 := 2.0 / 6.0
+	wantTimeOfDayMistranslation := math.Exp((math.Log(timeOfDayP1) + math.Log(timeOfDayP2) + math.Log(timeOfDayP3) + math.Log(timeOfDayP4)) / 4.0)
+
+	// intensifier_degree_mistranslation_very_quite_substitution: 8-word
+	// Reference "sir this offer is very good for you" vs 8-word
+	// Candidate "sir this offer is quite good for you" (degree
+	// intensifier "very" mistranslated as "quite"). p1 = 7/8, p2 = 5/7,
+	// p3 = 3/6, p4 = 1/5. BP = 1.0 (equal length, 8 == 8).
+	intensifierP1 := 7.0 / 8.0
+	intensifierP2 := 5.0 / 7.0
+	intensifierP3 := 3.0 / 6.0
+	intensifierP4 := 1.0 / 5.0
+	wantIntensifierDegreeMistranslation := math.Exp((math.Log(intensifierP1) + math.Log(intensifierP2) + math.Log(intensifierP3) + math.Log(intensifierP4)) / 4.0)
+
+	// topic_particle_bhi_deletion_also_dropped: 9-word Reference "your
+	// order is ready and payment is also done" vs 8-word Candidate
+	// "your order is ready and payment is done" (topic particle "also"
+	// dropped entirely). The candidate is the reference with one
+	// interior word removed but the surrounding words otherwise
+	// identical and in order, so every n-gram order still scores a high
+	// precision: p1 = 8/8, p2 = 6/7, p3 = 5/6, p4 = 4/5. BP = exp(1 -
+	// 9/8) since the candidate (8 words) is shorter than the reference
+	// (9 words).
+	topicParticleP1 := 8.0 / 8.0
+	topicParticleP2 := 6.0 / 7.0
+	topicParticleP3 := 5.0 / 6.0
+	topicParticleP4 := 4.0 / 5.0
+	wantTopicParticleDeletion := brevityPenalty(9, 8) * math.Exp((math.Log(topicParticleP1)+math.Log(topicParticleP2)+math.Log(topicParticleP3)+math.Log(topicParticleP4))/4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -951,6 +1022,15 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"question_tag_deletion_confirmation_right_translation":       wantQuestionTagDeletion,
 		"superlative_degree_mistranslation_better_best_substitution": wantSuperlativeDegreeMistranslation,
 		"quantifier_mistranslation_some_all_substitution":            wantQuantifierMistranslation,
+
+		// Sprint 2026-09-01 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"comparative_quantity_mistranslation_more_less_substitution": wantComparativeQuantityMistranslation,
+		"color_word_mistranslation_red_blue_substitution":            wantColorWordMistranslation,
+		"landmark_phrase_deletion_near_signal_dropped":               wantLandmarkPhraseDeletion,
+		"time_of_day_mistranslation_morning_evening_substitution":    wantTimeOfDayMistranslation,
+		"intensifier_degree_mistranslation_very_quite_substitution":  wantIntensifierDegreeMistranslation,
+		"topic_particle_bhi_deletion_also_dropped":                   wantTopicParticleDeletion,
 	}
 
 	entries := FixedTranslationCorpus()

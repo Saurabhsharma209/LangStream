@@ -231,3 +231,35 @@ func TestBLEUScore_HinglishCodeSwitchedIdenticalIsOne(t *testing.T) {
 		t.Fatalf("BLEUScore(identical Hinglish) = %v, want 1.0", got)
 	}
 }
+
+func TestBLEUScore_IrregularWhitespaceTokenizesLikeSingleSpaces(t *testing.T) {
+	// BLEUScore tokenizes via strings.Fields, exactly like
+	// WordErrorRate -- any run of whitespace (spaces, tabs, newlines) is
+	// a single separator, and leading/trailing whitespace is trimmed
+	// entirely. Not previously locked in by a test here, even though
+	// real MT vendor output (and hand-authored corpus fixtures) can
+	// plausibly contain tabs or embedded newlines rather than clean
+	// single spaces. This asserts an irregularly-whitespaced
+	// reference/candidate pair scores exactly the same as its
+	// normalized, single-space equivalent.
+	irregular := BLEUScore("  your\torder\nhas been confirmed  ", "your order has been shipped")
+	normalized := BLEUScore("your order has been confirmed", "your order has been shipped")
+	if !bleuApproxEqual(irregular, normalized) {
+		t.Fatalf("BLEUScore(irregular whitespace) = %v, want %v (same as single-space-normalized equivalent)", irregular, normalized)
+	}
+}
+
+func TestBLEUScore_WhitespaceOnlyStringsAreEmpty(t *testing.T) {
+	// A string containing only whitespace tokenizes to zero words via
+	// strings.Fields, so it must be treated exactly like an empty
+	// string (see BLEUScore's doc comment on BLEUScore("", "") etc.),
+	// not as a single (empty-content) word.
+	got := BLEUScore("   \t  ", "")
+	if !bleuApproxEqual(got, 1.0) {
+		t.Fatalf("BLEUScore(whitespace-only reference, empty candidate) = %v, want 1.0 (equivalent to both empty)", got)
+	}
+	got2 := BLEUScore("a b c", "  \n\t ")
+	if !bleuApproxEqual(got2, 0.0) {
+		t.Fatalf("BLEUScore(reference, whitespace-only candidate) = %v, want 0.0 (equivalent to empty candidate)", got2)
+	}
+}
