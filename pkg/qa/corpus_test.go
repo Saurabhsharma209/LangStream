@@ -377,6 +377,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"word_splitting_compound_word_helpline_split_insertion":        2.0 / 6.0,
 		"word_merging_call_back_merged_into_callback_deletion":         2.0 / 6.0,
 		"festival_name_substitution_diwali_holi":                       1.0 / 7.0,
+
+		// Sprint 2026-09-02 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"weight_unit_substitution_kilo_gram_parcel":                      1.0 / 8.0,
+		"calendar_duration_unit_substitution_hafte_mahine_refund":        1.0 / 7.0,
+		"month_name_substitution_january_march_renewal":                  1.0 / 7.0,
+		"fraction_word_substitution_aadha_poora_refund_status":           1.0 / 8.0,
+		"currency_type_substitution_rupees_dollars_balance_query":        1.0 / 7.0,
+		"percentage_marker_word_deletion_percent_dropped_interest_query": 1.0 / 7.0,
 	}
 
 	entries := FixedCorpus()

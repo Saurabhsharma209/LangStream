@@ -4125,3 +4125,123 @@ any cached Go toolchain tarball — the shared `/sessions` volume being
 full is now a recurring, cross-session infra condition (not unique to
 this run) worth flagging to Saurabh if it keeps recurring, since it means
 every run pays the toolchain-download cost fresh.
+
+## 2026-09-02 (scheduled run, Sprint 31) — dropped-final-transcript bug fixed in pkg/asr mock, dashboard timeout hardening, QA corpus growth
+
+### Agents run
+SRE and QA in parallel. PE and Tech not spawned -- repo-wide `TODO|FIXME|
+XXX` grep across their owned packages (`pkg/asr`, `pkg/translate`,
+`pkg/tts`, `pkg/langstream`, `pkg/rtp`, `pkg/webrtcgw`, `cmd/langstream`)
+came back empty (only false-positive `XXX_API_KEY` placeholder text),
+same reasoning as Sprints 16-17/21-30.
+
+### Repo health at start
+Clean on the first try: `go build ./...`, `go vet ./...`, `gofmt -l .`,
+and `go test ./... -race` all green across all 12 packages. ClearStream
+re-checked via `git ls-remote --tags`: still only `v0.1.0`, no
+`VERSIONING.md` action needed -- duplex RTP coordination remains resolved
+via the clean `go.mod` import documented since Sprint 12/2026-07-12.
+
+### Infra note
+`$HOME` (`/sessions/stoic-upbeat-fermi`, backed by the shared `/sessions`
+ext4 volume) was again at 100% full, 0 bytes free -- same recurring class
+of issue as Sprints 18-20/29/30, confirmed to be other sandbox sessions'
+data on a shared volume, not anything this session wrote. Root filesystem
+(`/`) held free space throughout, so worked from
+`/tmp/lsbuild-work/LangStream` instead of `$HOME/LangStream` (a plain ext4
+path, not the Cowork outputs/mounted fuse folder the task explicitly rules
+out). No cached Go toolchain existed in this fresh sandbox; downloaded
+`go1.22.5 linux-arm64` (confirmed host is `aarch64`) fresh into
+`/tmp/gotools` and used newly-created, self-owned
+`/tmp/lsbuild-{gopath2,gocache2}` directories. Also hit, and worked
+around, a second infra wrinkle: `cgo` writes its temp input files via
+`$TMPDIR`, which defaults into the (full) `/sessions` volume even with
+`GOTMPDIR` overridden separately -- fixed by exporting `TMPDIR=/tmp`
+alongside `GOTMPDIR=/tmp` before any `go build`/`go test` invocation.
+
+### Shipped
+
+**SRE** -- full fresh audit (vendor-key sync, `docs/compliance.md`
+vendor-table sync, per-vendor `RecordCost` math across all 6 vendors,
+CI/Makefile parity, `.dockerignore` correctness, Docker
+`ARG TARGETOS`/`TARGETARCH` guard re-verified intact, Go-version
+consistency) plus an end-to-end trace of every observability metric from
+call site to `/metrics` output. Found and fixed a real gap outside the
+existing guard scripts: `pkg/observability/dashboard.go`'s
+`NewDashboardServer` set only `ReadHeaderTimeout` on its `http.Server`,
+leaving `ReadTimeout`, `WriteTimeout`, and `IdleTimeout` at net/http's
+zero-value "no timeout" default. This server is reachable on a real
+network port (`docker-compose.yml` maps `8080:8080`), so a single slow or
+stalled client could hold a server goroutine and connection open
+indefinitely -- a resource-exhaustion vector for a service meant to run
+long-term. Fixed with `ReadTimeout: 10s`, `WriteTimeout: 10s`,
+`IdleTimeout: 60s`, plus `TestNewDashboardServerSetsAllTimeouts` in
+`dashboard_test.go`, confirmed to fail without the fix.
+
+**QA** -- grew the WER corpus 129->135 and the BLEU/translation corpus
+73->79 with 6 new non-overlapping error shapes each (weight-unit,
+calendar-duration-unit, month-name, and fraction-word substitution shapes
+common to both; percentage-marker word deletion for WER; an
+emphatic-particle "hi" deletion for BLEU, after checking existing entries
+and correctly dropping a planned currency-type shape that already existed
+in the BLEU corpus as `one_word_substitution_currency_mismatch`), all
+hand-verified against the real `WordErrorRate`/`BLEUScore` functions via a
+throwaway scratch program (deleted after use). Re-ran the race-pattern
+audit across all `go func(` launch sites -- clean, consistent with
+Sprints 26-30. Found and fixed a real gap in its own charter:
+`tools/latency_benchmark` had zero test files despite being explicitly
+QA-owned; added `main_test.go` covering `msSince`, `runIteration`,
+`runIterationWithBackends` (including a real integration test against
+fake Sarvam/GPT-4o/Cartesia servers), and `printReport`'s conditional
+output -- coverage 0.0%->60.0% (remaining gap is only `func main()`
+itself).
+
+**EM (integration)** -- QA flagged, but correctly left unfixed as outside
+its own ownership (`pkg/qa`/`*_test.go` only), a real bug in
+`pkg/asr/mock.go`'s `mockStreamSession.Close()`: the final-transcript
+guard was `if s.buffered > 0 || s.seq == 0`, so if total pushed PCM bytes
+happened to be an exact multiple of `mockFlushBytes`, the last automatic
+flush inside `PushAudio` already zeroed `buffered` and incremented `seq`
+past 0 before `Close()` ran -- both halves of that condition false, so
+Close() emitted no final transcript at all for that utterance. Since
+`pkg/langstream/session.go` only translates/synthesizes final transcripts,
+that utterance's content would be silently dropped forever, not just
+delayed (a stricter version of the previously-known "final transcript
+arrives late" class of issue). Fixed by the EM as a small, well-scoped
+cross-workstream fix during integration (same pattern as Sprints 27/29's
+EM-level fixes): Close() now unconditionally builds and sends exactly one
+final transcript, removing the buggy guard entirely. Added
+`TestMockRecognizer_Close_EmitsFinalWhenBufferedIsExactlyZero`, which
+pushes exactly `mockFlushBytes` of PCM (triggering the automatic flush
+that zeroes `buffered` with `seq` already > 0) and asserts Close() still
+emits a final transcript; confirmed it fails against the old guard logic.
+
+### Bugs found/fixed
+Two real bugs this run: (1) SRE's missing HTTP server timeouts on the
+observability dashboard, a resource-exhaustion risk on a real network
+port, not an active incident; (2) EM's dropped-final-transcript bug in
+`pkg/asr/mock.go`, a correctness gap that could silently lose an entire
+utterance's content whenever pushed audio landed on an exact
+`mockFlushBytes` multiple -- affects the mock backend used for
+pipeline/orchestrator testing, not any live vendor ASR integration.
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 12 packages after EM integration of both
+  agents' changes plus the EM's own `pkg/asr` fix.
+- `scripts/check-vendor-keys.sh`, `scripts/check-dockerignore.sh`, and
+  `scripts/check-docker-arch.sh` all pass.
+- Fresh-clone verification from the real GitHub remote after push (see
+  below), rebuilt independently of the local working copy.
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, still need Saurabh's anchor-customer/live-traffic decision.
+
+### Tomorrow
+No specific carry-over items. Next scheduled run should continue
+opportunistic hardening / corpus growth until Week 4 is unblocked. Keep
+exporting both `GOTMPDIR=/tmp` and `TMPDIR=/tmp` before any `go build`/
+`go test` invocation -- this run showed `GOTMPDIR` alone is not sufficient
+to keep cgo's own temp files off the (frequently full) `/sessions` volume.
+

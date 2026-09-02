@@ -308,6 +308,33 @@ func TestDashboardServerEndToEnd(t *testing.T) {
 	}
 }
 
+// TestNewDashboardServerSetsAllTimeouts is a regression test for a real
+// gap SRE found: NewDashboardServer previously set only ReadHeaderTimeout
+// (guarding the Slowloris-style slow-header case), leaving ReadTimeout,
+// WriteTimeout, and IdleTimeout at net/http's zero-value default of "no
+// timeout" -- on a server reachable on a real network port (see
+// docker-compose.yml), that means a single slow/stalled client (slow
+// request body, slow response reader, or an idle-but-open connection)
+// could hold a server goroutine and its TCP connection open forever. This
+// fails if any of the three ever regresses back to the zero value.
+func TestNewDashboardServerSetsAllTimeouts(t *testing.T) {
+	r := NewLatencyRecorder()
+	srv := NewDashboardServer("unused:0", r)
+
+	if srv.ReadHeaderTimeout <= 0 {
+		t.Errorf("ReadHeaderTimeout = %v, want > 0", srv.ReadHeaderTimeout)
+	}
+	if srv.ReadTimeout <= 0 {
+		t.Errorf("ReadTimeout = %v, want > 0 (unset means no timeout -- a slow-request-body client could hold a connection open indefinitely)", srv.ReadTimeout)
+	}
+	if srv.WriteTimeout <= 0 {
+		t.Errorf("WriteTimeout = %v, want > 0 (unset means no timeout -- a slow reader on the response could hold a connection open indefinitely)", srv.WriteTimeout)
+	}
+	if srv.IdleTimeout <= 0 {
+		t.Errorf("IdleTimeout = %v, want > 0 (unset means no timeout -- an idle keep-alive connection could be held open forever)", srv.IdleTimeout)
+	}
+}
+
 func TestBuildDashboardDataIncludesReasons(t *testing.T) {
 	r := newSampleRecorder()
 	r.RecordErrorReason("mt", "gpt-4o", "circuit_open")

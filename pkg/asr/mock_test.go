@@ -124,6 +124,71 @@ loop:
 	}
 }
 
+// TestMockRecognizer_Close_EmitsFinalWhenBufferedIsExactlyZero guards against
+// a regression where Close() only emitted a final transcript when
+// s.buffered > 0 or nothing had been sent yet. If total pushed PCM bytes is
+// an exact multiple of mockFlushBytes, the last automatic flush already
+// zeroes s.buffered and increments s.seq past 0, so that condition was
+// false and Close() silently produced no final transcript at all -- the
+// utterance's last chunk was never marked final and pkg/langstream/session.go
+// only acts on final transcripts, so the content would be dropped forever.
+func TestMockRecognizer_Close_EmitsFinalWhenBufferedIsExactlyZero(t *testing.T) {
+	r := NewMockRecognizer()
+	ctx := context.Background()
+
+	sess, err := r.StartStream(ctx, "en")
+	if err != nil {
+		t.Fatalf("StartStream: %v", err)
+	}
+
+	// Push exactly mockFlushBytes of PCM so the automatic flush inside
+	// PushAudio fires and resets buffered to exactly 0, with seq already
+	// incremented past 0 -- the precise condition the old guard missed.
+	frame := AudioFrame{
+		PCM:         make([]byte, mockFlushBytes),
+		SampleRate:  8000,
+		TimestampMS: 0,
+	}
+	if err := sess.PushAudio(ctx, frame); err != nil {
+		t.Fatalf("PushAudio: %v", err)
+	}
+
+	// Drain the automatic (non-final) flush triggered by the push above.
+	select {
+	case tr, ok := <-sess.Transcripts():
+		if !ok {
+			t.Fatal("channel closed before automatic flush transcript arrived")
+		}
+		if tr.IsFinal {
+			t.Fatal("expected the automatic flush transcript to be non-final")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for automatic flush transcript")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- sess.Close() }()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() hung")
+	}
+
+	var sawFinal bool
+	for tr := range sess.Transcripts() {
+		if tr.IsFinal {
+			sawFinal = true
+		}
+	}
+	if !sawFinal {
+		t.Fatal("expected Close() to emit a final transcript even when buffered == 0 and seq > 0")
+	}
+}
+
 func TestMockRecognizer_HindiPhrase(t *testing.T) {
 	r := NewMockRecognizer()
 	ctx := context.Background()

@@ -924,6 +924,69 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	topicParticleP4 := 4.0 / 5.0
 	wantTopicParticleDeletion := brevityPenalty(9, 8) * math.Exp((math.Log(topicParticleP1)+math.Log(topicParticleP2)+math.Log(topicParticleP3)+math.Log(topicParticleP4))/4.0)
 
+	// weight_unit_mistranslation_kilo_gram_parcel_translation: 7-word
+	// Reference "your parcel is two kilo in weight" vs 7-word Candidate
+	// "your parcel is two gram in weight" (weight-unit word "kilo"
+	// mistranslated as "gram"). p1 = 6/7, p2 = 4/6, p3 = 2/5, p4 = 1/4.
+	// BP = 1.0 (equal length, 7 == 7).
+	weightUnitP1 := 6.0 / 7.0
+	weightUnitP2 := 4.0 / 6.0
+	weightUnitP3 := 2.0 / 5.0
+	weightUnitP4 := 1.0 / 4.0
+	wantWeightUnitMistranslation := math.Exp((math.Log(weightUnitP1) + math.Log(weightUnitP2) + math.Log(weightUnitP3) + math.Log(weightUnitP4)) / 4.0)
+
+	// calendar_duration_unit_mistranslation_week_month_translation:
+	// 7-word Reference "your refund will arrive in one week" vs 7-word
+	// Candidate "your refund will arrive in one month" (calendar-scale
+	// duration unit "week" mistranslated as "month"). p1 = 6/7,
+	// p2 = 5/6, p3 = 4/5, p4 = 3/4. BP = 1.0 (equal length, 7 == 7).
+	calendarDurationP1 := 6.0 / 7.0
+	calendarDurationP2 := 5.0 / 6.0
+	calendarDurationP3 := 4.0 / 5.0
+	calendarDurationP4 := 3.0 / 4.0
+	wantCalendarDurationUnitMistranslation := math.Exp((math.Log(calendarDurationP1) + math.Log(calendarDurationP2) + math.Log(calendarDurationP3) + math.Log(calendarDurationP4)) / 4.0)
+
+	// month_name_mistranslation_january_march_translation: 7-word
+	// Reference "sir your plan will renew in january" vs 7-word
+	// Candidate "sir your plan will renew in march" (month name
+	// "january" mistranslated as "march"). p1 = 6/7, p2 = 5/6,
+	// p3 = 4/5, p4 = 3/4. BP = 1.0 (equal length, 7 == 7).
+	monthNameP1 := 6.0 / 7.0
+	monthNameP2 := 5.0 / 6.0
+	monthNameP3 := 4.0 / 5.0
+	monthNameP4 := 3.0 / 4.0
+	wantMonthNameMistranslation := math.Exp((math.Log(monthNameP1) + math.Log(monthNameP2) + math.Log(monthNameP3) + math.Log(monthNameP4)) / 4.0)
+
+	// fraction_word_mistranslation_half_whole_refund_translation:
+	// 7-word Reference "sir your refund has been half processed" vs
+	// 7-word Candidate "sir your refund has been whole processed"
+	// (fraction word "half" mistranslated as "whole"). p1 = 6/7,
+	// p2 = 4/6, p3 = 3/5, p4 = 2/4. BP = 1.0 (equal length, 7 == 7).
+	fractionWordP1 := 6.0 / 7.0
+	fractionWordP2 := 4.0 / 6.0
+	fractionWordP3 := 3.0 / 5.0
+	fractionWordP4 := 2.0 / 4.0
+	wantFractionWordMistranslation := math.Exp((math.Log(fractionWordP1) + math.Log(fractionWordP2) + math.Log(fractionWordP3) + math.Log(fractionWordP4)) / 4.0)
+
+	// percentage_marker_deletion_percent_dropped_translation: 7-word
+	// Reference "sir your interest rate is three percent" vs 6-word
+	// Candidate "sir your interest rate is three" (trailing percentage
+	// marker "percent" dropped entirely). The candidate is an exact
+	// prefix of the reference, so every n-gram order scores perfect
+	// precision: p1 = p2 = p3 = p4 = 1.0. BP = exp(1 - 7/6) since the
+	// candidate (6 words) is shorter than the reference (7 words).
+	wantPercentageMarkerDeletion := math.Exp(1.0 - 7.0/6.0)
+
+	// emphatic_particle_hi_deletion_only_exactly_dropped_translation:
+	// 7-word Reference "your order will be delivered today itself" vs
+	// 6-word Candidate "your order will be delivered today" (trailing
+	// emphatic-particle translation "itself" dropped entirely). The
+	// candidate is an exact prefix of the reference, so every n-gram
+	// order scores perfect precision: p1 = p2 = p3 = p4 = 1.0.
+	// BP = exp(1 - 7/6) since the candidate (6 words) is shorter than
+	// the reference (7 words).
+	wantEmphaticParticleDeletion := math.Exp(1.0 - 7.0/6.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -1031,6 +1094,15 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"time_of_day_mistranslation_morning_evening_substitution":    wantTimeOfDayMistranslation,
 		"intensifier_degree_mistranslation_very_quite_substitution":  wantIntensifierDegreeMistranslation,
 		"topic_particle_bhi_deletion_also_dropped":                   wantTopicParticleDeletion,
+
+		// Sprint 2026-09-02 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for each entry's reasoning and hand-computed BLEU.
+		"weight_unit_mistranslation_kilo_gram_parcel_translation":        wantWeightUnitMistranslation,
+		"calendar_duration_unit_mistranslation_week_month_translation":   wantCalendarDurationUnitMistranslation,
+		"month_name_mistranslation_january_march_translation":            wantMonthNameMistranslation,
+		"fraction_word_mistranslation_half_whole_refund_translation":     wantFractionWordMistranslation,
+		"percentage_marker_deletion_percent_dropped_translation":         wantPercentageMarkerDeletion,
+		"emphatic_particle_hi_deletion_only_exactly_dropped_translation": wantEmphaticParticleDeletion,
 	}
 
 	entries := FixedTranslationCorpus()

@@ -190,10 +190,25 @@ func NewDashboardHandler(r *LatencyRecorder) http.Handler {
 // caller (e.g. cmd/langstream at startup). Constructing the server does not
 // bind a socket -- that only happens when ListenAndServe (or similar) is
 // invoked -- so this function itself is trivially unit-testable.
+//
+// Beyond ReadHeaderTimeout (already set to guard against a Slowloris-style
+// slow-header attack), this also sets ReadTimeout, WriteTimeout, and
+// IdleTimeout: this dashboard is reachable on a real network port (see
+// docker-compose.yml's `ports: ["8080:8080"]`), and net/http's zero-value
+// default for all three is "no timeout", which would let a single slow or
+// stalled client (slow request body, slow reader on the response, or a
+// connection simply left open and idle) hold a server goroutine and its
+// underlying TCP connection open indefinitely -- a resource-exhaustion
+// vector for a dashboard whose actual responses (bounded-size HTML/JSON/
+// Prometheus-text snapshots) never legitimately need more than a few
+// seconds to read or write end to end.
 func NewDashboardServer(addr string, r *LatencyRecorder) *http.Server {
 	return &http.Server{
 		Addr:              addr,
 		Handler:           NewDashboardHandler(r),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }

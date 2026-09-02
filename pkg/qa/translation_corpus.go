@@ -817,6 +817,62 @@ type TranslationCorpusEntry struct {
 //     every n-gram order still scores a high but imperfect precision:
 //     p1 = 8/8, p2 = 6/7, p3 = 5/6, p4 = 4/5. BP = exp(1 - 9/8) ~=
 //     0.8825 (candidate is one word shorter than the reference).
+//
+// Sprint 2026-09-02 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise:
+//
+//   - weight_unit_mistranslation_kilo_gram_parcel_translation: the
+//     Candidate mistranslates "kilo" as "gram" ("your parcel is two
+//     kilo in weight" -> "... two gram in weight") -- a new
+//     unit-of-measurement category (weight), distinct from every
+//     existing entry, none of which confuse a weight unit. 7-word
+//     Reference/Candidate. p1 = 6/7, p2 = 4/6, p3 = 2/5, p4 = 1/4.
+//     BP = 1.0 (equal length, 7 == 7);
+//
+//   - calendar_duration_unit_mistranslation_week_month_translation: the
+//     Candidate mistranslates "week" as "month" ("your refund will
+//     arrive in one week" -> "... in one month") -- a calendar-scale
+//     duration-unit confusion distinct from every existing tense/aspect
+//     entry, none of which confuse a calendar-scale duration unit.
+//     7-word Reference/Candidate. p1 = 6/7, p2 = 5/6, p3 = 4/5,
+//     p4 = 3/4. BP = 1.0 (equal length, 7 == 7);
+//
+//   - month_name_mistranslation_january_march_translation: the
+//     Candidate mistranslates "january" as "march" ("sir your plan
+//     will renew in january" -> "... renew in march") -- a new
+//     confusable-word category (calendar month names), distinct from
+//     every existing entry, none of which confuse a pair of month
+//     names. 7-word Reference/Candidate. p1 = 6/7, p2 = 5/6, p3 = 4/5,
+//     p4 = 3/4. BP = 1.0 (equal length, 7 == 7);
+//
+//   - fraction_word_mistranslation_half_whole_refund_translation: the
+//     Candidate mistranslates "half" as "whole" ("sir your refund has
+//     been half processed" -> "... has been whole processed") --
+//     distinct from comparative_quantity_mistranslation_more_less_substitution,
+//     which confuses a more/less comparative, not a half/whole
+//     fraction. 7-word Reference/Candidate. p1 = 6/7, p2 = 4/6,
+//     p3 = 3/5, p4 = 2/4. BP = 1.0 (equal length, 7 == 7);
+//
+//   - percentage_marker_deletion_percent_dropped_translation: the
+//     Candidate drops the trailing percentage marker "percent"
+//     entirely ("sir your interest rate is three percent" -> "... is
+//     three") -- distinct from every existing deletion entry, none of
+//     which drop a percentage marker. 7-word Reference, 6-word
+//     Candidate; since the candidate is an exact prefix of the
+//     reference, every n-gram order scores perfect precision
+//     (p1 = p2 = p3 = p4 = 1.0). BP = exp(1 - 7/6) ~= 0.8465
+//     (candidate is one word shorter than the reference);
+//
+//   - emphatic_particle_hi_deletion_only_exactly_dropped_translation:
+//     the Candidate drops the trailing emphatic-particle translation
+//     "itself" entirely ("your order will be delivered today itself"
+//     -> "... delivered today") -- distinct from
+//     topic_particle_bhi_deletion_also_dropped (drops the topic
+//     particle "also", not an emphatic "itself"/"exactly" particle).
+//     7-word Reference, 6-word Candidate; since the candidate is an
+//     exact prefix of the reference, every n-gram order scores perfect
+//     precision (p1 = p2 = p3 = p4 = 1.0). BP = exp(1 - 7/6) ~= 0.8465
+//     (candidate is one word shorter than the reference).
 
 func FixedTranslationCorpus() []TranslationCorpusEntry {
 	return []TranslationCorpusEntry{
@@ -1440,6 +1496,60 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Source:         "aapka order ready hai aur payment bhi ho gaya hai",
 			Reference:      "your order is ready and payment is also done",
 			Candidate:      "your order is ready and payment is done",
+		},
+
+		// --- Sprint 2026-09-02 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. See this file's package-level doc comment above
+		// FixedTranslationCorpus for the full rationale and
+		// hand-computed BLEU behind each.
+		{
+			Name:           "weight_unit_mistranslation_kilo_gram_parcel_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka parcel do kilo weight ka hai",
+			Reference:      "your parcel is two kilo in weight",
+			Candidate:      "your parcel is two gram in weight",
+		},
+		{
+			Name:           "calendar_duration_unit_mistranslation_week_month_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka refund ek hafte mein aa jayega",
+			Reference:      "your refund will arrive in one week",
+			Candidate:      "your refund will arrive in one month",
+		},
+		{
+			Name:           "month_name_mistranslation_january_march_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka plan january mein renew hoga",
+			Reference:      "sir your plan will renew in january",
+			Candidate:      "sir your plan will renew in march",
+		},
+		{
+			Name:           "fraction_word_mistranslation_half_whole_refund_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka refund aadha process ho gaya hai",
+			Reference:      "sir your refund has been half processed",
+			Candidate:      "sir your refund has been whole processed",
+		},
+		{
+			Name:           "percentage_marker_deletion_percent_dropped_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka interest rate teen percent hai",
+			Reference:      "sir your interest rate is three percent",
+			Candidate:      "sir your interest rate is three",
+		},
+		{
+			Name:           "emphatic_particle_hi_deletion_only_exactly_dropped_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "aapka order aaj hi deliver ho jayega",
+			Reference:      "your order will be delivered today itself",
+			Candidate:      "your order will be delivered today",
 		},
 	}
 }

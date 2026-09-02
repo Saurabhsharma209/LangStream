@@ -767,6 +767,38 @@ func placeholderPCM() []byte {
 //   - word_splitting_compound_word_helpline_split_insertion:        WER 2/6  (2 insertions-equivalent / 6 words)
 //   - word_merging_call_back_merged_into_callback_deletion:         WER 2/6  (2 deletions-equivalent / 6 words)
 //   - festival_name_substitution_diwali_holi:                       WER 1/7  (1 substitution / 7 words)
+//
+// Sprint 2026-09-02 (QA) adds six further entries covering error shapes
+// this corpus still didn't exercise: a weight-unit substitution ("kilo"
+// misheard as "gram" -- a new unit-of-measurement category alongside this
+// corpus's existing distance-unit
+// (hinglish_unit_of_measurement_kilometer_miles_substitution) entry,
+// neither of which confuses a weight unit), a calendar-duration-unit
+// substitution ("hafte", week, misheard as "mahine", month -- distinct
+// from hinglish_time_unit_substitution_minute_second_hold_duration, which
+// confuses a sub-hour duration unit, not a calendar-scale one), a
+// month-name substitution ("january" misheard as "march" -- a new
+// confusable-word category, calendar month names, distinct from this
+// corpus's existing day-of-week, relative-day-reference, and
+// festival-name substitutions), a fraction-word substitution ("aadha",
+// half, misheard as "poora", whole -- distinct from
+// comparative_quantity_substitution_zyada_kam_more_less, which confuses a
+// more/less comparative, not a half/whole fraction), a currency-type
+// substitution ("rupees" misheard as "dollars" -- distinct from this
+// corpus's existing currency-subunit
+// (hinglish_currency_subunit_paise_rupee_substitution) and
+// currency-formatting (hinglish_currency_symbol_vs_words_bill_amount)
+// entries, neither of which confuses the currency's name/type itself),
+// and a percentage-marker word deletion ("percent" dropped entirely --
+// distinct from every existing deletion entry, none of which drop a
+// percentage marker):
+//
+//   - weight_unit_substitution_kilo_gram_parcel:                      WER 1/8  (1 substitution / 8 words)
+//   - calendar_duration_unit_substitution_hafte_mahine_refund:        WER 1/7  (1 substitution / 7 words)
+//   - month_name_substitution_january_march_renewal:                  WER 1/7  (1 substitution / 7 words)
+//   - fraction_word_substitution_aadha_poora_refund_status:           WER 1/8  (1 substitution / 8 words)
+//   - currency_type_substitution_rupees_dollars_balance_query:        WER 1/7  (1 substitution / 7 words)
+//   - percentage_marker_word_deletion_percent_dropped_interest_query: WER 1/7  (1 deletion / 7 words)
 
 func FixedCorpus() []CorpusEntry {
 	return []CorpusEntry{
@@ -3051,6 +3083,96 @@ func FixedCorpus() []CorpusEntry {
 			Language:   "hi",
 			Reference:  "sir humara office diwali par band rahega",
 			Hypothesis: "sir humara office holi par band rahega",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+
+		// --- Sprint 2026-09-02 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. See this file's package-level doc comment above
+		// FixedCorpus for the full rationale behind each.
+		{
+			// A weight-unit substitution: the fake ASR mishears "kilo"
+			// as "gram" -- a new unit-of-measurement category alongside
+			// this corpus's existing distance-unit
+			// (hinglish_unit_of_measurement_kilometer_miles_substitution)
+			// entry, neither of which confuses a weight unit. A single
+			// substitution: WER = 1/8 (1 substitution / 8 words).
+			Name:       "weight_unit_substitution_kilo_gram_parcel",
+			Language:   "hi",
+			Reference:  "sir aapka parcel do kilo weight ka hai",
+			Hypothesis: "sir aapka parcel do gram weight ka hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A calendar-duration-unit substitution: the fake ASR
+			// mishears "hafte" (week) as "mahine" (month) -- distinct
+			// from hinglish_time_unit_substitution_minute_second_hold_duration,
+			// which confuses a sub-hour duration unit, not a
+			// calendar-scale one. A single substitution: WER = 1/7
+			// (1 substitution / 7 words).
+			Name:       "calendar_duration_unit_substitution_hafte_mahine_refund",
+			Language:   "hi",
+			Reference:  "aapka refund ek hafte mein aa jayega",
+			Hypothesis: "aapka refund ek mahine mein aa jayega",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A month-name substitution: the fake ASR mishears
+			// "january" as "march" -- a new confusable-word category,
+			// calendar month names, distinct from this corpus's
+			// existing day-of-week, relative-day-reference, and
+			// festival-name substitutions. A single substitution:
+			// WER = 1/7 (1 substitution / 7 words).
+			Name:       "month_name_substitution_january_march_renewal",
+			Language:   "hi",
+			Reference:  "sir aapka plan january mein renew hoga",
+			Hypothesis: "sir aapka plan march mein renew hoga",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A fraction-word substitution: the fake ASR mishears
+			// "aadha" (half) as "poora" (whole) -- distinct from
+			// comparative_quantity_substitution_zyada_kam_more_less,
+			// which confuses a more/less comparative, not a
+			// half/whole fraction. A single substitution: WER = 1/8
+			// (1 substitution / 8 words).
+			Name:       "fraction_word_substitution_aadha_poora_refund_status",
+			Language:   "hi",
+			Reference:  "sir aapka refund aadha process ho gaya hai",
+			Hypothesis: "sir aapka refund poora process ho gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A currency-type substitution: the fake ASR mishears
+			// "rupees" as "dollars" -- distinct from this corpus's
+			// existing currency-subunit
+			// (hinglish_currency_subunit_paise_rupee_substitution) and
+			// currency-formatting
+			// (hinglish_currency_symbol_vs_words_bill_amount) entries,
+			// neither of which confuses the currency's name/type
+			// itself. A single substitution: WER = 1/7
+			// (1 substitution / 7 words).
+			Name:       "currency_type_substitution_rupees_dollars_balance_query",
+			Language:   "hi",
+			Reference:  "sir aapka balance five hundred rupees hai",
+			Hypothesis: "sir aapka balance five hundred dollars hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A percentage-marker word deletion: the fake ASR drops
+			// "percent" entirely -- distinct from every existing
+			// deletion entry, none of which drop a percentage marker.
+			// A single deletion: WER = 1/7 (1 deletion / 7 words).
+			Name:       "percentage_marker_word_deletion_percent_dropped_interest_query",
+			Language:   "hi",
+			Reference:  "sir aapka interest rate teen percent hai",
+			Hypothesis: "sir aapka interest rate teen hai",
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},

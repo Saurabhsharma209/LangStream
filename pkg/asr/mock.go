@@ -183,10 +183,10 @@ func (s *mockStreamSession) Transcripts() <-chan Transcript {
 	return s.out
 }
 
-// Close implements StreamSession. It flushes any buffered audio as a final
-// transcript (if there is anything left to flush, or nothing has been
-// emitted yet), then closes the output channel exactly once. Safe to call
-// concurrently with PushAudio and multiple times (idempotent).
+// Close implements StreamSession. It always emits exactly one final
+// transcript marking the end of the utterance, then closes the output
+// channel exactly once. Safe to call concurrently with PushAudio and
+// multiple times (idempotent).
 func (s *mockStreamSession) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -199,21 +199,26 @@ func (s *mockStreamSession) Close() error {
 	// that started strictly before this point.
 	s.closed = true
 
-	var toEmit *Transcript
-	if s.buffered > 0 || s.seq == 0 {
-		s.buffered = 0
-		s.seq++
-		toEmit = s.buildTranscript(true)
-	}
+	// Always emit a final transcript on Close, regardless of whether any
+	// audio is currently buffered. Previously this only fired when
+	// s.buffered > 0 or nothing had been emitted yet (s.seq == 0), which
+	// meant that if the total pushed audio happened to be an exact
+	// multiple of mockFlushBytes, the last automatic flush already zeroed
+	// s.buffered and this branch was skipped entirely: no final transcript
+	// was ever sent for that utterance, and since pkg/langstream/session.go
+	// only acts on final transcripts, the content was silently dropped.
+	// Close() must always produce exactly one final transcript so callers
+	// always get a definitive end-of-utterance signal.
+	s.buffered = 0
+	s.seq++
+	toEmit := *s.buildTranscript(true)
 	s.mu.Unlock()
 
 	// Wait for any PushAudio-triggered send that was already in flight
 	// when we flipped s.closed to finish before we touch the channel.
 	s.sendWG.Wait()
 
-	if toEmit != nil {
-		s.send(*toEmit)
-	}
+	s.send(toEmit)
 
 	s.cancel()
 	close(s.out)
