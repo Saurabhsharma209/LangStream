@@ -987,6 +987,75 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	// the reference (7 words).
 	wantEmphaticParticleDeletion := math.Exp(1.0 - 7.0/6.0)
 
+	// payment_mode_mistranslation_cash_card_refund_translation: 9-word
+	// Reference "sir your refund will be processed in cash mode" vs
+	// 9-word Candidate "sir your refund will be processed in card mode"
+	// (payment-mode word "cash" mistranslated as "card"). p1 = 8/9,
+	// p2 = 6/8, p3 = 5/7, p4 = 4/6. BP = 1.0 (equal length, 9 == 9).
+	paymentModeP1 := 8.0 / 9.0
+	paymentModeP2 := 6.0 / 8.0
+	paymentModeP3 := 5.0 / 7.0
+	paymentModeP4 := 4.0 / 6.0
+	wantPaymentModeMistranslation := math.Exp((math.Log(paymentModeP1) + math.Log(paymentModeP2) + math.Log(paymentModeP3) + math.Log(paymentModeP4)) / 4.0)
+
+	// volume_unit_mistranslation_liter_mililiter_translation: 8-word
+	// Reference "sir this purifier filters one liter of water" vs
+	// 8-word Candidate "sir this purifier filters one mililiter of
+	// water" (volume-unit word "liter" mistranslated as "mililiter").
+	// p1 = 7/8, p2 = 5/7, p3 = 3/6, p4 = 2/5. BP = 1.0 (equal length,
+	// 8 == 8).
+	volumeUnitP1 := 7.0 / 8.0
+	volumeUnitP2 := 5.0 / 7.0
+	volumeUnitP3 := 3.0 / 6.0
+	volumeUnitP4 := 2.0 / 5.0
+	wantVolumeUnitMistranslation := math.Exp((math.Log(volumeUnitP1) + math.Log(volumeUnitP2) + math.Log(volumeUnitP3) + math.Log(volumeUnitP4)) / 4.0)
+
+	// vehicle_type_mistranslation_car_bike_delivery_translation: 8-word
+	// Reference "sir your delivery boy is coming by car" vs 8-word
+	// Candidate "sir your delivery boy is coming by bike" (vehicle-type
+	// word "car" mistranslated as "bike"). p1 = 7/8, p2 = 6/7,
+	// p3 = 5/6, p4 = 4/5. BP = 1.0 (equal length, 8 == 8).
+	vehicleTypeP1 := 7.0 / 8.0
+	vehicleTypeP2 := 6.0 / 7.0
+	vehicleTypeP3 := 5.0 / 6.0
+	vehicleTypeP4 := 4.0 / 5.0
+	wantVehicleTypeMistranslation := math.Exp((math.Log(vehicleTypeP1) + math.Log(vehicleTypeP2) + math.Log(vehicleTypeP3) + math.Log(vehicleTypeP4)) / 4.0)
+
+	// marital_status_mistranslation_married_unmarried_translation:
+	// 9-word Reference "sir your marital status has been updated to
+	// married" vs 9-word Candidate "sir your marital status has been
+	// updated to unmarried" (marital-status word "married"
+	// mistranslated as "unmarried"). p1 = 8/9, p2 = 7/8, p3 = 6/7,
+	// p4 = 5/6. BP = 1.0 (equal length, 9 == 9).
+	maritalStatusP1 := 8.0 / 9.0
+	maritalStatusP2 := 7.0 / 8.0
+	maritalStatusP3 := 6.0 / 7.0
+	maritalStatusP4 := 5.0 / 6.0
+	wantMaritalStatusMistranslation := math.Exp((math.Log(maritalStatusP1) + math.Log(maritalStatusP2) + math.Log(maritalStatusP3) + math.Log(maritalStatusP4)) / 4.0)
+
+	// urgency_adverb_mistranslation_immediately_later_translation:
+	// 7-word Reference "sir we will resolve your issue immediately" vs
+	// 7-word Candidate "sir we will resolve your issue later"
+	// (urgency-adverb word "immediately" mistranslated as "later").
+	// p1 = 6/7, p2 = 5/6, p3 = 4/5, p4 = 3/4. BP = 1.0 (equal length,
+	// 7 == 7).
+	urgencyAdverbP1 := 6.0 / 7.0
+	urgencyAdverbP2 := 5.0 / 6.0
+	urgencyAdverbP3 := 4.0 / 5.0
+	urgencyAdverbP4 := 3.0 / 4.0
+	wantUrgencyAdverbMistranslation := math.Exp((math.Log(urgencyAdverbP1) + math.Log(urgencyAdverbP2) + math.Log(urgencyAdverbP3) + math.Log(urgencyAdverbP4)) / 4.0)
+
+	// document_type_mistranslation_aadhar_pan_translation: 8-word
+	// Reference "sir we need your aadhar card for verification" vs
+	// 8-word Candidate "sir we need your pan card for verification"
+	// (document-type word "aadhar" mistranslated as "pan"). p1 = 7/8,
+	// p2 = 5/7, p3 = 3/6, p4 = 1/5. BP = 1.0 (equal length, 8 == 8).
+	documentTypeP1 := 7.0 / 8.0
+	documentTypeP2 := 5.0 / 7.0
+	documentTypeP3 := 3.0 / 6.0
+	documentTypeP4 := 1.0 / 5.0
+	wantDocumentTypeMistranslation := math.Exp((math.Log(documentTypeP1) + math.Log(documentTypeP2) + math.Log(documentTypeP3) + math.Log(documentTypeP4)) / 4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -1103,6 +1172,16 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"fraction_word_mistranslation_half_whole_refund_translation":     wantFractionWordMistranslation,
 		"percentage_marker_deletion_percent_dropped_translation":         wantPercentageMarkerDeletion,
 		"emphatic_particle_hi_deletion_only_exactly_dropped_translation": wantEmphaticParticleDeletion,
+
+		// Sprint 2026-09-04 (QA) additions, see FixedTranslationCorpus's
+		// doc comment for the reasoning and hand-computed BLEU behind
+		// each entry.
+		"payment_mode_mistranslation_cash_card_refund_translation":    wantPaymentModeMistranslation,
+		"volume_unit_mistranslation_liter_mililiter_translation":      wantVolumeUnitMistranslation,
+		"vehicle_type_mistranslation_car_bike_delivery_translation":   wantVehicleTypeMistranslation,
+		"marital_status_mistranslation_married_unmarried_translation": wantMaritalStatusMistranslation,
+		"urgency_adverb_mistranslation_immediately_later_translation": wantUrgencyAdverbMistranslation,
+		"document_type_mistranslation_aadhar_pan_translation":         wantDocumentTypeMistranslation,
 	}
 
 	entries := FixedTranslationCorpus()

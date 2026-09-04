@@ -4245,3 +4245,104 @@ exporting both `GOTMPDIR=/tmp` and `TMPDIR=/tmp` before any `go build`/
 `go test` invocation -- this run showed `GOTMPDIR` alone is not sufficient
 to keep cgo's own temp files off the (frequently full) `/sessions` volume.
 
+## 2026-09-04 (scheduled run, Sprint 32) — CI job timeout guard, webrtc server timeout hardening, QA corpus growth
+
+### Agents run
+SRE and QA in parallel. PE and Tech not spawned -- repo-wide `TODO|FIXME|
+XXX` grep across their owned packages came back empty, same reasoning as
+Sprints 16-31.
+
+### Repo health at start
+Clean on the first try: `go build ./...`, `go vet ./...`, `gofmt -l .`,
+and `go test ./... -race` all green across all 12 packages. ClearStream
+re-checked via `git ls-remote --tags`: still only `v0.1.0`, no
+`VERSIONING.md` action needed.
+
+### Infra note
+The shared `/sessions` volume was again at 100% full, 0 bytes free (same
+recurring class of issue as Sprints 18-20/29-31 -- other sandboxes' data,
+confirmed nothing this session wrote). Worked from
+`/tmp/lswork/LangStream` instead of `$HOME/LangStream`. Go 1.22.5
+linux-arm64 toolchain was already cached at `/tmp/gotools` and matched
+host arch (`aarch64`) -- reused as-is. Continued exporting both
+`TMPDIR=/tmp/lsbuild-tmp3` and `GOTMPDIR=/tmp/lsbuild-tmp3` before any
+`go build`/`go test`, per Sprint 31's finding that `GOTMPDIR` alone
+doesn't keep cgo's temp files off the full volume.
+
+### Shipped
+
+**QA** -- grew the WER corpus 135->141 and the BLEU/translation corpus
+79->85 with 6 new non-overlapping error shapes each (payment mode,
+volume unit, vehicle type, marital status, urgency adverb, document-type
+substitutions), all hand-verified against the real `WordErrorRate`/
+`BLEUScore` functions via a throwaway scratch program (deleted after
+use). Race-pattern audit across all 64 `go func(` launch sites
+repo-wide: clean. Closed a real coverage gap in its own charter:
+`tools/latency_benchmark`'s `runIterationWithBackends` timeout/miss
+branch had 0% coverage (its sibling `runIteration`'s miss path was
+already covered) -- added
+`TestRunIterationWithBackends_MissesOnTimeoutAgainstFakeVendorServers`,
+package coverage 60.0%->61.2%.
+
+**SRE** -- full fresh audit (vendor-key sync, `.dockerignore`
+correctness, Docker arch guard, CI/Makefile parity, Go-version
+consistency, Sprint 31's dashboard timeout fix re-verified intact) --
+all clean. Found and fixed a real gap: neither of `.github/workflows/
+ci.yml`'s two jobs (`build-test`, `docker-build`) had `timeout-minutes`
+set, so both fell back to GitHub Actions' 360-minute default -- a hung
+step (deadlocked `-race` test, stalled image pull) could occupy a
+runner for up to 6 hours instead of failing fast. Added
+`timeout-minutes: 15` to both jobs.
+
+**EM (integration)** -- SRE flagged, but correctly left unfixed as
+outside its own owned-file charter (`cmd/langstream` isn't SRE's), a
+real gap in `cmd/langstream/webrtc.go`: the `webrtc` subcommand's
+signaling/static-client `http.Server` had no `ReadTimeout`/
+`WriteTimeout`/`IdleTimeout`/`ReadHeaderTimeout` set at all -- the same
+resource-exhaustion class Sprint 31 fixed for the observability
+dashboard, never applied here. Fixed during integration: extracted the
+inline server literal into a new `newWebRTCServer(addr, handler)`
+constructor (mirroring `pkg/observability.NewDashboardServer`'s
+pattern so it's unit-testable without binding a socket), set the same
+timeout values (5s/10s/10s/60s). Confirmed safe for the `/ws`
+WebSocket upgrade path: these timeouts only govern the plain-HTTP
+request preceding an upgrade -- once gorilla/websocket's `Upgrade`
+hijacks the connection, net/http stops enforcing them, so long-lived
+WebSocket sessions are unaffected. Added
+`TestNewWebRTCServerSetsAllTimeouts` (mirrors
+`TestNewDashboardServerSetsAllTimeouts`).
+
+QA also re-flagged the previously-documented `Session.Close()`
+final-transcript-drop limitation (already tracked, not new this run --
+see `tools/latency_benchmark/main_test.go`'s existing comments); no
+action taken, consistent with it being a known, already-documented
+limitation rather than a fresh finding.
+
+### Bugs found/fixed
+Two real gaps this run: (1) SRE's missing CI job timeouts (a
+CI-minute-waste and blocked-merge-queue risk, not an active incident);
+(2) the `cmd/langstream/webrtc.go` missing-server-timeouts gap SRE
+flagged and EM fixed (a resource-exhaustion risk on a real network
+port, not an active incident).
+
+### Verified
+- `go build ./... && go vet ./... && go test ./... -race -count=3 &&
+  gofmt -l .` clean across all 12 packages after EM integration.
+- `scripts/check-vendor-keys.sh`, `scripts/check-dockerignore.sh`, and
+  `scripts/check-docker-arch.sh` all pass.
+- Fresh-clone verification from the real GitHub remote after push (see
+  below), rebuilt independently of the local working copy.
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, still need Saurabh's anchor-customer/live-traffic
+  decision. This is now Sprint 32 (roughly 8 weeks / 24+ sprints) in
+  this same blocked state since Sprint 8 -- worth an explicit call on
+  whether to make that decision, scope down, or pause this daily
+  automation until it's made, rather than continuing indefinite
+  opportunistic hardening on an already-clean, already-tested codebase.
+
+### Tomorrow
+No specific carry-over items. Next scheduled run should continue
+opportunistic hardening / corpus growth until Week 4 is unblocked, or
+until Saurabh redirects this automation's scope.

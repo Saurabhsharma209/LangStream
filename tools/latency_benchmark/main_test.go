@@ -182,6 +182,60 @@ func TestRunIterationWithBackends_RejectsUnsupportedLanguagePairAtSessionSetup(t
 	}
 }
 
+// TestRunIterationWithBackends_MissesOnTimeoutAgainstFakeVendorServers
+// closes a genuine coverage gap: every other runIterationWithBackends test
+// exercises either the "hit" path (TestRunIterationWithBackends_HitAgain
+// stFakeVendorServers) or the setup-error path (TestRunIterationWithBack
+// ends_RejectsUnsupportedLanguagePairAtSessionSetup) -- neither one ever
+// reaches runIterationWithBackends' own select's <-time.After(timeout)
+// branch, which was previously entirely untested (0% coverage on that
+// statement, confirmed via `go test ./tools/latency_benchmark/... -cover
+// profile` before this test was added). This test uses a real,
+// deterministically-responding fake vendor stack (same as the hit test)
+// but an effectively-zero timeout (1 nanosecond), so the timeout fires
+// before the round trip through the fake Sarvam/GPT-4o/Cartesia servers
+// can possibly complete, forcing the miss branch: hit == false and
+// err == nil (a timeout is a benign miss, not an error -- see
+// runIterationWithBackends' sibling runIteration, whose miss path is
+// already covered by TestRunIteration_AlwaysMissesAgainstMockBackendsAsD
+// ocumented).
+func TestRunIterationWithBackends_MissesOnTimeoutAgainstFakeVendorServers(t *testing.T) {
+	setFakeVendorAPIKeys()
+	servers := startFakeVendorServers()
+	defer servers.Close()
+
+	vendorASR, err := asr.NewSarvamRecognizer(asr.WithSarvamBaseURL(servers.SarvamWSURL))
+	if err != nil {
+		t.Fatalf("NewSarvamRecognizer: %v", err)
+	}
+	vendorMT, err := translate.NewGPT4oTranslator(translate.WithBaseURL(servers.GPT4oHTTPURL), translate.WithAPIKey("fake-benchmark-test-key"))
+	if err != nil {
+		t.Fatalf("NewGPT4oTranslator: %v", err)
+	}
+	vendorTTS, err := tts.NewCartesiaSynthesizer(tts.WithBaseURL(servers.CartesiaWSURL))
+	if err != nil {
+		t.Fatalf("NewCartesiaSynthesizer: %v", err)
+	}
+
+	rec := observability.NewLatencyRecorder()
+	hit, err := runIterationWithBackends(rec, vendorASR, vendorMT, vendorTTS, "hi", "en", 320, 1*time.Nanosecond)
+	if err != nil {
+		t.Fatalf("runIterationWithBackends: unexpected error: %v, want nil (a timeout is a benign miss)", err)
+	}
+	if hit {
+		t.Fatalf("runIterationWithBackends: got hit, want miss -- a 1ns timeout must fire before the fake vendor round trip can complete")
+	}
+	if n := rec.Count("glass_to_glass_ms"); n != 0 {
+		t.Errorf("glass_to_glass_ms sample count = %d, want 0 (a miss must not record this stage)", n)
+	}
+	if n := rec.Count("session_setup_ms"); n != 1 {
+		t.Errorf("session_setup_ms sample count = %d, want 1", n)
+	}
+	if n := rec.Count("session_close_ms"); n != 1 {
+		t.Errorf("session_close_ms sample count = %d, want 1", n)
+	}
+}
+
 // TestPrintReport_ZeroGlassToGlassSamplesIncludesKnownBugNote checks
 // printReport's conditional messaging: when glass_to_glass_ms has zero
 // recorded samples (the common case today, see the package doc comment),

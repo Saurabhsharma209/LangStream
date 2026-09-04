@@ -3176,5 +3176,99 @@ func FixedCorpus() []CorpusEntry {
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},
+
+		// --- Sprint 2026-09-04 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. See this file's package-level doc comment above
+		// FixedCorpus for the full rationale behind each. Every
+		// expected WER below was verified against the real
+		// WordErrorRate function via a throwaway scratch program, not
+		// hand-computed.
+		{
+			// A payment-mode substitution: the fake ASR mishears
+			// "cash" as "card" -- a new confusable-word category,
+			// payment method, distinct from this corpus's existing
+			// currency-type, currency-subunit, and currency-formatting
+			// entries, none of which confuse the payment method
+			// itself. A single substitution: WER = 1/8
+			// (1 substitution / 8 words).
+			Name:       "payment_mode_substitution_cash_card_refund_query",
+			Language:   "hi",
+			Reference:  "sir aapka refund cash mode mein process hoga",
+			Hypothesis: "sir aapka refund card mode mein process hoga",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A volume-unit substitution: the fake ASR mishears
+			// "liter" as "mililiter" -- a new unit-of-measurement
+			// category, volume, alongside this corpus's existing
+			// distance (kilometer/miles) and weight (kilo/gram) unit
+			// entries, neither of which confuses a volume unit. A
+			// single substitution: WER = 1/9 (1 substitution / 9
+			// words).
+			Name:       "volume_unit_substitution_liter_mililiter_water_purifier_query",
+			Language:   "hi",
+			Reference:  "sir yeh purifier ek liter paani filter karta hai",
+			Hypothesis: "sir yeh purifier ek mililiter paani filter karta hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A vehicle-type substitution: the fake ASR mishears
+			// "car" as "bike" -- a new confusable-word category, mode
+			// of transport, not exercised by any existing entry. A
+			// single substitution: WER = 1/9 (1 substitution / 9
+			// words).
+			Name:       "vehicle_type_substitution_car_bike_delivery_query",
+			Language:   "hi",
+			Reference:  "sir aapka delivery boy car se aa raha hai",
+			Hypothesis: "sir aapka delivery boy bike se aa raha hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A marital-status substitution: the fake ASR mishears
+			// "shaadishuda" (married) as "kunwara" (unmarried) -- a
+			// new confusable-word category, relationship status, not
+			// exercised by any existing entry (distinct from this
+			// corpus's kinship-term entry, which confuses a family
+			// relation, not a marital status). A single substitution:
+			// WER = 1/9 (1 substitution / 9 words).
+			Name:       "marital_status_substitution_shaadishuda_kunwara_form_update",
+			Language:   "hi",
+			Reference:  "sir aapka form mein shaadishuda status update ho gaya",
+			Hypothesis: "sir aapka form mein kunwara status update ho gaya",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// An urgency-adverb substitution: the fake ASR mishears
+			// "turant" (immediately) as "baadmein" (later) -- a new
+			// confusable-word category, temporal urgency, distinct
+			// from this corpus's existing day-of-week, relative-day,
+			// and time-of-day-period-marker substitutions, none of
+			// which confuse an urgency adverb. A single substitution:
+			// WER = 1/8 (1 substitution / 8 words).
+			Name:       "urgency_adverb_substitution_turant_baadmein_action_request",
+			Language:   "hi",
+			Reference:  "sir hum aapka issue turant resolve kar denge",
+			Hypothesis: "sir hum aapka issue baadmein resolve kar denge",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A document-type substitution: the fake ASR mishears
+			// "aadhar" as "pan" -- a new confusable-word category, ID
+			// document type, not exercised by any existing entry. A
+			// single substitution: WER = 1/8 (1 substitution / 8
+			// words).
+			Name:       "document_type_substitution_aadhar_pan_verification_request",
+			Language:   "hi",
+			Reference:  "sir verification ke liye aapka aadhar card chahiye",
+			Hypothesis: "sir verification ke liye aapka pan card chahiye",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
 	}
 }

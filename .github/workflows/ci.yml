@@ -10,6 +10,15 @@ jobs:
   build-test:
     name: Build, vet, fmt, test
     runs-on: ubuntu-latest
+    # Bounded so a hung step (e.g. a deadlocked -race test, or a stuck
+    # network call in a test that lacks its own context timeout) fails
+    # fast instead of silently occupying a runner for GitHub Actions'
+    # default 360-minute job timeout -- wasted CI minutes at best, and a
+    # blocked queue for every other push/PR in the meantime at worst.
+    # 15 minutes is generous headroom over this job's actual runtime
+    # (a `go build`+`go test -race` on this repo's size) while still
+    # bounding the failure mode.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,6 +84,11 @@ jobs:
     # hiccups transiently. Flip this to false once it's been stable for a
     # few weeks and the team wants a broken image build to hard-fail CI.
     continue-on-error: true
+    # Same rationale as build-test's timeout-minutes above: bound a hung
+    # `docker build` (e.g. a stalled base-image pull or a wedged
+    # `go mod download` inside the builder stage) to a fixed runner
+    # budget instead of GitHub Actions' 360-minute default.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4

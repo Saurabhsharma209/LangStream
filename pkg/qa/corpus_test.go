@@ -386,6 +386,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"fraction_word_substitution_aadha_poora_refund_status":           1.0 / 8.0,
 		"currency_type_substitution_rupees_dollars_balance_query":        1.0 / 7.0,
 		"percentage_marker_word_deletion_percent_dropped_interest_query": 1.0 / 7.0,
+
+		// Sprint 2026-09-04 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"payment_mode_substitution_cash_card_refund_query":              1.0 / 8.0,
+		"volume_unit_substitution_liter_mililiter_water_purifier_query": 1.0 / 9.0,
+		"vehicle_type_substitution_car_bike_delivery_query":             1.0 / 9.0,
+		"marital_status_substitution_shaadishuda_kunwara_form_update":   1.0 / 9.0,
+		"urgency_adverb_substitution_turant_baadmein_action_request":    1.0 / 8.0,
+		"document_type_substitution_aadhar_pan_verification_request":    1.0 / 8.0,
 	}
 
 	entries := FixedCorpus()

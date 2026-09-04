@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"reflect"
 	"testing"
 
@@ -117,5 +118,32 @@ func TestBuildICEServers_WhitespaceAndEmptyEntriesAreSkipped(t *testing.T) {
 	}
 	if got[1].URLs[0] != "turn:b.example.com:3478" || got[1].Username != "u" {
 		t.Fatalf("expected trimmed turn URL with credentials, got %+v", got[1])
+	}
+}
+
+// TestNewWebRTCServerSetsAllTimeouts is a regression test for a real gap
+// SRE found (Sprint 32): the webrtc subcommand's signaling/static-client
+// http.Server had no ReadTimeout/WriteTimeout/IdleTimeout/
+// ReadHeaderTimeout set at all, unlike pkg/observability's
+// NewDashboardServer which was hardened for the same resource-exhaustion
+// class in Sprint 31. Fails if any of the four ever regresses back to the
+// zero value ("no timeout").
+func TestNewWebRTCServerSetsAllTimeouts(t *testing.T) {
+	srv := newWebRTCServer("unused:0", http.NewServeMux())
+
+	if srv.ReadHeaderTimeout <= 0 {
+		t.Errorf("ReadHeaderTimeout = %v, want > 0", srv.ReadHeaderTimeout)
+	}
+	if srv.ReadTimeout <= 0 {
+		t.Errorf("ReadTimeout = %v, want > 0 (unset means no timeout -- a slow-request-body client could hold a connection open indefinitely)", srv.ReadTimeout)
+	}
+	if srv.WriteTimeout <= 0 {
+		t.Errorf("WriteTimeout = %v, want > 0 (unset means no timeout -- a slow reader on the response could hold a connection open indefinitely)", srv.WriteTimeout)
+	}
+	if srv.IdleTimeout <= 0 {
+		t.Errorf("IdleTimeout = %v, want > 0 (unset means no timeout -- an idle keep-alive connection could be held open forever)", srv.IdleTimeout)
+	}
+	if srv.Addr != "unused:0" {
+		t.Errorf("Addr = %q, want %q", srv.Addr, "unused:0")
 	}
 }

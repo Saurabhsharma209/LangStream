@@ -1551,5 +1551,61 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Reference:      "your order will be delivered today itself",
 			Candidate:      "your order will be delivered today",
 		},
+
+		// --- Sprint 2026-09-04 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. See this file's package-level doc comment above
+		// FixedTranslationCorpus for the full rationale and
+		// hand-computed BLEU behind each (verified against the real
+		// BLEUScore function via a throwaway scratch program, not
+		// hand-computed by eye).
+		{
+			Name:           "payment_mode_mistranslation_cash_card_refund_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka refund cash mode mein process hoga",
+			Reference:      "sir your refund will be processed in cash mode",
+			Candidate:      "sir your refund will be processed in card mode",
+		},
+		{
+			Name:           "volume_unit_mistranslation_liter_mililiter_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir yeh purifier ek liter paani filter karta hai",
+			Reference:      "sir this purifier filters one liter of water",
+			Candidate:      "sir this purifier filters one mililiter of water",
+		},
+		{
+			Name:           "vehicle_type_mistranslation_car_bike_delivery_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka delivery boy car se aa raha hai",
+			Reference:      "sir your delivery boy is coming by car",
+			Candidate:      "sir your delivery boy is coming by bike",
+		},
+		{
+			Name:           "marital_status_mistranslation_married_unmarried_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka form mein shaadishuda status update ho gaya",
+			Reference:      "sir your marital status has been updated to married",
+			Candidate:      "sir your marital status has been updated to unmarried",
+		},
+		{
+			Name:           "urgency_adverb_mistranslation_immediately_later_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir hum aapka issue turant resolve kar denge",
+			Reference:      "sir we will resolve your issue immediately",
+			Candidate:      "sir we will resolve your issue later",
+		},
+		{
+			Name:           "document_type_mistranslation_aadhar_pan_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir verification ke liye aapka aadhar card chahiye",
+			Reference:      "sir we need your aadhar card for verification",
+			Candidate:      "sir we need your pan card for verification",
+		},
 	}
 }

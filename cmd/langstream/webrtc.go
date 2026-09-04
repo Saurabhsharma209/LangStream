@@ -90,6 +90,30 @@ func buildICEServers(stunServers, turnUsername, turnCredential string) []webrtc.
 	return iceServers
 }
 
+// newWebRTCServer builds the http.Server for the webrtc subcommand's
+// combined signaling-server-and-static-client. Constructing the server
+// does not bind a socket, so this is trivially unit-testable.
+//
+// Timeouts mirror pkg/observability's NewDashboardServer (see that
+// function's doc comment for the resource-exhaustion rationale): this
+// server is reachable on a real network port. ReadHeaderTimeout/
+// ReadTimeout/WriteTimeout only govern the plain-HTTP request that
+// precedes a `/ws` upgrade -- once gorilla/websocket's Upgrade hijacks
+// the connection, net/http stops enforcing these deadlines, so long-lived
+// WebSocket sessions are unaffected. Flagged by SRE (Sprint 32), fixed
+// here by EM during integration since cmd/langstream is outside SRE's
+// owned-file charter.
+func newWebRTCServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
 func runWebRTC(args []string) error {
 	fs := flag.NewFlagSet("webrtc", flag.ContinueOnError)
 	backend := fs.String("backend", "", `backend name for ASR, MT, and TTS alike (default "mock")`)
@@ -117,7 +141,7 @@ func runWebRTC(args []string) error {
 	mux.Handle("/", webrtcgw.StaticHandler())
 	mux.Handle("/ws", webrtcgw.SignalingHandler(mgr, iceServers))
 
-	srv := &http.Server{Addr: *addr, Handler: mux}
+	srv := newWebRTCServer(*addr, mux)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
