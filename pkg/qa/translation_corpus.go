@@ -1607,5 +1607,79 @@ func FixedTranslationCorpus() []TranslationCorpusEntry {
 			Reference:      "sir we need your aadhar card for verification",
 			Candidate:      "sir we need your pan card for verification",
 		},
+
+		// --- Sprint 2026-09-05 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus (mirroring the six new FixedCorpus WER shapes added
+		// the same sprint). Each BLEU score below was hand-verified
+		// against the real BLEUScore function via a throwaway scratch
+		// program (not committed), and checked against the full
+		// existing entry list above for shape duplication first.
+		{
+			// Sibling-kinship mistranslation: brother -> sister.
+			// BLEU = 0.7071 (one-word substitution near the end of a
+			// 10-word reference).
+			Name:           "sibling_kinship_term_mistranslation_brother_sister_family_details_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka bhai naam registration form mein diya hai",
+			Reference:      "sir your brother's name is given in the registration form",
+			Candidate:      "sir your sister's name is given in the registration form",
+		},
+		{
+			// Season-name mistranslation: summer -> winter. BLEU =
+			// 0.7017 (one-word substitution in an 11-word reference).
+			Name:           "season_name_mistranslation_summer_winter_delivery_delay_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir garmi ke season mein delivery mein delay hota hai",
+			Reference:      "sir during the summer season there is a delay in delivery",
+			Candidate:      "sir during the winter season there is a delay in delivery",
+		},
+		{
+			// Compass-direction mistranslation: north -> south,
+			// distinct from this corpus's existing left/right
+			// spatial-direction entry. BLEU = 0.7506 (one-word
+			// substitution in a 9-word reference).
+			Name:           "compass_direction_mistranslation_north_south_branch_location_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir hamari branch uttar zone mein located hai",
+			Reference:      "sir our branch is located in the north zone",
+			Candidate:      "sir our branch is located in the south zone",
+		},
+		{
+			// Size-adjective mistranslation: big -> small. BLEU =
+			// 0.7825 (one-word substitution in a 10-word reference).
+			Name:           "size_adjective_mistranslation_big_small_parcel_box_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir aapka parcel bada box mein pack kiya gaya hai",
+			Reference:      "sir your parcel has been packed in a big box",
+			Candidate:      "sir your parcel has been packed in a small box",
+		},
+		{
+			// Temperature-adjective mistranslation: hot -> cold. BLEU =
+			// 0.6435 (one-word substitution in a short 7-word
+			// reference).
+			Name:           "temperature_adjective_mistranslation_hot_cold_water_purifier_query_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir yeh purifier garam paani bhi supply karta hai",
+			Reference:      "sir this purifier also supplies hot water",
+			Candidate:      "sir this purifier also supplies cold water",
+		},
+		{
+			// Floor-level-number-word mistranslation: first -> second,
+			// distinct from this corpus's existing ordinal-number-word-
+			// vs-digit entry. BLEU = 0.7506 (one-word substitution in a
+			// 9-word reference).
+			Name:           "floor_level_number_word_mistranslation_first_second_office_visit_translation",
+			SourceLanguage: "hi",
+			TargetLanguage: "en",
+			Source:         "sir hamara office pehla floor par located hai",
+			Reference:      "sir our office is located on the first floor",
+			Candidate:      "sir our office is located on the second floor",
+		},
 	}
 }

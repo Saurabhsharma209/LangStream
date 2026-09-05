@@ -3270,5 +3270,97 @@ func FixedCorpus() []CorpusEntry {
 			PCM:        placeholderPCM(),
 			SampleRate: 8000,
 		},
+
+		// --- Sprint 2026-09-05 (QA) additions below: six more entries
+		// covering error shapes not yet exercised anywhere in this
+		// corpus. Each is a single substitution, hand-verified against
+		// the real WordErrorRate function via a throwaway scratch
+		// program (not committed), and checked against the full
+		// existing entry list above for shape duplication first.
+		{
+			// A sibling-kinship-term substitution: the fake ASR
+			// mishears "bhai" (brother) as "behen" (sister) -- a new
+			// kinship category, sibling relation, distinct from this
+			// corpus's existing parent-child kinship entry (beta/beti,
+			// son/daughter). A single substitution: WER = 1/9 (1
+			// substitution / 9 words).
+			Name:       "sibling_kinship_term_substitution_bhai_behen_family_details",
+			Language:   "hi",
+			Reference:  "sir aapka bhai naam registration form mein diya hai",
+			Hypothesis: "sir aapka behen naam registration form mein diya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A season-name substitution: the fake ASR mishears
+			// "garmi" (summer) as "sardi" (winter) -- a new
+			// confusable-word category, season name, not exercised by
+			// any existing entry (distinct from this corpus's
+			// time-of-day-period and month-name entries, neither of
+			// which confuses a season). A single substitution: WER =
+			// 1/10 (1 substitution / 10 words).
+			Name:       "season_name_substitution_garmi_sardi_delivery_delay",
+			Language:   "hi",
+			Reference:  "sir garmi ke season mein delivery mein delay hota hai",
+			Hypothesis: "sir sardi ke season mein delivery mein delay hota hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A compass-direction substitution: the fake ASR mishears
+			// "uttar" (north) as "dakshin" (south) -- a new
+			// confusable-word category, compass direction, distinct
+			// from this corpus's existing spatial-direction entry
+			// (baayi/daayi, left/right), which confuses a relative
+			// direction, not a compass direction. A single
+			// substitution: WER = 1/8 (1 substitution / 8 words).
+			Name:       "compass_direction_substitution_uttar_dakshin_branch_location",
+			Language:   "hi",
+			Reference:  "sir hamari branch uttar zone mein located hai",
+			Hypothesis: "sir hamari branch dakshin zone mein located hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A size-adjective substitution: the fake ASR mishears
+			// "bada" (big) as "chota" (small) -- a new confusable-word
+			// category, physical size, not exercised by any existing
+			// entry. A single substitution: WER = 1/10 (1 substitution
+			// / 10 words).
+			Name:       "size_adjective_substitution_bada_chota_parcel_box",
+			Language:   "hi",
+			Reference:  "sir aapka parcel bada box mein pack kiya gaya hai",
+			Hypothesis: "sir aapka parcel chota box mein pack kiya gaya hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A temperature-adjective substitution: the fake ASR
+			// mishears "garam" (hot) as "thanda" (cold) -- a new
+			// confusable-word category, temperature, not exercised by
+			// any existing entry. A single substitution: WER = 1/9 (1
+			// substitution / 9 words).
+			Name:       "temperature_adjective_substitution_garam_thanda_water_purifier_query",
+			Language:   "hi",
+			Reference:  "sir yeh purifier garam paani bhi supply karta hai",
+			Hypothesis: "sir yeh purifier thanda paani bhi supply karta hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
+		{
+			// A floor-level-number-word substitution: the fake ASR
+			// mishears "pehla" (first) as "doosra" (second) -- a new
+			// confusable-word category, building floor level, distinct
+			// from this corpus's ordinal-number-word-vs-digit entry
+			// (which confuses a spoken ordinal against a digit, not two
+			// spoken ordinals against each other). A single
+			// substitution: WER = 1/8 (1 substitution / 8 words).
+			Name:       "floor_level_number_word_substitution_pehla_doosra_office_visit",
+			Language:   "hi",
+			Reference:  "sir hamara office pehla floor par located hai",
+			Hypothesis: "sir hamara office doosra floor par located hai",
+			PCM:        placeholderPCM(),
+			SampleRate: 8000,
+		},
 	}
 }

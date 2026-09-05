@@ -65,6 +65,12 @@ jobs:
       - name: Docker cross-arch build guard regression test (check-docker-arch.sh itself)
         run: ./scripts/check-docker-arch_test.sh
 
+      - name: Compose resource-limits check (docker-compose.yml langstream service memory ceiling)
+        run: ./scripts/check-compose-resource-limits.sh
+
+      - name: Compose resource-limits guard regression test (check-compose-resource-limits.sh itself)
+        run: ./scripts/check-compose-resource-limits_test.sh
+
   docker-build:
     name: Docker build verification
     runs-on: ubuntu-latest

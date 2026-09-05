@@ -41,6 +41,27 @@ services:
       - CARTESIA_API_KEY=${CARTESIA_API_KEY:-}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
     restart: unless-stopped
+    # --- resource limits ---------------------------------------------
+    # This service handles live call audio and is reachable on a real
+    # network port with restart: unless-stopped above (auto-recovers from
+    # a process-level crash) but, until now, had no ceiling on how much
+    # memory or CPU a single misbehaving container instance could claim.
+    # A leak, or unbounded label-value growth feeding
+    # pkg/observability's LatencyRecorder (e.g. a caller-supplied
+    # stage/vendor string used as a Prometheus label), would otherwise be
+    # able to consume host memory until the kernel OOM-killer intervenes
+    # -- on a shared host, that may kill an unrelated process instead of
+    # this container. `deploy.resources.limits` is honored by Compose v2
+    # (`docker compose`, not the legacy python `docker-compose`) outside
+    # Swarm mode, so this is an enforced ceiling for local
+    # `docker compose up`/`make docker-run`, not swarm-only dead config.
+    # See scripts/check-compose-resource-limits.sh for the CI guard that
+    # keeps this block from silently disappearing again.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
     # --- healthcheck ------------------------------------------------------
     # Not adding a `healthcheck:` block: Compose (like Docker's own
     # HEALTHCHECK) execs the check *inside* the container, and this image

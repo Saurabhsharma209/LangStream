@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/pion/webrtc/v3"
+
+	"github.com/exotel/langstream/pkg/webrtcgw"
 )
 
 func TestIceServerForURL_TURNGetsCredentialsWhenBothSet(t *testing.T) {
@@ -145,5 +150,76 @@ func TestNewWebRTCServerSetsAllTimeouts(t *testing.T) {
 	}
 	if srv.Addr != "unused:0" {
 		t.Errorf("Addr = %q, want %q", srv.Addr, "unused:0")
+	}
+}
+
+// TestServeWebRTC_ServesAndShutsDownGracefully is serveWebRTC's analogue
+// of main_test.go's TestServeDashboard_ServesAndShutsDownGracefully --
+// before this test, serveWebRTC (the function runWebRTC actually blocks
+// on, split out for exactly this kind of direct testing per its own doc
+// comment) had zero coverage despite the `webrtc` subcommand's other
+// pieces (iceServerForURL, buildICEServers, newWebRTCServer) all being
+// well tested above. Confirms the signaling/static-client server actually
+// accepts connections once serveWebRTC is running, and that it returns
+// within a bounded time (no error) once ctx is cancelled.
+func TestServeWebRTC_ServesAndShutsDownGracefully(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle("/", webrtcgw.StaticHandler())
+
+	addr := freeAddr(t)
+	srv := newWebRTCServer(addr, mux)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serveWebRTC(ctx, srv)
+	}()
+
+	var resp *http.Response
+	var getErr error
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, getErr = http.Get("http://" + addr + "/")
+		if getErr == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if getErr != nil {
+		cancel()
+		<-done
+		t.Fatalf("GET / never succeeded: %v", getErr)
+	}
+	resp.Body.Close()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serveWebRTC returned an error on graceful shutdown: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveWebRTC did not return within 3s of context cancellation")
+	}
+}
+
+// TestServeWebRTC_ListenErrorSurfaced mirrors
+// TestServeDashboard_ListenErrorSurfaced: if the signaling server's
+// ListenAndServe fails immediately (address already in use), serveWebRTC
+// must surface that error instead of blocking forever waiting on ctx.
+func TestServeWebRTC_ListenErrorSurfaced(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving a port: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.Addr().String()
+
+	srv := newWebRTCServer(addr, http.NewServeMux())
+
+	err = serveWebRTC(context.Background(), srv)
+	if err == nil {
+		t.Fatal("expected serveWebRTC to return an error when the address is already in use")
 	}
 }

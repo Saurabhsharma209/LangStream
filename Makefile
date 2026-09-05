@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet docker docker-run serve ci check-vendor-keys test-vendor-key-guard check-dockerignore test-dockerignore-guard check-docker-arch test-docker-arch-guard
+.PHONY: build test fmt fmt-check vet docker docker-run serve ci check-vendor-keys test-vendor-key-guard check-dockerignore test-dockerignore-guard check-docker-arch test-docker-arch-guard check-compose-resource-limits test-compose-resource-limits-guard
 
 BINARY := langstream
 CMD_PATH := ./cmd/langstream
@@ -101,8 +101,25 @@ check-docker-arch:
 test-docker-arch-guard:
 	./scripts/check-docker-arch_test.sh
 
+# Guards against a real resource-exhaustion gap found by SRE: the
+# langstream service in docker-compose.yml has `restart: unless-stopped`
+# (recovers from a process-level crash) but no memory/CPU ceiling, so a
+# leak or unbounded metric-cardinality growth in pkg/observability could
+# consume all host memory before the kernel OOM-killer intervenes -- on a
+# shared host, possibly killing an unrelated process instead of this one.
+# See scripts/check-compose-resource-limits.sh's own header comment for
+# the full story.
+check-compose-resource-limits:
+	./scripts/check-compose-resource-limits.sh
+
+# Regression test for check-compose-resource-limits.sh itself, same
+# rationale as test-docker-arch-guard above: a hand-verified-once check
+# with no pinned test could silently regress later.
+test-compose-resource-limits-guard:
+	./scripts/check-compose-resource-limits_test.sh
+
 # What CI runs. Keep this in sync with .github/workflows/ci.yml so
 # `make ci` is a reliable local pre-push check. (CI's docker-build job is
 # informational/parallel, not part of the local pre-push gate here - run
 # `make docker` separately if you want to sanity-check the image too.)
-ci: fmt-check vet test build check-vendor-keys test-vendor-key-guard check-dockerignore test-dockerignore-guard check-docker-arch test-docker-arch-guard
+ci: fmt-check vet test build check-vendor-keys test-vendor-key-guard check-dockerignore test-dockerignore-guard check-docker-arch test-docker-arch-guard check-compose-resource-limits test-compose-resource-limits-guard

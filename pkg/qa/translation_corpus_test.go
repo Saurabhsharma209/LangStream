@@ -1056,6 +1056,78 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 	documentTypeP4 := 1.0 / 5.0
 	wantDocumentTypeMistranslation := math.Exp((math.Log(documentTypeP1) + math.Log(documentTypeP2) + math.Log(documentTypeP3) + math.Log(documentTypeP4)) / 4.0)
 
+	// sibling_kinship_term_mistranslation_brother_sister_family_details_translation:
+	// 10-word Reference "sir your brother's name is given in the
+	// registration form" vs 10-word Candidate "sir your sister's name
+	// is given in the registration form" (sibling-kinship word
+	// "brother's" mistranslated as "sister's"). p1 = 9/10, p2 = 7/9,
+	// p3 = 5/8, p4 = 4/7. BP = 1.0 (equal length, 10 == 10).
+	siblingKinshipP1 := 9.0 / 10.0
+	siblingKinshipP2 := 7.0 / 9.0
+	siblingKinshipP3 := 5.0 / 8.0
+	siblingKinshipP4 := 4.0 / 7.0
+	wantSiblingKinshipMistranslation := math.Exp((math.Log(siblingKinshipP1) + math.Log(siblingKinshipP2) + math.Log(siblingKinshipP3) + math.Log(siblingKinshipP4)) / 4.0)
+
+	// season_name_mistranslation_summer_winter_delivery_delay_translation:
+	// 11-word Reference "sir during the summer season there is a delay
+	// in delivery" vs 11-word Candidate "sir during the winter season
+	// there is a delay in delivery" (season-name word "summer"
+	// mistranslated as "winter"). p1 = 10/11, p2 = 8/10, p3 = 6/9,
+	// p4 = 4/8. BP = 1.0 (equal length, 11 == 11).
+	seasonNameP1 := 10.0 / 11.0
+	seasonNameP2 := 8.0 / 10.0
+	seasonNameP3 := 6.0 / 9.0
+	seasonNameP4 := 4.0 / 8.0
+	wantSeasonNameMistranslation := math.Exp((math.Log(seasonNameP1) + math.Log(seasonNameP2) + math.Log(seasonNameP3) + math.Log(seasonNameP4)) / 4.0)
+
+	// compass_direction_mistranslation_north_south_branch_location_translation:
+	// 9-word Reference "sir our branch is located in the north zone"
+	// vs 9-word Candidate "sir our branch is located in the south
+	// zone" (compass-direction word "north" mistranslated as "south").
+	// p1 = 8/9, p2 = 6/8, p3 = 5/7, p4 = 4/6. BP = 1.0 (equal length,
+	// 9 == 9).
+	compassDirectionP1 := 8.0 / 9.0
+	compassDirectionP2 := 6.0 / 8.0
+	compassDirectionP3 := 5.0 / 7.0
+	compassDirectionP4 := 4.0 / 6.0
+	wantCompassDirectionMistranslation := math.Exp((math.Log(compassDirectionP1) + math.Log(compassDirectionP2) + math.Log(compassDirectionP3) + math.Log(compassDirectionP4)) / 4.0)
+
+	// size_adjective_mistranslation_big_small_parcel_box_translation:
+	// 10-word Reference "sir your parcel has been packed in a big box"
+	// vs 10-word Candidate "sir your parcel has been packed in a small
+	// box" (size-adjective word "big" mistranslated as "small").
+	// p1 = 9/10, p2 = 7/9, p3 = 6/8, p4 = 5/7. BP = 1.0 (equal length,
+	// 10 == 10).
+	sizeAdjectiveP1 := 9.0 / 10.0
+	sizeAdjectiveP2 := 7.0 / 9.0
+	sizeAdjectiveP3 := 6.0 / 8.0
+	sizeAdjectiveP4 := 5.0 / 7.0
+	wantSizeAdjectiveMistranslation := math.Exp((math.Log(sizeAdjectiveP1) + math.Log(sizeAdjectiveP2) + math.Log(sizeAdjectiveP3) + math.Log(sizeAdjectiveP4)) / 4.0)
+
+	// temperature_adjective_mistranslation_hot_cold_water_purifier_query_translation:
+	// 7-word Reference "sir this purifier also supplies hot water" vs
+	// 7-word Candidate "sir this purifier also supplies cold water"
+	// (temperature-adjective word "hot" mistranslated as "cold").
+	// p1 = 6/7, p2 = 4/6, p3 = 3/5, p4 = 2/4. BP = 1.0 (equal length,
+	// 7 == 7).
+	temperatureAdjectiveP1 := 6.0 / 7.0
+	temperatureAdjectiveP2 := 4.0 / 6.0
+	temperatureAdjectiveP3 := 3.0 / 5.0
+	temperatureAdjectiveP4 := 2.0 / 4.0
+	wantTemperatureAdjectiveMistranslation := math.Exp((math.Log(temperatureAdjectiveP1) + math.Log(temperatureAdjectiveP2) + math.Log(temperatureAdjectiveP3) + math.Log(temperatureAdjectiveP4)) / 4.0)
+
+	// floor_level_number_word_mistranslation_first_second_office_visit_translation:
+	// 9-word Reference "sir our office is located on the first floor"
+	// vs 9-word Candidate "sir our office is located on the second
+	// floor" (floor-level-number word "first" mistranslated as
+	// "second"). p1 = 8/9, p2 = 6/8, p3 = 5/7, p4 = 4/6. BP = 1.0
+	// (equal length, 9 == 9).
+	floorLevelP1 := 8.0 / 9.0
+	floorLevelP2 := 6.0 / 8.0
+	floorLevelP3 := 5.0 / 7.0
+	floorLevelP4 := 4.0 / 6.0
+	wantFloorLevelMistranslation := math.Exp((math.Log(floorLevelP1) + math.Log(floorLevelP2) + math.Log(floorLevelP3) + math.Log(floorLevelP4)) / 4.0)
+
 	want := map[string]float64{
 		"perfect_identical_translation":                    wantPerfectIdentical,
 		"one_word_substitution_currency_mismatch":          wantOneWordSubstitution,
@@ -1182,6 +1254,16 @@ func TestFixedTranslationCorpus_PrecomputedBLEUMatches(t *testing.T) {
 		"marital_status_mistranslation_married_unmarried_translation": wantMaritalStatusMistranslation,
 		"urgency_adverb_mistranslation_immediately_later_translation": wantUrgencyAdverbMistranslation,
 		"document_type_mistranslation_aadhar_pan_translation":         wantDocumentTypeMistranslation,
+
+		// Sprint 2026-09-05 (QA) additions -- see FixedTranslationCorpus's
+		// doc comment for the reasoning and hand-computed BLEU behind
+		// each entry.
+		"sibling_kinship_term_mistranslation_brother_sister_family_details_translation":  wantSiblingKinshipMistranslation,
+		"season_name_mistranslation_summer_winter_delivery_delay_translation":            wantSeasonNameMistranslation,
+		"compass_direction_mistranslation_north_south_branch_location_translation":       wantCompassDirectionMistranslation,
+		"size_adjective_mistranslation_big_small_parcel_box_translation":                 wantSizeAdjectiveMistranslation,
+		"temperature_adjective_mistranslation_hot_cold_water_purifier_query_translation": wantTemperatureAdjectiveMistranslation,
+		"floor_level_number_word_mistranslation_first_second_office_visit_translation":   wantFloorLevelMistranslation,
 	}
 
 	entries := FixedTranslationCorpus()

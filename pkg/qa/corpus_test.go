@@ -395,6 +395,15 @@ func TestFixedCorpus_PrecomputedWERMatches(t *testing.T) {
 		"marital_status_substitution_shaadishuda_kunwara_form_update":   1.0 / 9.0,
 		"urgency_adverb_substitution_turant_baadmein_action_request":    1.0 / 8.0,
 		"document_type_substitution_aadhar_pan_verification_request":    1.0 / 8.0,
+
+		// Sprint 2026-09-05 (QA) additions, see FixedCorpus's doc comment
+		// for the reasoning behind each entry's error shape.
+		"sibling_kinship_term_substitution_bhai_behen_family_details":          1.0 / 9.0,
+		"season_name_substitution_garmi_sardi_delivery_delay":                  1.0 / 10.0,
+		"compass_direction_substitution_uttar_dakshin_branch_location":         1.0 / 8.0,
+		"size_adjective_substitution_bada_chota_parcel_box":                    1.0 / 10.0,
+		"temperature_adjective_substitution_garam_thanda_water_purifier_query": 1.0 / 9.0,
+		"floor_level_number_word_substitution_pehla_doosra_office_visit":       1.0 / 8.0,
 	}
 
 	entries := FixedCorpus()

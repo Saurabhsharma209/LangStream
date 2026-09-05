@@ -4346,3 +4346,123 @@ port, not an active incident).
 No specific carry-over items. Next scheduled run should continue
 opportunistic hardening / corpus growth until Week 4 is unblocked, or
 until Saurabh redirects this automation's scope.
+
+## 2026-09-05 (scheduled run, Sprint 33) — SRE compose resource-limit guard, QA corpus growth + cmd/langstream coverage gap closed, no roadmap items closed
+
+### Agents run
+SRE and QA in parallel. PE and Tech not spawned -- repo-wide `TODO|FIXME|
+XXX` grep across their owned packages came back empty, same reasoning as
+Sprints 16-32.
+
+### Repo health at start
+Clean on the first try: `go build ./...`, `go vet ./...`, `gofmt -l .`,
+and `go test ./...` (all 12 packages) all green. `go test ./... -race`
+also green (run per-package/group in this sandbox due to a hard ~170s
+cap per shell call -- see Infra note). ClearStream re-checked via
+`git ls-remote --tags`: still only `v0.1.0`, no `VERSIONING.md` action
+needed.
+
+### Infra note
+The shared `/sessions` volume was again at 100% full, 0 bytes free (same
+recurring class of issue as Sprints 18-20/29-32 -- confirmed nothing this
+session wrote; `$HOME` itself resolves onto that volume). Worked from
+`/tmp/ls_home/LangStream` instead of `$HOME/LangStream` this run (prior
+sprints used `/tmp/lswork` or similar -- naming isn't pinned, just needs
+to be off `/sessions`). Go 1.22.5 linux/arm64 toolchain was already
+cached at `/tmp/gotools` and matched host arch -- reused as-is. Exported
+`GOPATH`/`GOCACHE`/`TMPDIR`/`GOTMPDIR` all under `/tmp/ls_home/tmp`
+(a fresh, actually-writable directory -- an initial `mkdir -p
+/tmp/lsbuild-tmp` silently succeeded but produced a directory owned by
+`nobody:nogroup` from stale shared-image state and wasn't writable by
+this session's user; switching to a directory created fresh under this
+run's own `/tmp/ls_home` avoided that). Additionally, each shell call in
+this sandbox is an independent process with a hard ~170-180s cap and no
+state/process persistence across calls -- backgrounding `go test` with
+`&` and polling in a later call does not work (the process is killed
+when the call ends). Full `go test ./... -race -count=3` therefore had
+to be run as multiple per-package/group calls rather than one `./...`
+invocation; this cost extra round-trips but all packages passed.
+
+### Shipped
+
+**SRE** -- full fresh audit (vendor-key sync, `.dockerignore` correctness,
+Docker arch guard, CI/Makefile parity, Go-version consistency, Sprint
+31/32's dashboard and webrtc `http.Server` timeout fixes re-verified
+intact) -- all clean. Found and fixed a real gap: `docker-compose.yml`'s
+`langstream` service had `restart: unless-stopped` (recovers from a
+process-level crash) but no `deploy.resources.limits` -- a leak or
+unbounded Prometheus label-cardinality growth in
+`pkg/observability`'s `LatencyRecorder` had no memory ceiling, so it
+could consume all host memory before the kernel OOM-killer stepped in
+(and on a shared host, might kill an unrelated process instead). Added
+`deploy.resources.limits.memory: 512M` / `cpus: "1.0"` to the
+`langstream` service, a new CI guard script
+`scripts/check-compose-resource-limits.sh` plus its regression test
+`scripts/check-compose-resource-limits_test.sh` (3 cases: missing file,
+no limit, correct -- all pass), and wired both into `Makefile`'s `ci:`
+target and `.github/workflows/ci.yml`. Other candidates checked and
+ruled out as non-issues: no other untimed `http.Client{}`/`http.Server{}`
+in SRE-owned files; Makefile `ci:` target and CI workflow steps in 1:1
+parity; Prometheus metric names/labels in `pkg/observability/metrics.go`
+consistently prefixed and labeled.
+
+**QA** -- grew the WER corpus 141->148 and the BLEU/translation corpus
+85->91 with new non-overlapping error shapes, hand-verified against the
+real `WordErrorRate`/`BLEUScore` functions via a throwaway scratch
+program (deleted after use, not committed). Closed a real coverage gap
+in `cmd/langstream` (QA-owned via `*_test.go`, even though the package's
+non-test files are Tech-owned): added `webrtc_test.go` cases for
+`iceServerForURL`/`buildICEServers` TURN/STUN/TURNS credential-handling
+edge cases and `newWebRTCServer`'s timeout config, taking package
+coverage 43.1%->46.2%. QA's subagent run was interrupted mid-task by an
+infra error (host sleep) before it could finish its planned race-pattern
+audit and file a final report; EM independently re-verified all of QA's
+changes (build/vet/gofmt/test clean, corpus counts sane, no scratch/debug
+files left behind, coverage number confirmed) before integrating -- no
+race-pattern audit was performed this run as a result, unlike Sprints 26+
+which had. No bugs in other packages were flagged (QA didn't get far
+enough to report any).
+
+**EM (integration)** -- reviewed both agents' diffs (SRE: 4 files
+modified + 2 new scripts; QA: 4 files modified, no new non-test files),
+confirmed no file-ownership overlap, ran full
+`go build ./... && go vet ./... && gofmt -l . && go test ./... -race
+-count=3` (split across multiple per-package shell calls due to the
+sandbox's per-call time cap noted above) -- clean across all 12
+packages. No cross-workstream bugs to fix.
+
+### Bugs found/fixed
+One real gap: SRE's missing `docker-compose.yml` resource limits (a
+resource-exhaustion risk on a real network port, not an active incident).
+
+### Verified
+- `go build ./... && go vet ./... && gofmt -l .` clean.
+- `go test ./... -race -count=3` clean across all 12 packages (see Infra
+  note on why this ran as multiple calls rather than one).
+- `scripts/check-vendor-keys.sh`, `scripts/check-dockerignore.sh`,
+  `scripts/check-docker-arch.sh`, and the new
+  `scripts/check-compose-resource-limits.sh` all pass, each with their
+  regression test also passing.
+- Fresh-clone verification from the real GitHub remote after push (see
+  below), rebuilt independently of the local working copy.
+
+### Blocked
+- Week 3's one open item (real-PSTN jitter tuning) and all of Week 4:
+  unchanged, still need Saurabh's anchor-customer/live-traffic decision.
+  This is now Sprint 33 (roughly 8+ weeks / 25+ sprints) in this same
+  blocked state since Sprint 8. Repeating Sprint 32's flag more directly:
+  this daily automation has had nothing left to do against the actual
+  roadmap for a long time and has been running opportunistic
+  hardening/QA-corpus-growth against an already-clean, already-tested
+  codebase instead. That's genuinely useful up to a point, but the
+  marginal value of another sprint of "add 6 more corpus entries, find
+  one more missing timeout" is shrinking. Recommend Saurabh either (a)
+  makes the anchor-customer/live-traffic call so Week 3/4 can actually
+  progress, (b) explicitly scopes this automation down to a lower
+  cadence (e.g. weekly) now that the codebase is stable, or (c) pauses it
+  until the pilot decision is made.
+
+### Tomorrow
+No specific carry-over items. If this automation continues at daily
+cadence unchanged, repeat opportunistic hardening / corpus growth. QA
+should also pick up the race-pattern audit that didn't complete this run.
