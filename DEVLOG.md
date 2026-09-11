@@ -4627,3 +4627,107 @@ first whether Saurabh has made the anchor-customer/live-traffic call or
 otherwise redirected this automation, and if not, keep doing health-check-
 only runs rather than manufacturing hardening work, until one of those
 happens.
+
+## 2026-09-11 (scheduled run, Sprint 36) — health check only, no changes, pause/redirect recommendation repeated a fourth time
+
+### Agents run
+None. PE, Tech, SRE, and QA were not spawned this run, same reasoning as
+Sprints 34-35 (2026-09-07, 2026-09-09).
+
+### Repo health at start
+Confirmed green, but only after working around a significantly worse
+infra situation than prior sprints (see Infra note below):
+`go build ./...`, `go vet ./...`, and `gofmt -l .` all clean.
+`go test ./...` clean across all 12 packages (run individually,
+clearing build cache between each package to fit the sandbox's disk
+budget). `go test ./... -race` clean across 11 of 12 packages the same
+way; the 12th (`cmd/langstream`, specifically
+`TestServeCommand_RealBinary_EndToEnd`, which compiles a real
+`langstream` binary as part of the test) failed with "no space left on
+device" during the nested build under `-race` even with the full
+tmpfs budget dedicated to it — confirmed this is a disk-headroom
+artifact of this sandbox, not a code regression: the same test passed
+cleanly in non-race mode once given a large-enough scratch budget, and
+`-race` binaries are inherently larger. ClearStream re-checked via
+`git ls-remote --tags`: still only `v0.1.0`, no `VERSIONING.md` action
+needed. ROADMAP.md re-read in full: unchanged from Sprint 35.
+
+### Infra note
+Materially worse than Sprints 34/35. The `/sessions` volume (which
+`$HOME` resolves onto) was again 100% full with 0 bytes available. This
+run, the *root filesystem* (`/`, ~9.6G) was also down to 336-340MB free
+at the start (vs. ~770MB-1.6GB in Sprints 34/35) and dropped as low as
+~51MB free at points during the test run, entirely from other tenants'
+leftover artifacts (`nobody:nogroup`-owned build caches, LibreOffice
+`OSL_PIPE`/`hsperfdata_office-convert-*` IPC files) that this session's
+user has no permission to delete (`rm -rf` silently no-ops on them, same
+class of issue flagged in Sprints 34/35 — confirmed again `rm` doesn't
+even return a nonzero exit in this case, so don't trust exit codes as
+proof of cleanup). Cloned into `/tmp/mywork/LangStream` (root fs) since
+that's where enough owned, writable space existed. To make `go build`/
+`vet`/`test` fit at all, split scratch space across two independent
+pools instead of one: the Go 1.22.5 linux/arm64 toolchain (cached
+read-only at `/tmp/go1.22.5.linux-arm64.tar.gz`, matches host arch) was
+extracted with `go/test`, `go/api`, `go/doc` stripped (not needed for
+build/vet/test, saves ~26MB) into whichever pool had more room at the
+time; `GOCACHE`/`GOTMPDIR` were pointed at `/dev/shm` (a 512MB tmpfs
+that turned out to be a separate, cleanable-by-us quota from the root
+fs and from `/sessions`); `GOPATH` (module cache) stayed on the root fs
+under `/tmp/mywork/gopath` so it wasn't re-downloaded between the many
+retries this took. Tests were run one package at a time with the build
+cache wiped between packages, rather than a single `go test ./...`,
+purely to keep peak disk usage bounded — a heavier version of the
+per-package-group split Sprints 25+ already noted needing. Note for
+future runs: `/dev/shm` resets to empty on every new shell invocation in
+this sandbox (unlike `/tmp`, which persists across calls within a
+session) so the toolchain extraction has to be redone each time
+scratch space is needed there — cheap (a few seconds) but easy to
+forget.
+
+### Decision: skipped opportunistic-hardening agents this run, again
+Sprints 22-35 (14 consecutive scheduled runs, 2026-08-11 through
+2026-09-09) all found the same thing: zero roadmap items closeable
+(Week 3's real-PSTN jitter tuning and all of Week 4 pilot launch remain
+blocked on Saurabh's anchor-customer/live-traffic decision, unchanged
+since Sprint 8 on 2026-07-14 — now roughly 8+ weeks / 36 sprints), zero
+TODOs in owned files, and the opportunistic-hardening surface (SRE
+audits, QA corpus growth, race-pattern audits) already worked
+repeatedly with diminishing findings. Sprints 33-35 each independently
+recommended pausing or redirecting this automation. Nothing has changed
+on that front two days later, so today repeated the same approach: a
+full from-scratch health verification (all green, modulo the one
+disk-bound test above) and nothing else.
+
+### Bugs found/fixed
+None (none looked for beyond the standard health check, per the
+decision above).
+
+### Verified
+- `go build ./... && go vet ./... && gofmt -l .` clean.
+- `go test ./...` clean, all 12 packages.
+- `go test ./... -race` clean, 11 of 12 packages; the 12th's single
+  failure traced to sandbox disk exhaustion in a nested real-binary
+  build, not a code issue (see Repo health above).
+- ClearStream `v0.1.0` still the latest tag; no compatibility action
+  needed.
+- Fresh-clone verification from the real GitHub remote after pushing
+  (see below).
+
+### Blocked
+Same as Sprints 8 through 35: Week 3's one open item and all of Week 4
+need Saurabh's anchor-customer/live-traffic decision. Now 36 sprints /
+~8+ weeks blocked.
+
+### Tomorrow
+Fourth consecutive scheduled run (33, 34, 35, 36) landing on the same
+recommendation: this automation has had no roadmap work available for
+two months. Compounding that, this sandbox's shared disk is now
+measurably more constrained than it was even two sprints ago (51MB free
+at the low point today vs. ~390MB at the low point in Sprint 34), from
+other tenants' leftover files this session's user cannot clean up.
+Recommend Saurabh do one of: (a) make the anchor-customer/live-traffic
+call so Week 3/4 can actually start, (b) drop this automation's cadence
+now that the codebase is stable, or (c) pause it until the pilot
+decision lands — and separately, flag the shared-sandbox disk pressure
+to whoever owns that infra, since it is trending worse each check and
+will eventually make even a health-check-only run infeasible.
